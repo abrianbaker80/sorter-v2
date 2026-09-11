@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+websockets
+pyright
+pydantic-to-typescript==2.0.0
+requests
+requests-oauthlib
+pillow
+numpy
+opencv-python
+pyserial
+simple-term-menu

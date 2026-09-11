@@ -1,0 +1,16 @@
+{
+  "set_number": "21369",
+  "namespace": {
+    "part": "bricklink_item_number",
+    "color": "bricklink_color_id"
+  },
+  "items": [
+    {
+      "part_id": "3001",
+      "color_id": "2",
+      "quantity": 3,
+      "item_type": "P",
+      "sortable": true
+    }
+  ]
+}

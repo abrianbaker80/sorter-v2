@@ -1,0 +1,186 @@
+import type {
+	HiveTargetLibrary,
+	PendingProfileApply,
+	SortingProfileDetail,
+	SortingProfileLibraryResponse,
+	SortingProfileSummary
+} from './types';
+
+type JsonError = { detail?: string };
+
+async function unwrap<T>(res: Response): Promise<T> {
+	if (!res.ok) {
+		const body = (await res.json().catch(() => null)) as JsonError | null;
+		throw new Error(body?.detail ?? `HTTP ${res.status}`);
+	}
+	return (await res.json()) as T;
+}
+
+export async function fetchLibrary(baseUrl: string): Promise<SortingProfileLibraryResponse> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/library`);
+	return unwrap<SortingProfileLibraryResponse>(res);
+}
+
+// Fast tier: local profiles + active sync state + target metadata (no Hive
+// network). Targets come back with empty `profiles` — fill them via
+// fetchTargetLibrary per target.
+export async function fetchLocalLibrary(baseUrl: string): Promise<SortingProfileLibraryResponse> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/local`);
+	return unwrap<SortingProfileLibraryResponse>(res);
+}
+
+// Hive tier: one target's profile summaries + assignment. Call per target in
+// parallel so a slow target doesn't block the rest.
+export async function fetchTargetLibrary(
+	baseUrl: string,
+	targetId: string
+): Promise<HiveTargetLibrary> {
+	const res = await fetch(
+		`${baseUrl}/api/sorting-profiles/targets/${encodeURIComponent(targetId)}/library`
+	);
+	return unwrap<HiveTargetLibrary>(res);
+}
+
+// Lazy per-card metadata (name + counts) for a local profile. The fast /local
+// endpoint omits these to avoid parsing the multi-MB file; fetch them per card.
+export type LocalProfileMeta = {
+	filename: string;
+	name?: string | null;
+	description?: string | null;
+	profile_type?: string | null;
+	rule_count?: number | null;
+	category_count?: number | null;
+	part_count?: number | null;
+	artifact_hash?: string | null;
+	error?: string | null;
+};
+
+export async function fetchLocalProfileMeta(
+	baseUrl: string,
+	filename: string
+): Promise<LocalProfileMeta> {
+	const res = await fetch(
+		`${baseUrl}/api/sorting-profiles/local/${encodeURIComponent(filename)}/meta`
+	);
+	return unwrap<LocalProfileMeta>(res);
+}
+
+export async function fetchProfileDetail(
+	baseUrl: string,
+	targetId: string,
+	profileId: string,
+	versionId?: string | null
+): Promise<SortingProfileDetail> {
+	const url = new URL(
+		`${baseUrl}/api/sorting-profiles/targets/${encodeURIComponent(targetId)}/profiles/${encodeURIComponent(profileId)}`
+	);
+	if (versionId) url.searchParams.set('version_id', versionId);
+	const res = await fetch(url.toString());
+	return unwrap<SortingProfileDetail>(res);
+}
+
+export type ApplyProfileResponse = {
+	activation_error?: string | null;
+	[key: string]: unknown;
+};
+
+export async function applyProfile(
+	baseUrl: string,
+	request: PendingProfileApply
+): Promise<ApplyProfileResponse> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/apply`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			target_id: request.target_id,
+			profile_id: request.profile_id,
+			profile_name: request.profile_name,
+			version_id: request.version_id,
+			version_number: request.version_number,
+			version_label: request.version_label,
+			reset_bin_categories: true
+		})
+	});
+	return unwrap<ApplyProfileResponse>(res);
+}
+
+export async function applyLocalProfile(
+	baseUrl: string,
+	filename: string,
+	mode: 'empty' | 'rules'
+): Promise<ApplyProfileResponse> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/local/apply`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ filename, preassign_mode: mode })
+	});
+	return unwrap<ApplyProfileResponse>(res);
+}
+
+export async function uploadLocalProfile(
+	baseUrl: string,
+	artifact: unknown,
+	name?: string | null
+): Promise<void> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/local/upload`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ artifact, name: name ?? null })
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => null)) as JsonError | null;
+		throw new Error(body?.detail ?? `HTTP ${res.status}`);
+	}
+}
+
+export async function deleteLocalProfile(baseUrl: string, filename: string): Promise<void> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/local/${encodeURIComponent(filename)}`, {
+		method: 'DELETE'
+	});
+	if (!res.ok) {
+		const body = (await res.json().catch(() => null)) as JsonError | null;
+		throw new Error(body?.detail ?? `HTTP ${res.status}`);
+	}
+}
+
+export async function reloadRuntimeProfile(baseUrl: string): Promise<void> {
+	const res = await fetch(`${baseUrl}/api/sorting-profiles/reload`, { method: 'POST' });
+	if (!res.ok) {
+		const body = (await res.json().catch(() => null)) as JsonError | null;
+		throw new Error(body?.detail ?? `HTTP ${res.status}`);
+	}
+}
+
+// ─── Pure helpers (no I/O) ─────────────────────────────────────────────────
+
+import type { SortingProfileVersionSummary } from './types';
+
+export function visibleVersions(detail: SortingProfileDetail): SortingProfileVersionSummary[] {
+	return detail.is_owner ? detail.versions : detail.versions.filter((v) => v.is_published);
+}
+
+export function displayVersion(
+	profile: SortingProfileSummary
+): SortingProfileVersionSummary | null {
+	return profile.latest_published_version ?? profile.latest_version;
+}
+
+export function targetWebUrl(target: HiveTargetLibrary): string | null {
+	if (!target.url) return null;
+	try {
+		const url = new URL(target.url);
+		if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+			url.pathname = url.pathname.replace(/^\/api(?=\/|$)/, '') || '/';
+		}
+		if ((url.hostname === 'localhost' || url.hostname === '127.0.0.1') && url.port === '8001') {
+			url.port = '5174';
+		}
+		return url.toString();
+	} catch {
+		return target.url;
+	}
+}
+
+export function sourceLabel(target: HiveTargetLibrary): string {
+	return target.name || target.url || 'Unknown source';
+}

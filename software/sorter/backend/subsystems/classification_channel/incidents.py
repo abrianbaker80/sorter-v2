@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from defs.known_object import ClassificationStatus
+
+CLASSIFICATION_UNRESOLVED_INCIDENT_KIND = "classification_unresolved"
+CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND = "classification_multi_drop_collision"
+CLASSIFICATION_INTAKE_TIMEOUT_INCIDENT_KIND = "classification_intake_request_timeout"
+CLASSIFICATION_TRACK_LOST_INCIDENT_KIND = "classification_track_lost"
+# The C4 stall watchdog shares the operator-facing "exit_stuck" kind (there is
+# no separate "C4 piece stuck" incident); source_kind identifies the watchdog
+# so its incidents are never confused with the legacy exit-release publishers.
+C4_EXIT_STUCK_INCIDENT_KIND = "exit_stuck"
+C4_STALL_WATCHDOG_SOURCE_KIND = "c4_stall_watchdog"
+
+
+def classification_fallback_incident_kind(
+    status: ClassificationStatus,
+) -> str:
+    if status == ClassificationStatus.multi_drop_fail:
+        return CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND
+    return CLASSIFICATION_UNRESOLVED_INCIDENT_KIND
+
+
+def publish_classification_fallback_incident(
+    gc: Any,
+    *,
+    piece: Any,
+    status: ClassificationStatus,
+    reason: str,
+) -> bool:
+    kind = classification_fallback_incident_kind(status)
+    if _incident_handling_off(kind):
+        return False
+
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
+        return False
+
+    active = None
+    if hasattr(runtime_stats, "activeIncident"):
+        try:
+            active = runtime_stats.activeIncident()
+        except Exception:
+            active = None
+    piece_uuid = str(getattr(piece, "uuid", "") or "")
+    if isinstance(active, dict):
+        return active.get("kind") == kind and active.get("piece_uuid") == piece_uuid
+
+    status_value = getattr(status, "value", str(status))
+    tracked_global_id = getattr(piece, "tracked_global_id", None)
+    center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
+    exit_offset_deg = getattr(piece, "classification_channel_exit_offset_deg", None)
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "severity": (
+            "critical"
+            if kind == CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND
+            else "warning"
+        ),
+        "status": "waiting_for_operator",
+        "awaiting_operator": True,
+        "scope": "classification",
+        "channel": "c4",
+        "role": "classification_channel",
+        "channel_label": "C4",
+        "piece_uuid": piece_uuid,
+        "piece_short": piece_uuid[:8],
+        "classification_status": status_value,
+        "reason": str(reason),
+        "triggered_at": time.time(),
+        "rule": (
+            "multiple_pieces_at_classification_drop"
+            if kind == CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND
+            else "classification_fell_back_before_drop"
+        ),
+        "resolution": "operator_review_classification_fallback_then_clear",
+    }
+    if isinstance(tracked_global_id, int):
+        payload["tracked_global_id"] = int(tracked_global_id)
+        payload["track_id"] = int(tracked_global_id)
+    if isinstance(center_deg, (int, float)):
+        payload["center_deg"] = float(center_deg)
+    if isinstance(exit_offset_deg, (int, float)):
+        payload["exit_offset_deg"] = float(exit_offset_deg)
+    if kind == CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND:
+        payload["operator_message"] = (
+            "Multiple pieces reached the C4 drop area together. Inspect before continuing."
+        )
+    else:
+        payload["operator_message"] = (
+            "Classification fell back before the drop. Review if this repeats."
+        )
+
+    runtime_stats.setActiveIncident(payload)
+    return True
+
+
+def publish_classification_intake_timeout_incident(
+    gc: Any,
+    *,
+    elapsed_s: float,
+) -> bool:
+    kind = CLASSIFICATION_INTAKE_TIMEOUT_INCIDENT_KIND
+    if _incident_handling_off(kind):
+        return False
+
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
+        return False
+
+    active = None
+    if hasattr(runtime_stats, "activeIncident"):
+        try:
+            active = runtime_stats.activeIncident()
+        except Exception:
+            active = None
+    if isinstance(active, dict):
+        return active.get("kind") == kind
+
+    runtime_stats.setActiveIncident(
+        {
+            "kind": kind,
+            "severity": "warning",
+            "status": "waiting_for_operator",
+            "awaiting_operator": True,
+            "scope": "classification",
+            "channel": "c4",
+            "role": "classification_channel",
+            "channel_label": "C4",
+            "triggered_at": time.time(),
+            "timeout_ms": int(max(0.0, float(elapsed_s)) * 1000.0),
+            "rule": "c4_requested_piece_but_no_intake_track_arrived",
+            "resolution": "operator_check_c3_to_c4_handoff_then_clear",
+            "operator_message": (
+                "C4 requested a piece from C3, but no intake track arrived before the timeout."
+            ),
+        }
+    )
+    return True
+
+
+def publish_classification_track_lost_incident(
+    gc: Any,
+    *,
+    piece: Any,
+    reason: str,
+) -> bool:
+    kind = CLASSIFICATION_TRACK_LOST_INCIDENT_KIND
+    if _incident_handling_off(kind):
+        return False
+
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
+        return False
+
+    active = None
+    if hasattr(runtime_stats, "activeIncident"):
+        try:
+            active = runtime_stats.activeIncident()
+        except Exception:
+            active = None
+    piece_uuid = str(getattr(piece, "uuid", "") or "")
+    if isinstance(active, dict):
+        return active.get("kind") == kind and active.get("piece_uuid") == piece_uuid
+
+    status = getattr(getattr(piece, "classification_status", None), "value", None)
+    tracked_global_id = getattr(piece, "tracked_global_id", None)
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "severity": "warning",
+        "status": "waiting_for_operator",
+        "awaiting_operator": True,
+        "scope": "classification",
+        "channel": "c4",
+        "role": "classification_channel",
+        "channel_label": "C4",
+        "piece_uuid": piece_uuid,
+        "piece_short": piece_uuid[:8],
+        "classification_status": str(status or ""),
+        "reason": str(reason),
+        "triggered_at": time.time(),
+        "rule": "meaningful_c4_track_expired_from_stale_zone",
+        "resolution": "operator_check_c4_tracking_or_clear_if_expected",
+        "operator_message": (
+            "A C4 track with captured evidence expired before the normal drop flow completed."
+        ),
+    }
+    if isinstance(tracked_global_id, int):
+        payload["tracked_global_id"] = int(tracked_global_id)
+        payload["track_id"] = int(tracked_global_id)
+    runtime_stats.setActiveIncident(payload)
+    return True
+
+
+def record_classification_track_lost_auto_resolved(
+    gc: Any,
+    *,
+    piece: Any,
+    reason: str,
+    moved_deg: float,
+    multi_piece: bool,
+) -> None:
+    """Persist a recovered C4 loss without occupying the active-incident slot."""
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "recordAutoResolvedIncident"):
+        return
+
+    now = time.time()
+    piece_uuid = str(getattr(piece, "uuid", "") or "")
+    status = getattr(getattr(piece, "classification_status", None), "value", None)
+    runtime_stats.recordAutoResolvedIncident(
+        {
+            "kind": CLASSIFICATION_TRACK_LOST_INCIDENT_KIND,
+            "source_kind": "c4_discharge_auto_reject",
+            "source": "classification_channel",
+            "severity": "warning",
+            "status": "auto_resolved",
+            "awaiting_operator": False,
+            "scope": "classification",
+            "channel": "c4",
+            "role": "classification_channel",
+            "channel_label": "C4",
+            "piece_uuid": piece_uuid,
+            "piece_short": piece_uuid[:8],
+            "classification_status": str(status or ""),
+            "reason": str(reason),
+            "multi_piece": bool(multi_piece),
+            "auto_clear_moved_deg": float(moved_deg),
+            "triggered_at": now,
+            "resolved_at": now,
+            "rule": "c4_discharge_evidence_lost",
+            "resolution": "auto_rejected_to_bottom_bin_after_c4_clear",
+            "operator_message": (
+                "C4 could not safely complete the normal drop, so the machine "
+                "opened the bottom reject path, cleared C4, and resumed automatically."
+            ),
+        },
+        resolved_by="auto",
+    )
+
+
+def c4_stall_incident_active(gc: Any) -> bool:
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "activeIncident"):
+        return False
+    try:
+        active = runtime_stats.activeIncident()
+    except Exception:
+        return False
+    return (
+        isinstance(active, dict)
+        and active.get("kind") == C4_EXIT_STUCK_INCIDENT_KIND
+        and active.get("source_kind") == C4_STALL_WATCHDOG_SOURCE_KIND
+    )
+
+
+def publish_c4_exit_stuck_incident(
+    gc: Any,
+    *,
+    stalled_ms: float,
+    stalled_state: str,
+    auto_clear_failed: bool = False,
+    auto_clear_moved_deg: float = 0.0,
+) -> bool:
+    """Stall-watchdog incident: the C4 flow made NO progress (no state/phase
+    change, no track-id change, no substantial piece movement) for the watchdog
+    window while perception still reads a piece on the channel. Auto-clears when
+    perception sees the channel clear. Never stomps a different active incident
+    (single slot)."""
+    kind = C4_EXIT_STUCK_INCIDENT_KIND
+    if _incident_handling_off(kind):
+        return False
+
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
+        return False
+
+    active = None
+    if hasattr(runtime_stats, "activeIncident"):
+        try:
+            active = runtime_stats.activeIncident()
+        except Exception:
+            active = None
+    if isinstance(active, dict):
+        return (
+            active.get("kind") == kind
+            and active.get("source_kind") == C4_STALL_WATCHDOG_SOURCE_KIND
+        )
+
+    if auto_clear_failed:
+        operator_message = (
+            "The classification channel stalled with a piece on it and rotating "
+            f"forward {auto_clear_moved_deg:.0f}° did not clear it. Remove the piece "
+            "(or clear the jam) to continue."
+        )
+    else:
+        operator_message = (
+            "The classification channel stopped making progress with a piece still "
+            "on it. Remove the piece (or clear the jam) to continue."
+        )
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "source_kind": C4_STALL_WATCHDOG_SOURCE_KIND,
+        "source": "stall_watchdog",
+        "severity": "critical",
+        "status": "waiting_for_operator",
+        "awaiting_operator": True,
+        "scope": "classification",
+        "channel": "c4",
+        "role": "classification_channel",
+        "channel_label": "C4",
+        "stalled_ms": float(stalled_ms),
+        "stalled_state": str(stalled_state),
+        "auto_clear_failed": bool(auto_clear_failed),
+        "triggered_at": time.time(),
+        "rule": "c4_no_progress_with_piece_on_channel",
+        "resolution": "operator_clear_stuck_c4_piece_then_auto_resumes",
+        "operator_message": operator_message,
+    }
+    if auto_clear_failed:
+        payload["auto_clear_moved_deg"] = float(auto_clear_moved_deg)
+    runtime_stats.setActiveIncident(payload)
+    return True
+
+
+def record_c4_exit_stuck_auto_resolved(
+    gc: Any,
+    *,
+    stalled_ms: float,
+    stalled_state: str,
+    moved_deg: float,
+) -> None:
+    """Log a C4 stall that the automatic watchdog cleared on its own — it rotated
+    the channel forward until perception saw it empty, so it never escalated to
+    an operator-facing hold. Recorded as a resolved incident (never occupies the
+    active slot) so the durable log and the dashboard still reflect that it
+    happened and how it was cleared. Only reached in automatic mode after a
+    successful clear, so there is no off-mode gate here."""
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is None or not hasattr(runtime_stats, "recordAutoResolvedIncident"):
+        return
+    now = time.time()
+    runtime_stats.recordAutoResolvedIncident(
+        {
+            "kind": C4_EXIT_STUCK_INCIDENT_KIND,
+            "source_kind": C4_STALL_WATCHDOG_SOURCE_KIND,
+            "source": "stall_watchdog",
+            "severity": "critical",
+            "status": "auto_resolved",
+            "awaiting_operator": False,
+            "scope": "classification",
+            "channel": "c4",
+            "role": "classification_channel",
+            "channel_label": "C4",
+            "stalled_ms": float(stalled_ms),
+            "stalled_state": str(stalled_state),
+            "auto_clear_failed": False,
+            "auto_clear_moved_deg": float(moved_deg),
+            "triggered_at": now - max(0.0, float(stalled_ms)) / 1000.0,
+            "resolved_at": now,
+            "rule": "c4_no_progress_with_piece_on_channel",
+            "resolution": "auto_cleared_by_advancing_channel",
+            "operator_message": (
+                "The classification channel stalled with a piece on it; the machine "
+                f"rotated it forward {moved_deg:.0f}° to clear it and resumed on its own."
+            ),
+        },
+        resolved_by="auto",
+    )
+
+
+def clear_c4_exit_stuck_incident(gc: Any) -> None:
+    if not c4_stall_incident_active(gc):
+        return
+    runtime_stats = getattr(gc, "runtime_stats", None)
+    if runtime_stats is not None and hasattr(runtime_stats, "clearActiveIncident"):
+        try:
+            runtime_stats.clearActiveIncident(kind=C4_EXIT_STUCK_INCIDENT_KIND)
+        except Exception:
+            pass
+
+
+def _incident_handling_off(kind: str) -> bool:
+    try:
+        from toml_config import incidentHandlingOff
+
+        return bool(incidentHandlingOff(kind))
+    except Exception:
+        return False

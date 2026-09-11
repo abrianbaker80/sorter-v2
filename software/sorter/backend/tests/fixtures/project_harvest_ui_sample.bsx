@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE BrickStoreXML>
+<BrickStoreXML>
+  <Inventory>
+    <Item>
+      <ItemID>3001</ItemID>
+      <ItemTypeID>P</ItemTypeID>
+      <ColorID>2</ColorID>
+      <Qty>1</Qty>
+      <Condition>N</Condition>
+      <Remarks>Bag 1</Remarks>
+    </Item>
+    <Item>
+      <ItemID>3001</ItemID>
+      <ItemTypeID>P</ItemTypeID>
+      <ColorID>2</ColorID>
+      <Qty>2</Qty>
+      <Condition>N</Condition>
+      <Remarks>Bag 2</Remarks>
+    </Item>
+  </Inventory>
+</BrickStoreXML>

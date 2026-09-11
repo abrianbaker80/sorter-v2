@@ -1,0 +1,398 @@
+"""Low-level communication protocol implementation for the MCU bus.
+
+The MCUBus class provides methods for sending commands to devices on the bus and receiving their responses,
+using a custom binary protocol with COBS (Consistent Overhead Byte Stuffing) framing and CRC32 for message
+integrity checking.
+
+The Message format is as follows:
+
+- Header (4 bytes):
+    - Address (1 byte): The device address (0-255)
+    - Command (1 byte): The command code (0-255)
+    - Channel (1 byte): The channel number (0-255)
+    - Payload Length (1 byte): The length of the payload in bytes (0-246
+- Payload (0-246 bytes): The command payload
+- CRC (4 bytes): A CRC32 checksum of the header and payload for error detection
+
+Followed by one or more 0x00 bytes as a message terminator. The total message size (including header,
+payload and CRC) must not exceed 254 bytes. All numbers are encoded in little-endian format.
+
+This interface implementation works both for MCUs directly attached through USB (they will always have
+address 0) and for devices connected through a multi-drop bus like RS-485, where each device has a unique
+address.
+
+The MCUDevice class is intended to be subclassed for specific device types, providing higher-level methods for commands
+specific to that device, while the MCUBus class handles the low-level communication details and access to the
+(potentially shared) communication bus.
+"""
+
+# Copyright (c) 2020-2026 Jose I. Romero
+#
+# Licensed under the MIT License. See LICENSE file in the project root for full license information.
+
+import json
+import logging
+import os
+from . import cobs
+import serial
+
+import struct
+import time
+from zlib import crc32
+from dataclasses import dataclass
+from threading import Lock
+
+# Set SORTER_PROFILE_BUS=1 to log how long each bus round-trip blocks the
+# caller. Every send_command takes the bus lock, writes, then blocks on
+# read_until waiting for the MCU reply — there is no queue or worker thread, so
+# the time spent here is time the calling thread (e.g. the coordinator loop) is
+# stalled. SORTER_PROFILE_BUS_MIN_MS suppresses noise from fast commands.
+_PROFILE_BUS = os.environ.get("SORTER_PROFILE_BUS") == "1"
+_PROFILE_BUS_MIN_MS = float(os.environ.get("SORTER_PROFILE_BUS_MIN_MS", "20"))
+
+
+MAX_PAYLOAD_SIZE = (
+    254 - 8
+)  # Max total message size is 254, header is 4 bytes, CRC is 4 bytes
+
+
+@dataclass
+class MessageHeader:
+    address: int
+    command: int
+    channel: int
+    payload_length: int
+
+
+@dataclass
+class Message:
+    dev_address: int
+    command: int
+    channel: int
+    payload: bytes
+
+
+class BaseCommandCode:
+    INIT = 0x00
+    PING = 0x01
+    REBOOT_BOOTLOADER = 0x02
+    GET_OBSERVABILITY = 0x03
+    GET_VERSION = 0x04
+
+
+class MCUBusError(Exception):
+    """Base exception class for errors related to the MCUBus communication."""
+
+    pass
+
+
+class MCUBus:
+    """Class for communicating with the MCU over a serial bus using a custom protocol."""
+
+    def __init__(self, port: str, baudrate: int = 576000, timeout: float = 0.1):
+        """Initialize the MCUBus with the given serial port parameters.
+
+        Args:
+            port: The serial port to use (e.g. "/dev/ttyUSB0")
+            baudrate: The baud rate for the serial communication (default 576000)
+            timeout: The read timeout in seconds (default 0.01s = 10ms)
+        """
+
+        self._serial = serial.Serial(port, baudrate=baudrate, timeout=timeout)
+        self._lock = Lock()
+        self._port = port
+
+    @property
+    def port(self) -> str:
+        return self._port
+
+    @property
+    def is_open(self) -> bool:
+        return bool(self._serial.is_open)
+
+    def close(self) -> None:
+        # Releases the tty fd so an external actor (e.g. the firmware flasher
+        # waiting for the Pico to re-enumerate) sees a clean device. Safe to
+        # call twice. Any in-flight send_command finishes first via the lock.
+        with self._lock:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+
+    def _read_response_frame(self, max_size: int = 254) -> bytearray:
+        """Read one COBS frame without discarding a split USB response.
+
+        ``pyserial.read_until`` applies the port timeout to the whole call. On a
+        busy host, a CDC response can therefore arrive in two scheduler-sized
+        chunks and the first call returns valid partial bytes just before the
+        terminator arrives. Give an already-started frame three additional read
+        windows; an entirely silent device still times out after the first one.
+        """
+        response = bytearray()
+        for _ in range(4):
+            chunk = self._serial.read_until(b"\x00", max_size - len(response))
+            if chunk:
+                response.extend(chunk)
+                if response[-1] == 0 or len(response) >= max_size:
+                    break
+            elif not response:
+                break
+        return response
+
+    def send_command_no_response(
+        self, address: int, command: int, channel: int, payload: bytes = b""
+    ) -> None:
+        # For commands after which the MCU cannot reply (e.g. REBOOT_BOOTLOADER
+        # 0x02 — the chip resets into the UF2 bootloader immediately). A normal
+        # send_command would burn its timeout waiting for a response that will
+        # never come, then raise.
+        message = (
+            struct.pack("<BBBB", address, command, channel, len(payload)) + payload
+        )
+        message += struct.pack("<I", crc32(message))
+        encoded_message = cobs.encode(message) + b"\x00"
+        with self._lock:
+            self._serial.reset_input_buffer()
+            self._serial.write(encoded_message)
+            self._serial.flush()
+
+    def send_command(
+        self,
+        address: int,
+        command: int,
+        channel: int,
+        payload: bytes,
+        *,
+        retries: int = 2,
+    ) -> Message:
+        """Send a command to the MCU and return the response from it.
+
+        Args:
+            address: The device address (0-255)
+            command: The command code (0-255)
+            channel: The channel number (0-255)
+            payload: The command payload (0-246 bytes)
+            retries: Extra attempts on transient framing/CRC errors before
+                giving up (default 2 → 3 attempts total). Pass 0 for paths
+                where a missing device is expected (e.g. bus discovery).
+
+        Returns:
+            A Message object containing the response from the MCU.
+
+        Raises:
+            ValueError: If any of the input parameters are out of range or if the payload is too large.
+            MCUBusError: If there is a communication error, CRC check failure, or if the response indicates an error.
+        """
+        payload_length = len(payload)
+        # Validate inputs
+        if payload_length > MAX_PAYLOAD_SIZE:
+            raise ValueError(
+                f"Payload too large: {payload_length} bytes (max {MAX_PAYLOAD_SIZE})"
+            )
+        if address < 0 or address > 255:
+            raise ValueError(f"Address must be 0-255, got {address}")
+        if command < 0 or command > 255:
+            raise ValueError(f"Command must be 0-255, got {command}")
+        if channel < 0 or channel > 255:
+            raise ValueError(f"Channel must be 0-255, got {channel}")
+        # Construct message
+        message = (
+            struct.pack("<BBBB", address, command, channel, payload_length) + payload
+        )
+        # Append CRC
+        crc = crc32(message)
+        message += struct.pack("<I", crc)
+        logging.debug(
+            f"Raw message: {message[:-4].hex(b' ', 1)}, CRC: {crc32(message[:-4]):08X}, Length: {len(message)-4}"
+        )
+        encoded_message = cobs.encode(message) + b"\x00"
+        logging.debug(f"Sending: {encoded_message.hex(b' ', 1)}")
+
+        # Transient framing/CRC errors (USB-serial hiccup, EMI from steppers,
+        # MCU arbitration) used to crash the entire backend. Retry the whole
+        # send+read cycle a few times before propagating so a single dropped
+        # byte doesn't take the runtime down. The lock spans each attempt so
+        # parallel callers can't interleave half-frames on the wire.
+        attempts = max(1, retries + 1)
+        last_exc: MCUBusError | None = None
+        for attempt in range(attempts):
+            try:
+                with self._lock:
+                    # Resync before writing; flush any stale bytes left by a
+                    # previous partial response so the next read starts clean.
+                    self._serial.reset_input_buffer()
+                    self._serial.write(encoded_message)
+                    resp_buf = self._read_response_frame()
+                if not resp_buf:
+                    raise MCUBusError("Timeout waiting for response terminator (0x00)")
+                if resp_buf[-1] != 0:
+                    if len(resp_buf) >= 254:
+                        raise MCUBusError("Response exceeded max frame size before terminator")
+                    raise MCUBusError(
+                        f"Partial response (missing terminator), got {len(resp_buf)} bytes"
+                    )
+
+                logging.debug(f"Received: {resp_buf.hex(b' ', 1)}")
+                decoded_resp = cobs.decode(resp_buf[:-1])  # Exclude terminator
+
+                if crc32(decoded_resp[:-4]) != struct.unpack("<I", decoded_resp[-4:])[0]:
+                    raise MCUBusError("CRC check failed")
+
+                response_header = MessageHeader(*struct.unpack("<BBBB", decoded_resp[:4]))
+                message = Message(
+                    dev_address=response_header.address,
+                    command=response_header.command,
+                    channel=response_header.channel,
+                    payload=bytes(decoded_resp[4:-4][: response_header.payload_length]),
+                )
+
+                if response_header.payload_length != len(message.payload):
+                    raise MCUBusError(
+                        f"Payload length mismatch: expected {response_header.payload_length}, got {len(message.payload)}"
+                    )
+
+                if message.dev_address != address:
+                    raise MCUBusError(
+                        f"Response address mismatch: expected {address}, got {message.dev_address}"
+                    )
+
+                if message.command & 0x80:
+                    # Application-level NACK from MCU: not a transient framing
+                    # glitch, no retry will rescue it. Raise out of the loop.
+                    raise MCUBusError(
+                        f"Error response received, command: {message.command:#04x}, payload: {message.payload}"
+                    ) from None
+
+                return message
+            except MCUBusError as exc:
+                last_exc = exc
+                if "Error response received" in str(exc):
+                    # MCU-side NACK: don't retry, surface immediately.
+                    raise
+                if attempt + 1 < attempts:
+                    logging.warning(
+                        "MCU bus transient error (attempt %d/%d) addr=%d cmd=%#04x ch=%d: %s",
+                        attempt + 1,
+                        attempts,
+                        address,
+                        command,
+                        channel,
+                        exc,
+                    )
+                    # Short backoff lets the bus settle and any stale bytes
+                    # drain past the next reset_input_buffer.
+                    time.sleep(0.005 * (attempt + 1))
+                    continue
+                raise
+        # Loop must exit via return or raise — defensive fallthrough
+        raise last_exc if last_exc is not None else MCUBusError("send_command exhausted retries with no error")
+
+    @classmethod
+    def enumerate_buses(cls, vid=0x2E8A, pid=0x000A) -> list[str]:
+        """Enumerate available serial ports that could be used for the MCU bus. Filtered by VID and PID
+
+        Args:
+            vid: The USB Vendor ID to filter by (default 0x2e8a, Raspberry Pi Foundation)
+            pid: The USB Product ID to filter by (default 0x000a, Pico SDK CDC UART)
+
+        Returns:
+            A list of serial port names (e.g. ["/dev/ttyUSB0", "/dev/ttyUSB1"])
+        """
+        import serial.tools.list_ports
+
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports if port.vid == vid and port.pid == pid]
+
+    def scan_devices(self, min_address=0, max_address=15) -> list[int]:
+        """Scan the bus for devices by sending a ping command to each address in the specified range.
+
+        Note: this process can take a long time since it waits for a timeout for each address that doesn't respond.
+        The default range is 0-15 since we expect only a few devices on the bus, but this can be adjusted as needed.
+
+        Args:
+            min_address: The minimum device address to scan (default 0)
+            max_address: The maximum device address to scan (default 15)
+
+        Returns:
+            A list of device addresses that responded to the ping command.
+        """
+        found_devices = []
+        for addr in range(min_address, max_address + 1):
+            try:
+                self.send_command(addr, BaseCommandCode.PING, 0, b"", retries=0)
+                found_devices.append(addr)
+                logging.debug(f"Device found at address {addr}")
+            except Exception as e:
+                logging.debug(f"No response from address {addr}: {e}")
+                pass
+        return found_devices
+
+
+class MCUDevice:
+    """Higher-level abstraction for a device on the MCU bus, providing methods for common commands."""
+
+    def __init__(self, bus: MCUBus, address: int):
+        self._bus = bus
+        self._address = address
+
+    def send_command(self, command: int, channel: int, payload: bytes) -> Message:
+        """Send a command to this device and return the response.
+
+        This is a synchronous request/response round-trip — there is no queue
+        or worker thread. The calling thread blocks here until the MCU replies
+        (or the serial read times out). Set SORTER_PROFILE_BUS=1 to log how long
+        each call blocks the caller.
+        """
+        if not _PROFILE_BUS:
+            return self._bus.send_command(self._address, command, channel, payload)
+        started = time.perf_counter()
+        try:
+            return self._bus.send_command(self._address, command, channel, payload)
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if elapsed_ms >= _PROFILE_BUS_MIN_MS:
+                logging.warning(
+                    "MCU bus blocked caller %.1fms (addr=%d cmd=%#04x ch=%d)",
+                    elapsed_ms, self._address, command, channel,
+                )
+
+    def ping(self, payload: bytes = b"") -> bytes:
+        """Send a ping command and return the device's echoed payload bytes.
+
+        A successful response implies the device is responsive; the returned value
+        is the raw bytes payload echoed by the device.
+        """
+        return self.send_command(BaseCommandCode.PING, 0, payload).payload
+    
+    def detect(self) -> dict:
+        """Send an init command to the device to check if it's responsive and properly initialized."""
+        res = self.send_command(BaseCommandCode.INIT, 0, b"") # Returns a JSON string with device info if successful
+        info_str = res.payload.decode("utf-8")
+        return json.loads(info_str)
+
+    def get_version(self) -> dict:
+        res = self.send_command(BaseCommandCode.GET_VERSION, 0, b"")
+        info_str = res.payload.decode("utf-8")
+        return json.loads(info_str)
+
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+    print("Enumerating buses...")
+    buses = MCUBus.enumerate_buses()
+    print(f"Available buses: {buses}")
+    if not buses:
+        print("No buses found, exiting.")
+    else:
+        print(f"Testing bus on port {buses[0]}...")
+        bus = MCUBus(port=buses[0])
+        devices = bus.scan_devices()
+        print(f"Devices found: {devices}")
+        if devices:
+            device = MCUDevice(bus, devices[0])
+            response = device.ping(b"Hello")
+            print(f"Ping response: {response}")
+            info = device.detect()
+            print(f"Device info: {info}")

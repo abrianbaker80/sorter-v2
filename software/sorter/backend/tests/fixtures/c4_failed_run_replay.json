@@ -1,0 +1,31 @@
+{
+  "source_trace": "control-a71f871b-live2.jsonl",
+  "source_capture_epoch": 1787911099.426,
+  "sector_count": 10,
+  "staging": {
+    "initial_move_output_deg": 182.4,
+    "next_reported_gap_deg": 67.2,
+    "observed_second_move_output_deg": 40.3
+  },
+  "duplicate_discharge": {
+    "reported_gap_deg": 5.7,
+    "observed_moves_output_deg": [29.7, 29.7],
+    "move_times_epoch": [1787911106.608, 1787911107.325]
+  },
+  "archive_frames": {
+    "small_white_bone_present": [
+      "1787925077825-50882d37",
+      "1787925080617-4dcdfc13"
+    ],
+    "empty": [
+      "1787925591048-a39c58e9",
+      "1787925593528-72e2bd3f"
+    ],
+    "dark_piece_present": [
+      "1787925692237-d6d7f3e8",
+      "1787925695692-7f3faa42",
+      "1787925961325-a038ad43",
+      "1787925964661-094a7404"
+    ]
+  }
+}

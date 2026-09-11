@@ -1,0 +1,222 @@
+from typing import Any, Callable, Optional, cast
+import io
+import os
+import threading
+import requests
+import numpy as np
+import cv2
+from PIL import Image
+from global_config import GlobalConfig
+from .brickognize_types import BrickognizeResponse, BrickognizeItem, BrickognizeColor
+
+API_URL = "https://api.brickognize.com/predict/?predict_color=true"
+# Fallback (connect, read) timeouts in seconds for the rare gc-less call path.
+# When a GlobalConfig is available the live values come from gc.timeouts
+# (brickognize_connect_s / brickognize_read_s), which default to a generous 60 s
+# each so slow internet degrades to "slow" rather than "ConnectTimeout failure".
+API_TIMEOUT_S = (60.0, 60.0)
+# Brickognize rejects requests with more than this many query images. Callers
+# should pre-trim, but we hard-cap here too so a stray oversized batch degrades
+# (drops the tail) instead of erroring out the whole classification.
+MAX_QUERY_IMAGES = 8
+ANY_COLOR = "any_color"
+ANY_COLOR_NAME = "Any Color"
+FILTER_CATEGORIES = ["primo", "duplo"]
+
+
+def classify(
+    gc: GlobalConfig,
+    top_image: Optional[np.ndarray],
+    bottom_image: Optional[np.ndarray],
+    callback: Callable[
+        [
+            Optional[str],
+            str,
+            str,
+            Optional[float],
+            Optional[str],
+            Optional[str],
+            Optional[dict[str, Any]],
+        ],
+        None,
+    ],
+) -> None:
+    thread = threading.Thread(
+        target=_doClassify,
+        args=(gc, top_image, bottom_image, callback),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _doClassify(
+    gc: GlobalConfig,
+    top_image: Optional[np.ndarray],
+    bottom_image: Optional[np.ndarray],
+    callback: Callable[
+        [
+            Optional[str],
+            str,
+            str,
+            Optional[float],
+            Optional[str],
+            Optional[str],
+            Optional[dict[str, Any]],
+        ],
+        None,
+    ],
+) -> None:
+    gc.logger.info("Brickognize: classifying piece")
+    try:
+        with gc.profiler.timer("classification.brickognize.total_ms"):
+            top_result = None
+            bottom_result = None
+            if top_image is not None:
+                with gc.profiler.timer("classification.brickognize.top_ms"):
+                    top_result = _classifyImage(gc, top_image)
+            if bottom_image is not None:
+                with gc.profiler.timer("classification.brickognize.bottom_ms"):
+                    bottom_result = _classifyImage(gc, bottom_image)
+
+        best_item, best_view = _pickBestItem(top_result, bottom_result)
+        best_color = _pickBestColor(top_result, bottom_result)
+        color_id = best_color["id"] if best_color else ANY_COLOR
+        color_name = best_color["name"] if best_color else ANY_COLOR_NAME
+        result_payload: dict[str, Any] = {
+            "provider": "brickognize",
+            "top_result": top_result,
+            "bottom_result": bottom_result,
+            "best_item": best_item,
+            "best_view": best_view,
+            "best_color": best_color,
+        }
+        if best_item:
+            gc.logger.info(
+                f"Brickognize: {best_item['id']} ({best_item['name']}) "
+                f"score={best_item['score']:.2f} color={color_name}"
+            )
+            callback(
+                best_item["id"],
+                color_id,
+                color_name,
+                best_item["score"],
+                best_item.get("img_url"),
+                best_view,
+                result_payload,
+            )
+        else:
+            gc.logger.warn("Brickognize: no items found")
+            callback(None, color_id, color_name, None, None, None, result_payload)
+    except Exception as e:
+        gc.logger.error(f"Brickognize: classification failed: {e}")
+        callback(
+            None,
+            ANY_COLOR,
+            ANY_COLOR_NAME,
+            None,
+            None,
+            None,
+            {
+                "provider": "brickognize",
+                "error": str(e),
+            },
+        )
+
+
+def _classifyImage(gc: Optional[GlobalConfig], image: np.ndarray) -> BrickognizeResponse:
+    return _classifyImages(gc, [image])
+
+
+def _classifyImages(
+    gc: Optional[GlobalConfig],
+    images: list[np.ndarray],
+    *,
+    piece_uuid: Optional[str] = None,
+    dump_label: Optional[str] = None,
+) -> BrickognizeResponse:
+    if not images:
+        raise ValueError("at least one image required")
+    if len(images) > MAX_QUERY_IMAGES:
+        images = images[:MAX_QUERY_IMAGES]
+    dump_dir = None
+    if gc is not None and gc.brickognize_dump_root is not None and piece_uuid:
+        dump_dir = gc.brickognize_dump_root / piece_uuid
+        os.makedirs(dump_dir, exist_ok=True)
+    files: list[tuple[str, tuple[str, io.BytesIO, str]]] = []
+    for i, image in enumerate(images):
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb_image)
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format="JPEG", quality=95, subsampling=0)
+        payload_bytes = img_bytes.getvalue()
+        if dump_dir is not None:
+            label = dump_label or "img"
+            with open(dump_dir / f"{label}_{i:02d}.jpg", "wb") as f:
+                f.write(payload_bytes)
+        files.append(
+            ("query_image", (f"image_{i}.jpg", io.BytesIO(payload_bytes), "image/jpeg"))
+        )
+
+    headers = {"accept": "application/json"}
+    # Multi-image queries need proportionally more time — Brickognize runs
+    # inference per view before combining. Add ~2 s read-timeout per
+    # additional image on top of the single-image baseline.
+    if gc is not None:
+        connect_timeout = gc.timeouts.brickognize_connect_s
+        read_timeout = gc.timeouts.brickognize_read_s
+    else:
+        connect_timeout, read_timeout = API_TIMEOUT_S
+    read_timeout = read_timeout + max(0, len(files) - 1) * 2.0
+    response = requests.post(
+        API_URL,
+        headers=headers,
+        files=files,
+        timeout=(connect_timeout, read_timeout),
+    )
+    response.raise_for_status()
+    result = cast(BrickognizeResponse, response.json())
+
+    # Stamp each item/color with its position in the UNFILTERED response before
+    # we drop primo/duplo items. Brickognize's feedback API keys on these ranks
+    # (item_rank / color_rank), so they must survive category filtering — the
+    # applied item carries its original rank even if items ahead of it are cut.
+    for rank, item in enumerate(result.get("items", []) or []):
+        item["rank"] = rank
+    for rank, color in enumerate(result.get("colors", []) or []):
+        color["rank"] = rank
+
+    result["items"] = [
+        item
+        for item in result["items"]
+        if not any(f in item["category"].lower() for f in FILTER_CATEGORIES)
+    ]
+    return result
+
+
+def _pickBestItem(
+    top_result: Optional[BrickognizeResponse],
+    bottom_result: Optional[BrickognizeResponse],
+) -> tuple[Optional[BrickognizeItem], Optional[str]]:
+    all_items: list[tuple[BrickognizeItem, str]] = []
+    if top_result is not None:
+        all_items += [(item, "top") for item in top_result.get("items", [])]
+    if bottom_result is not None:
+        all_items += [(item, "bottom") for item in bottom_result.get("items", [])]
+    if not all_items:
+        return None, None
+    best_item, best_view = max(all_items, key=lambda item: item[0].get("score", 0))
+    return best_item, best_view
+
+
+def _pickBestColor(
+    top_result: Optional[BrickognizeResponse],
+    bottom_result: Optional[BrickognizeResponse],
+) -> Optional[BrickognizeColor]:
+    all_colors: list[BrickognizeColor] = []
+    if top_result is not None:
+        all_colors += top_result.get("colors", [])
+    if bottom_result is not None:
+        all_colors += bottom_result.get("colors", [])
+    if not all_colors:
+        return None
+    return max(all_colors, key=lambda x: x.get("score", 0))
