@@ -811,6 +811,23 @@ class ServoMotor:
             return
         self.move_to_and_release(target, max_duration_ms=max_duration_ms)
 
+    def command_door(self, opened: bool) -> None:
+        """Checked calibrated door command for opt-in physical bindings."""
+        target = self._open_angle if opened else self._closed_angle
+        if target is None:
+            raise RuntimeError("door is not calibrated")
+        if opened:
+            self.apply_open_speed()
+        else:
+            self.apply_close_speed()
+        if not self.move_to_and_release(target):
+            raise RuntimeError("door command not acknowledged")
+
+    def door_at_target(self, opened: bool) -> bool:
+        # Firmware position is profile feedback, not an independent flap sensor.
+        target = self._open_angle if opened else self._closed_angle
+        return target is not None and self.stopped and self.position == target * 10
+
     def toggle(self) -> None:
         """Toggle between open and closed."""
         if not self.is_calibrated:

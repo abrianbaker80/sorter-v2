@@ -209,7 +209,9 @@ class Chute:
             address.section_index, address.bin_index, num_bins
         )
 
-    def moveToAngle(self, target: float) -> int:
+    def moveToAngle(self, target: float, *, require_ack: bool = False) -> int:
+        if require_ack and (self.gc.disable_chute or self.stepper.software_disabled or not self.homed):
+            raise RuntimeError("chute must be enabled and homed")
         target = max(0.0, min(360.0, target))
         current = self.current_angle
         target_stepper_angle = target * GEAR_RATIO
@@ -229,13 +231,15 @@ class Chute:
         self.logger.info(
             f"Chute: moving from {current:.1f}° to {target:.1f}° (delta_stepper_deg={delta_stepper_angle:.2f}, est_ms={estimated_ms})"
         )
-        self.stepper.move_degrees(delta_stepper_angle)
+        accepted = self.stepper.move_degrees(delta_stepper_angle)
+        if require_ack and not accepted:
+            raise RuntimeError("chute command not acknowledged")
         return estimated_ms
 
     def isBinReachable(self, address: BinAddress) -> bool:
         return self.getAngleForBin(address) is not None
 
-    def moveToBin(self, address: BinAddress) -> int:
+    def moveToBin(self, address: BinAddress, *, require_ack: bool = False) -> int:
         target = self.getAngleForBin(address)
         if target is None:
             self.logger.error(f"Chute: bin {address} is unreachable")
@@ -243,7 +247,7 @@ class Chute:
         self.logger.info(
             f"Chute: moveToBin layer={address.layer_index} section={address.section_index} bin={address.bin_index} -> {target:.2f}°"
         )
-        return self.moveToAngle(target)
+        return self.moveToAngle(target, require_ack=require_ack)
 
     def moveToAngleBlocking(self, target: float, timeout_buffer_ms: int = 0) -> int:
         target = max(0.0, min(360.0, target))

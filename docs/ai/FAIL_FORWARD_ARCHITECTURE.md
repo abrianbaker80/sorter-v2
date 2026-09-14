@@ -1,6 +1,6 @@
 # Fail-forward C4 migration
 
-This is the durable scope record for the accepted architecture and Slices 2–4.
+This is the durable scope record for the accepted architecture and Slices 2-5.
 Production cutover and hardware qualification are separate future work.
 
 ## Locked geometry and model
@@ -156,13 +156,101 @@ This Slice 4 supersedes the former roadmap item numbered 4. Advisory accounting,
 physical bindings/calibration and runtime cutover remain future scope. Simulation
 proves composition, not live geometry, arrival freshness or gravity calibration.
 
+## Slice 5: opt-in physical binding and calibration
+
+[`physical_binding.py`](../../software/sorter/backend/subsystems/classification_channel/physical_binding.py)
+adds `PhysicalC4Binding`, requiring the explicit mode
+`fail-forward-physical-experimental`. No production selector imports it. It takes
+already initialized C4 `StepperMotor`, `Chute`, every physical layer's existing
+servo, a destination-to-`BinAddress` map, recognition callable and calibration.
+Construction performs no device I/O or motion. The caller must establish exclusive
+hardware ownership, empty transport and a verified stationary P6 origin before
+use. This is not a resume, homing, enabling or deployment interface.
+
+`binding.tick(now)` supplies one monotonic clock to the accepted runtime and a
+checked motor wrapper. Existing `StepperMotor.move_steps`, direction conversion,
+acceleration, command ACK, `stopped` and fresh `position` reads do the work. FIFO
+absolute targets (rounded once per boundary) produce relative command deltas;
+there is no separate motor stack or ten-position modulo reset. A successful
+submission ACK alone never advances the FIFO. Acknowledged submission followed
+by stopped-at-target feedback advances once; old/duplicate runtime-epoch command
+callbacks retain Slice 4 idempotency. Repeated ticks never resend a relative move.
+Missing/rejected command ACK, disabled/stalled hardware, feedback exceptions or
+completion timeout latch FAULTED and prohibit further C4 commands. A stopped-short
+index remains outstanding until timeout; no automatic retry/resume is provided.
+The existing explicit completion callback can record verified physical completion
+after a fault but cannot authorize more motion. Never use a transport ACK as that
+callback's stopped/position evidence.
+
+`CalibratedChute` uses the existing `Chute.getAngleForBin()` aiming geometry and
+`moveToBin(require_ack=True)` command path. The opt-in keyword checks the existing
+stepper ACK that the legacy ETA-returning API previously discarded. It changes
+no production caller's default behavior. The expected integer target uses the same
+stepper degree conversion as that command, and alignment requires fresh stopped
+and target-position feedback plus all doors at their calibrated targets.
+`ServoMotor.command_door/door_at_target` and the corresponding Waveshare methods
+reuse their existing endpoints, speed setup, command transport and feedback.
+Waveshare verification does not accept its legacy cached-position fallback.
+PWM position reports the firmware motion profile, not independent flap sensing;
+physical qualification must establish what that evidence supports.
+
+Destination mappings are copied, validated against the existing layout and filtered
+for reachability before worker results enter Slice 3. Missing/ambiguous answers,
+unknown destinations and recognition/provider/advisory exceptions become DISCARD.
+No live allocation, reservation, ownership, PieceTransport, tracking, Harvest or
+accounting API enters the adapter. All-layer-open discard passthrough retains the
+current chute azimuth, as in existing distribution; it is not an invented bin angle.
+Accounting consumes Slice 4's outbox separately. Runtime device ownership also
+requires keeping layout, calibration, motor settings and destination mapping fixed
+for its lifetime; changes require a new reconciled runtime.
+
+`C4Calibration` exposes these explicit, offline-supplied parameters:
+
+- Exact output `microsteps_per_revolution`, logical `clockwise_sign` and
+  `origin_microsteps`. One index remains exactly one tenth of a revolution;
+  ten pockets and seven P6-to-EXIT advances remain locked by Slice 1.
+- `release_fraction` locates P0 release within the seventh sweep in motor
+  coordinates (`release_microsteps`). `release_after_start_s` independently
+  supplies the conservative start-to-release interval to Slice 2. Neither is
+  inferred from a gravity delay or used as actual release evidence; physical
+  measurement must establish both under the selected motion profile.
+- Existing `stepper.estimateMoveDegreesMs()` at the chute's configured operating
+  speed supplies rotational ETA. `door_travel_s` bounds concurrent door travel;
+  `chute_eta_scale` (at least one) and `chute_eta_allowance_s` adjust their maximum.
+  `arrival_margin_s` is Slice 2's separate readiness margin. In-flight ETA is fixed;
+  an expired prediction never becomes alignment and is not refreshed by ticks.
+- `index_timeout_s` and `chute_timeout_s` bound missing completion evidence.
+- `fall_clear_s` defaults to **1.5 seconds only for compatibility**, not calibrated
+  truth. An explicitly reported physical release time starts fall-clear; absent
+  that evidence, confirmed index completion starts it conservatively. No predicted
+  release or release-coordinate crossing is treated as a measured release.
+
+Local qualification runs the Slice 1–4 regression files, `test_physical_binding.py`,
+existing chute aiming, stepper estimation and servo tests. Simulated device/bus
+fixtures establish software contracts only. Before the first separately approved
+controlled physical qualification, establish clear hardware/exclusive ownership,
+verify actual gearing/sign/origin and calibrated door/bin endpoints, and measure
+release timing, travel ETA/margins and gravity fall-clear. No hardware operation,
+production cutover, configuration write, deployment or push belongs to Slice 5.
+Software validation on Python 3.12.12: 153 tests passed across that surface.
+Pyright reported zero errors for the Slice 1-5 modules and chute. Expanded
+hardware-file type checking reported three unchanged baseline errors (stepper
+status bitmask typing, Waveshare calibration possibly-unbound position and
+missing recalibrate return). Three broader stepper endpoint tests also fail
+unchanged at starting commit `f66e5da` because fixtures lack `enable_force`.
+These baseline issues were reproduced separately; no failures were hidden or
+converted to skips. Independent review's torque-ACK finding was corrected and
+re-reviewed without remaining findings.
+
+This slice supersedes the former roadmap item numbered 5.
+
 ## Remaining migration slices
 
-5. First-class C1 Exit camera, physical-state sensing and shared UI parity.
-6. Concurrent vision-driven C1/C2/C3 speed control and physical handoff sensing.
-7. Bounded adaptive jam recovery and operator Resume without historical locks.
-8. Four drain scopes and sustained-empty confidence, including Drain All.
-9. Explicit runtime cutover, removal of obsolete transport dependencies, and
+6. First-class C1 Exit camera, physical-state sensing and shared UI parity.
+7. Concurrent vision-driven C1/C2/C3 speed control and physical handoff sensing.
+8. Bounded adaptive jam recovery and operator Resume without historical locks.
+9. Four drain scopes and sustained-empty confidence, including Drain All.
+10. Explicit runtime cutover, removal of obsolete transport dependencies, and
    separately approved hardware qualification.
 
 Do not bridge the replacement through KnownObject, PieceTransport, UUID matching,

@@ -522,6 +522,9 @@ class WaveshareServoMotor:
 
     @property
     def stopped(self) -> bool:
+        return self._stopped_checked(require_ack=False)
+
+    def _stopped_checked(self, *, require_ack: bool) -> bool:
         # Use time-based estimate since polling is_moving is slow on the bus
         if self._move_started_at == 0:
             return True
@@ -529,7 +532,9 @@ class WaveshareServoMotor:
         if elapsed >= self._move_duration + 0.1:
             # Auto-release torque if move_to_and_release was used
             if not self._enabled:
-                self._bus.set_torque(self._servo_id, False)
+                accepted = self._bus.set_torque(self._servo_id, False)
+                if require_ack and not accepted:
+                    raise RuntimeError("door torque release not acknowledged")
             self._move_started_at = 0
             return True
         return False
@@ -555,6 +560,28 @@ class WaveshareServoMotor:
         self._current_position = self._closed_position
         self._bus.move_to(self._servo_id, self._closed_position, 300)
         self._enabled = False  # release after move
+
+    def command_door(self, opened: bool) -> None:
+        """Checked command using the existing calibrated raw endpoints."""
+        if not self._enabled:
+            if not self._bus.set_torque(self._servo_id, True):
+                raise RuntimeError("door torque enable not acknowledged")
+            self._enabled = True
+        self._move_duration = 0.3
+        self._move_started_at = time.monotonic()
+        target = self._open_position if opened else self._closed_position
+        if not self._bus.move_to(self._servo_id, target, 300):
+            raise RuntimeError("door command not acknowledged")
+        self._current_position = target
+        self._enabled = False
+
+    def door_at_target(self, opened: bool) -> bool:
+        target = self._open_position if opened else self._closed_position
+        # Never use position's shadow fallback when the bus has no feedback.
+        position = self._bus.read_position(self._servo_id)
+        if position is None:
+            raise RuntimeError("missing door position feedback")
+        return self._stopped_checked(require_ack=True) and position == target
 
     def toggle(self) -> None:
         if self.isOpen():
