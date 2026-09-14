@@ -1,6 +1,6 @@
 # Fail-forward C4 migration
 
-This is the durable scope record for the accepted architecture and Slices 2/3.
+This is the durable scope record for the accepted architecture and Slices 2–4.
 Production cutover and hardware qualification are separate future work.
 
 ## Locked geometry and model
@@ -99,10 +99,65 @@ late callbacks. Physical motion, calibrated timing and runtime cutover remain
 future adapter responsibilities. Slice 4 can consume pocket/generation routes
 and the existing once-only `Discharge` snapshots for advisory routing/accounting.
 
+## Slice 4: integrated runtime coordinator
+
+[`fail_forward_runtime.py`](../../software/sorter/backend/subsystems/classification_channel/fail_forward_runtime.py)
+adds explicitly constructed `C4RuntimeCoordinator(bridge, planner, motor, chute)`.
+The bridge and planner must share an idle FIFO. This is the opt-in integration
+seam; the production coordinator and all production selectors remain unchanged.
+Slices 1–3 retain their existing interfaces and behavior.
+
+One owner calls `confirmed_deposit` with Slice 3's confirmed paired sample and
+`tick(now)` on the same monotonic clock. Each tick consumes stopped-at-target
+motor feedback, polls asynchronous routing, evaluates FEED/DRAIN/HOLD, submits
+predictive chute positioning, then submits at most one logical pocket index.
+Classification is never joined. `IndexMotor` structurally reuses the existing
+`StepperMotor.move_steps`, `stopped`, and `position` surface: the relative command
+is computed once from the FIFO's absolute boundary targets, with no new motor
+stack, speed settings or position reset. Only stopped-at-target confirmation
+advances the FIFO. Submission ACKs and repeated ticks cannot advance/reissue it.
+
+`ChuteIO.observe(now)` supplies fresh stopped/aligned feedback including doors
+and reachable travel estimates. `move(ChuteMove)` submits immediately or raises
+on rejection/uncertainty. An in-flight directive retains its original ETA until
+aligned feedback, preventing replay or inferred arrival from elapsed time alone.
+A future physical binding must reuse existing `Chute.getAngleForBin/moveToBin`,
+servo readiness and `stepper.estimateMoveDegreesMs`; this slice exercises an
+injected simulator and does not provide a production hardware binding.
+
+`acknowledge_index(IndexCommand, stopped, position, now, physical_release_at)`
+is the owner-thread callback seam, alternatively driven by tick's motor polling.
+The command includes an opaque runtime epoch and absolute target; old-runtime,
+duplicate and older-index confirmations cannot affect a new outstanding index.
+Only the FIFO's P0->EXIT completion creates a `PhysicalDischargeEvent`, keyed by
+`(epoch, pocket_id, generation)`, with final destination, state, boundary and
+immutable optional metadata. DISCARD uses the configured discard destination
+through precisely the same motion/discharge path. `take_discharge_events()`
+drains an in-memory outbox without invoking consumers or gating motion. Events
+are once-only within this runtime; crash-durable accounting is future work.
+
+RUNNING accepts intake; `start_drain(now)` closes intake and enters DRAINING,
+continuing empty-P6 indexes until every retained load physically exits. DRAINED
+is reached after the final gravity fall-clear, with no further indexes; `close`
+then retires the bridge without waiting for providers. After each discharge,
+only Slice 2's fall-clear holds chute departure; no additional cooldown applies.
+The callback can supply measured physical release time; otherwise completion
+starts the conservative timer. Duplicate confirmation never extends it.
+
+Command rejection, uncertain submission or unexpected C4 position/motion at an
+idle confirmed boundary latches FAULTED. An active index stopped short remains
+HOLD with its target retained. No automatic relative-command retry
+or interrupted-motion resume is authorized. A matching physical completion may
+still be recorded after a fault without re-enabling motion. Resume needs a later
+remaining-distance/release-readiness contract. All callbacks are single-writer;
+recognition workers retain the Slice 3 mailbox boundary.
+
+This Slice 4 supersedes the former roadmap item numbered 4. Advisory accounting,
+physical bindings/calibration and runtime cutover remain future scope. Simulation
+proves composition, not live geometry, arrival freshness or gravity calibration.
+
 ## Remaining migration slices
 
-4. Advisory Harvest routing and asynchronous, idempotent discharge accounting;
-   no transport pauses, reservations or persistence gates.
 5. First-class C1 Exit camera, physical-state sensing and shared UI parity.
 6. Concurrent vision-driven C1/C2/C3 speed control and physical handoff sensing.
 7. Bounded adaptive jam recovery and operator Resume without historical locks.
