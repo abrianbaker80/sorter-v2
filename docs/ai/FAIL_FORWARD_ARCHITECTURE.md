@@ -1,6 +1,6 @@
 # Fail-forward C4 migration
 
-This is the durable scope record for the accepted architecture and Slice 2.
+This is the durable scope record for the accepted architecture and Slices 2/3.
 Production cutover and hardware qualification are separate future work.
 
 ## Locked geometry and model
@@ -59,9 +59,48 @@ unchanged. No hardware operation, deployment, active drain controls or adapters
 are included. The later adapter must verify live calibration and release timing
 before any physical use; simulated timing is not hardware qualification.
 
+## Slice 3: intake and asynchronous routing bridge
+
+[`intake_routing.py`](../../software/sorter/backend/subsystems/classification_channel/intake_routing.py)
+exposes the explicitly constructed `C4IntakeRoutingBridge`; no production factory
+or coordinator selects it. The owner calls `confirmed_deposit(boundary, now,
+sample)` for a confirmed stationary C3->P6 arrival. `sample` is the exact paired
+`(PieceObservation sequence, PerceptionFrame)` obtained from the existing
+`PerceptionService.read_pieces_and_frame(4)` for that confirmation. The caller
+establishes arrival/freshness and maps the calibrated DROP region to P6; this
+bridge never infers confirmation from a detection or a transfer identity.
+Only DROP observations contribute crops/cardinality. Missing imagery, repeated
+frame timestamps, ambiguous occupancy and multidrops retain a DISCARD load.
+Duplicate boundary confirmations are harmless; in-motion intake is forbidden.
+
+A singleton creates one PENDING generation and copies its crop before dispatch.
+[`pocket_recognition.py`](../../software/sorter/backend/subsystems/classification_channel/pocket_recognition.py)
+reuses the existing Brickognize client, optional selected hosted color client,
+and read-only sorting-profile category lookup. Explicit confidence/margin policy,
+category-to-destination mapping and reachable destinations are supplied by the
+integration; they are not new production settings. Provider errors, timeouts,
+missing/ambiguous answers and unreachable routes mean DISCARD. No price lookup,
+Harvest allocation/confirmation or legacy object/transport lifecycle is called.
+
+Workers post at most one result using `RoutingKey(epoch, pocket_id, generation)`.
+The opaque epoch is local to this bridge instance and cannot be persisted or
+reused across model replacement. Only the owner applies results: call
+`deadlines = bridge.poll(now)` immediately before `planner.plan(...,
+deadlines=deadlines)`. Use the same monotonic clock for both; camera timestamps
+are a separate domain. Results applied at/after their deadline are ignored and
+Slice 2 converts the pending load to DISCARD. Its P0 deadline remains the final
+fallback. A result can never revise a resolved/discharged/reused generation.
+
+Worker slots are bounded with no backlog; saturation discards the new intake.
+An expired request retains its worker slot until the provider actually returns,
+preventing unbounded threads during a provider outage. Neither transport nor
+`close(now)` joins workers. Close retires pending routes to DISCARD and rejects
+late callbacks. Physical motion, calibrated timing and runtime cutover remain
+future adapter responsibilities. Slice 4 can consume pocket/generation routes
+and the existing once-only `Discharge` snapshots for advisory routing/accounting.
+
 ## Remaining migration slices
 
-3. Bounded recognition/capture adapter with pocket-generation results and discard.
 4. Advisory Harvest routing and asynchronous, idempotent discharge accounting;
    no transport pauses, reservations or persistence gates.
 5. First-class C1 Exit camera, physical-state sensing and shared UI parity.
