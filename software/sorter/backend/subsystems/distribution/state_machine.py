@@ -78,6 +78,30 @@ class DistributionStateMachine(BaseSubsystem):
                 )
             self.gc.profiler.enterState("distribution", self.current_state.value)
 
+    def resume(self) -> bool:
+        """Restore retained positioning before allowing classification to resume."""
+        if self.current_state == DistributionState.READY:
+            piece = self.shared.transport.getPieceForDistributionPositioning()
+            if piece is None:
+                # The load has already left READY; do not replay its route.
+                return False
+            self.states_map[DistributionState.POSITIONING].retain_ready_route(piece)
+            self.states_map[DistributionState.READY].cleanup()
+            self.current_state = DistributionState.POSITIONING
+            self.gc.runtime_stats.observeStateTransition("distribution", "ready", "positioning")
+            self.gc.profiler.enterState("distribution", self.current_state.value)
+        if self.current_state == DistributionState.POSITIONING:
+            self.states_map[DistributionState.POSITIONING].resume()
+            return True
+        return False
+
+    def resume_complete(self) -> bool:
+        return (
+            self.current_state != DistributionState.POSITIONING
+            and self.shared.distribution_ready
+            and self.gc.runtime_stats.activeIncident() is None
+        )
+
     def cleanup(self) -> None:
         self.gc.profiler.exitState("distribution")
         self.states_map[self.current_state].cleanup()

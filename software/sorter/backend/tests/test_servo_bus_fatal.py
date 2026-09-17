@@ -78,11 +78,11 @@ def _mk_offline_servo() -> SimpleNamespace:
 
 
 def _mk_healthy_servo() -> SimpleNamespace:
-    servo = SimpleNamespace(available=True, stopped=True)
-    servo.isClosed = lambda: True
-    servo.isOpen = lambda: False
-    servo.open = MagicMock()
-    servo.close = MagicMock()
+    servo = SimpleNamespace(available=True, stopped=True, opened=False)
+    servo.isClosed = lambda: not servo.opened
+    servo.isOpen = lambda: servo.opened
+    servo.open = MagicMock(side_effect=lambda: setattr(servo, "opened", True))
+    servo.close = MagicMock(side_effect=lambda: setattr(servo, "opened", False))
     return servo
 
 
@@ -117,6 +117,7 @@ class ServoBusFatalTests(unittest.TestCase):
         self.gc = SimpleNamespace(
             logger=self.logger,
             disable_servos=False,
+            disable_chute=False,
             profiler=_Profiler(),
             runtime_stats=self.runtime_stats,
             run_recorder=SimpleNamespace(markPaused=lambda: None, markRunning=lambda: None),
@@ -147,7 +148,10 @@ class ServoBusFatalTests(unittest.TestCase):
         chute = MagicMock(spec=Chute)
         chute.isBinReachable = MagicMock(return_value=True)
         chute.moveToBin = MagicMock(return_value=250)
-        chute.stepper = SimpleNamespace(stopped=True)
+        chute.homed = True
+        chute.current_angle = 30.0
+        chute.getAngleForBin = MagicMock(return_value=30.0)
+        chute.stepper = SimpleNamespace(stopped=True, degrees_for_microsteps=lambda n: n * 0.225)
         positioning = Positioning(
             irl=irl,
             gc=self.gc,
@@ -186,17 +190,17 @@ class ServoBusFatalTests(unittest.TestCase):
             snap["active_incident"]["kind"],
         )
 
-    def test_single_offline_layer_does_not_trip_fatal(self) -> None:
-        # Layer 0 is offline but layer 1's servo is healthy — Positioning
-        # must keep running on the remaining layer, NOT raise the fatal
-        # bus-offline banner.
+    def test_offline_upstream_layer_blocks_route_without_bus_fatal(self) -> None:
+        # A healthy destination does not prove passage through an offline door.
+        # This is a route hold, not the all-servos-offline incident.
         positioning = self._mk_positioning(
             servos=[_mk_offline_servo(), _mk_healthy_servo()]
         )
         positioning.step()
 
-        self.assertIsNone(shared_state.hardware_error)
-        self.assertTrue(self.cmd_queue.empty())
+        self.assertTrue(shared_state.hardware_error.startswith(CHUTE_JAM_ALERT_PREFIX))
+        self.assertFalse(self.cmd_queue.empty())
+        self.assertFalse(positioning.shared.distribution_ready)
         self.assertIsNone(self.runtime_stats.servo_bus_offline_since_ts)
 
     def test_chute_starts_after_target_door_and_before_parked_doors(self) -> None:
@@ -243,6 +247,7 @@ class ServoBusFatalTests(unittest.TestCase):
         self.assertIsNone(positioning.step())
 
         servos[1].stopped = True
+        positioning._moving_started_at -= 1.0
         self.assertEqual(DistributionState.READY, positioning.step())
 
     def test_no_bin_available_publishes_distribution_incident_before_passthrough(self) -> None:

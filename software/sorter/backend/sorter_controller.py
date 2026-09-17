@@ -44,14 +44,17 @@ class SorterController:
         _broadcastSorterState(self.state.value)
 
     def resume(self) -> None:
-        self.irl.enableSteppers()
-        self.coordinator.resume()
-        self.state = SorterLifecycle.RUNNING
-        self.gc.runtime_stats.setLifecycleState(self.state.value)
-        self.gc.run_recorder.markRunning()
-        self.gc.lifetime_stats.markRunning()
-        self._setTrackerActive(True)
-        _broadcastSorterState(self.state.value)
+        from server import shared_state
+
+        with shared_state.hardware_lifecycle_lock:
+            self.irl.enableSteppers()
+            self.coordinator.resume()
+            self.state = SorterLifecycle.RUNNING
+            self.gc.runtime_stats.setLifecycleState(self.state.value)
+            self.gc.run_recorder.markRunning()
+            self.gc.lifetime_stats.markRunning()
+            self._setTrackerActive(True)
+            _broadcastSorterState(self.state.value)
 
     def pause(self) -> None:
         self.coordinator.pause()

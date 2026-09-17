@@ -450,7 +450,8 @@ class Coordinator:
                 feeder_hold = getattr(self.feeder, "hold_motion", None)
                 if feeder_hold is not None:
                     feeder_hold()
-                if self._classification_should_step_during_incident(active_incident):
+                if (not getattr(self, "_distribution_resume_pending", False)
+                        and self._classification_should_step_during_incident(active_incident)):
                     with prof.timer("coordinator.step.classification_ms"):
                         classification_started = time.perf_counter()
                         self.classification.step()
@@ -472,6 +473,12 @@ class Coordinator:
                     "coordinator.step.distribution_ms",
                     (time.perf_counter() - distribution_started) * 1000.0,
                 )
+            if getattr(self, "_distribution_resume_pending", False):
+                if not self.distribution.resume_complete():
+                    self.feeder.hold_motion()
+                    return
+                self._distribution_resume_pending = False
+                self.classification.resume()
             with prof.timer("coordinator.step.classification_ms"):
                 classification_started = time.perf_counter()
                 self.classification.step()
@@ -508,6 +515,7 @@ class Coordinator:
             )
 
     def cleanup(self) -> None:
+        self._distribution_resume_pending = False
         self.feeder.cleanup()
         self.classification.cleanup()
         self.distribution.cleanup()
@@ -527,4 +535,8 @@ class Coordinator:
         if getattr(
             self.classification, "supportsStatefulPause", lambda: False
         )():
-            self.classification.resume()
+            # Keep indexed classification paused until the retained route has
+            # actually settled. Distribution continues through its normal ticks.
+            self._distribution_resume_pending = self.distribution.resume()
+            if not self._distribution_resume_pending:
+                self.classification.resume()

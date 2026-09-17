@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from server.manual_flap_control import manual_flap_operation
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -35,6 +36,7 @@ from irl.bin_layout import (
     _LAYER_MAX_DIMENSION_DEFAULTS_MM,
 )
 from subsystems.distribution.chute import BinAddress, CHUTE_MAX_ANGLE
+from defs.sorter_controller import SorterLifecycle
 from irl.parse_user_toml import (
     DEFAULT_CAROUSEL_HOME_PIN_CHANNEL,
     DEFAULT_CHUTE_FIRST_BIN_CENTER,
@@ -1151,6 +1153,7 @@ def get_live_servo_feedback() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo")
+@manual_flap_operation
 def save_servo_hardware_config(
     payload: ServoHardwareSettingsPayload,
 ) -> Dict[str, Any]:
@@ -1305,6 +1308,7 @@ class ServoSpeedSettingsPayload(BaseModel):
 
 
 @router.post("/api/hardware-config/servo/speeds")
+@manual_flap_operation
 def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
     _SPEED_RANGE = (1, 2000)
 
@@ -1351,6 +1355,7 @@ def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/toggle")
+@manual_flap_operation
 def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
     _ensure_not_homing("toggle a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1364,7 +1369,7 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
         _apply_pca_servo_speed(servo, _speeds.get("close_speed") if currently_open else _speeds.get("open_speed"))
         servo.toggle()
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
-        is_open = bool(feedback.get("is_open")) if feedback.get("available") else False
+        is_open = feedback.get("is_open") if feedback.get("available") else None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to toggle layer {layer_index + 1} servo: {e}")
 
@@ -1383,6 +1388,8 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
         "is_open": is_open,
         "feedback": feedback,
         "message": (
+            f"Layer {layer_index + 1} servo move requested; position not yet confirmed."
+            if is_open is None else
             f"Layer {layer_index + 1} servo opened."
             if is_open
             else f"Layer {layer_index + 1} servo closed."
@@ -1391,6 +1398,7 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/preview")
+@manual_flap_operation
 def preview_layer_servo(
     layer_index: int,
     payload: ServoLayerPreviewPayload,
@@ -1454,6 +1462,7 @@ def preview_layer_servo(
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/calibrate")
+@manual_flap_operation
 def calibrate_layer_servo(layer_index: int) -> Dict[str, Any]:
     _ensure_not_homing("calibrate a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1479,6 +1488,7 @@ def calibrate_layer_servo(layer_index: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/nudge")
+@manual_flap_operation
 def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str, Any]:
     _ensure_not_homing("nudge a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1507,7 +1517,8 @@ def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str,
             current_angle = current_pos // 10
 
         new_angle = max(0, min(180, current_angle + payload.degrees))
-        servo.move_to(new_angle)
+        if servo.move_to(new_angle) is False:
+            raise RuntimeError("Servo command rejected or busy")
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
     except HTTPException:
         raise
@@ -1524,6 +1535,7 @@ def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str,
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/move-to")
+@manual_flap_operation
 def move_to_layer_servo(layer_index: int, payload: ServoLayerMovePayload) -> Dict[str, Any]:
     _ensure_not_homing("move a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1534,7 +1546,8 @@ def move_to_layer_servo(layer_index: int, payload: ServoLayerMovePayload) -> Dic
     try:
         _, _cfg = _read_machine_params_config()
         _apply_pca_servo_speed(servo, _servo_settings_from_config(_cfg).get("homing_speed"))
-        servo.move_to(angle)
+        if servo.move_to(angle) is False:
+            raise RuntimeError("Servo command rejected or busy")
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to move layer {layer_index + 1} servo: {e}")
@@ -1558,6 +1571,7 @@ def _servo_calibration_state(servo: Any) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/lock")
+@manual_flap_operation
 def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> Dict[str, Any]:
     _ensure_not_homing("lock a servo angle")
     if payload.which not in {"open", "closed"}:
@@ -1612,6 +1626,7 @@ def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> 
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/clear")
+@manual_flap_operation
 def clear_layer_servo_angle(layer_index: int, payload: ServoLayerClearPayload) -> Dict[str, Any]:
     _ensure_not_homing("clear a servo angle")
     if payload.which not in {"open", "closed", "both"}:
@@ -1719,6 +1734,7 @@ def get_waveshare_servos(port: str | None = None) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/set-id")
+@manual_flap_operation
 def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[str, Any]:
     """Change a servo's ID on the bus."""
     _ensure_not_homing("change a Waveshare servo ID")
@@ -1770,6 +1786,7 @@ def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[st
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/calibrate")
+@manual_flap_operation
 def calibrate_waveshare_servo(servo_id: int) -> Dict[str, Any]:
     """Auto-calibrate the open/close range of a single servo on the bus."""
     _ensure_not_homing("calibrate a Waveshare servo")
@@ -1811,6 +1828,7 @@ def calibrate_waveshare_servo(servo_id: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/move")
+@manual_flap_operation
 def move_waveshare_servo(servo_id: int, payload: ServoMovePayload) -> Dict[str, Any]:
     """Move a single servo to its open/close/center position based on EEPROM limits."""
     _ensure_not_homing("move a Waveshare servo")
@@ -1873,6 +1891,7 @@ def move_waveshare_servo(servo_id: int, payload: ServoMovePayload) -> Dict[str, 
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/nudge")
+@manual_flap_operation
 def nudge_waveshare_servo(servo_id: int, payload: ServoNudgePayload) -> Dict[str, Any]:
     _ensure_not_homing("nudge a Waveshare servo")
     if servo_id < 1 or servo_id > 253:
@@ -3405,13 +3424,16 @@ def get_bins_layout() -> Dict[str, Any]:
             except Exception:
                 pass
         servos = list(getattr(shared_state.controller_ref.irl, "servos", []))
-        for i, servo in enumerate(servos):
-            try:
-                if hasattr(servo, "isOpen") and servo.isOpen():
-                    active_layer = i
-                    break
-            except Exception:
-                pass
+        # A closed door intercepts; all others must be open. Unknown, moving,
+        # failed or ambiguous configurations have no active destination.
+        try:
+            closed = [i for i, servo in enumerate(servos) if servo.isClosed()]
+            if len(closed) == 1 and all(
+                i == closed[0] or servo.isOpen() for i, servo in enumerate(servos)
+            ):
+                active_layer = closed[0]
+        except Exception:
+            active_layer = None
 
         # Read category assignments from the live distribution layout
         dist_layout = getattr(shared_state.controller_ref.irl, "distribution_layout", None)
@@ -3481,62 +3503,103 @@ def set_bins_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/move-to")
+@manual_flap_operation
 def move_to_bin(payload: MoveToBinPayload) -> Dict[str, Any]:
-    """Move chute to a specific bin and open the correct layer servo."""
-    if shared_state.controller_ref is None or not hasattr(shared_state.controller_ref, "irl"):
-        raise HTTPException(status_code=503, detail="Hardware controller not initialized.")
+    return _move_to_bin(payload)
 
-    irl = shared_state.controller_ref.irl
+
+def _move_to_bin(payload: MoveToBinPayload) -> Dict[str, Any]:
+    """Select the intercepting flap, verify settling, then request chute travel."""
+    _ensure_not_homing("move to a bin")
+    controller = shared_state.controller_ref
+    if controller is None or not hasattr(controller, "irl"):
+        raise HTTPException(status_code=503, detail="Hardware controller not initialized.")
+    if controller.state not in {SorterLifecycle.PAUSED, SorterLifecycle.READY}:
+        raise HTTPException(status_code=409, detail="Pause sorting before moving to a bin.")
+    irl = controller.irl
     chute = getattr(irl, "chute", None)
     if chute is None:
         raise HTTPException(status_code=503, detail="Chute subsystem not available.")
-
     servos = list(getattr(irl, "servos", []))
     if payload.layer_index < 0 or payload.layer_index >= len(servos):
         raise HTTPException(status_code=400, detail=f"Invalid layer index {payload.layer_index}.")
-
-    address = BinAddress(
-        layer_index=payload.layer_index,
-        section_index=payload.section_index,
-        bin_index=payload.bin_index,
-    )
-
-    target_angle = chute.getAngleForBin(address)
+    address = BinAddress(payload.layer_index, payload.section_index, payload.bin_index)
+    try:
+        bins = chute.layout.layers[address.layer_index].sections[address.section_index].bins
+        if address.section_index < 0 or address.bin_index < 0 or address.bin_index >= len(bins):
+            raise IndexError()
+        target_angle = chute.getAngleForBin(address)
+    except (IndexError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid bin coordinates.")
     if target_angle is None:
         raise HTTPException(status_code=400, detail="Bin is unreachable (angle out of range).")
+    if not chute.homed or not chute.stepper.stopped:
+        raise HTTPException(status_code=409, detail="Chute must be homed and stopped before selecting a bin.")
 
-    # Close all servos first, then open the target layer
-    for i, servo in enumerate(servos):
-        try:
-            if hasattr(servo, "isOpen") and servo.isOpen():
-                servo.close()
-        except Exception:
-            pass
+    try:
+        # Validate every flap before any new command; a blocked upstream door
+        # cannot be ignored merely because the destination servo is healthy.
+        for i, servo in enumerate(servos):
+            if not servo.available or not getattr(servo, "is_calibrated", True):
+                raise RuntimeError(f"Layer {i + 1} flap is unavailable or uncalibrated")
+            # Permit an explicit retry after a settled failure, while preserving
+            # the driver's failure latch for automatic completion checks.
+            feedback = servo.feedback() if hasattr(servo, "feedback") else {}
+            stopped = feedback.get("stopped")
+            if stopped is None:
+                stopped = servo.stopped
+            if not stopped:
+                if feedback.get("error"):
+                    raise RuntimeError(f"Layer {i + 1} flap state unavailable: {feedback['error']}")
+                raise RuntimeError(f"Layer {i + 1} flap is still moving")
+        # Match automatic sorting: close destination, open passage on all others.
+        order = [payload.layer_index] + [i for i in range(len(servos)) if i != payload.layer_index]
+        for i in order:
+            servo = servos[i]
+            opened = i != payload.layer_index
+            if hasattr(servo, "command_door"):
+                # The checked driver also releases torque left by a prior jog
+                # when the target is already settled, without cycling the flap.
+                servo.command_door(opened)
+                continue
+            if (servo.isOpen() if opened else servo.isClosed()):
+                continue
+            speed = getattr(servo, "apply_open_speed" if opened else "apply_close_speed", None)
+            if speed is not None:
+                speed()
+            accepted = servo.open() if opened else servo.close()
+            if accepted is False:
+                raise RuntimeError(f"Layer {i + 1} flap command was rejected")
+        deadline = time.monotonic() + 4.0  # 3500 ms firmware release limit + transport margin.
+        while True:
+            settled = True
+            for i, servo in enumerate(servos):
+                if not servo.stopped:
+                    settled = False
+                elif not (servo.isClosed() if i == payload.layer_index else servo.isOpen()):
+                    raise RuntimeError(f"Layer {i + 1} flap did not reach its requested state")
+            if settled:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for layer flaps to settle")
+            time.sleep(0.02)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Bin move failed: {exc}") from exc
 
     try:
         estimated_ms = chute.moveToBin(address)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chute move failed: {e}")
-
-    # Open the target layer servo
-    target_servo = servos[payload.layer_index]
-    try:
-        if hasattr(target_servo, "open"):
-            target_servo.open()
-    except Exception:
-        pass
-
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Chute move failed: {exc}") from exc
     return {
-        "ok": True,
-        "target_angle": round(target_angle, 2),
-        "estimated_ms": estimated_ms,
-        "layer_index": payload.layer_index,
-        "section_index": payload.section_index,
-        "bin_index": payload.bin_index,
+        "ok": True, "flap_state": "settled", "position_source": "firmware_profile",
+        "chute_state": "requested", "target_angle": round(target_angle, 2),
+        "estimated_ms": estimated_ms, "layer_index": payload.layer_index,
+        "section_index": payload.section_index, "bin_index": payload.bin_index,
     }
 
 
 @router.post("/api/bins/move-to-section")
+@manual_flap_operation
 def move_to_section(payload: MoveToSectionPayload) -> Dict[str, Any]:
     """Point the chute at the center of a section without opening any servo."""
     _ensure_not_homing("point at a section")

@@ -4,6 +4,7 @@ import queue
 from types import SimpleNamespace
 
 from defs.known_object import KnownObject, PieceStage
+from defs.sorter_controller import SorterLifecycle
 from server import shared_state
 from server.routers import system
 from subsystems.distribution.positioning import Positioning
@@ -41,7 +42,10 @@ class _Servo:
         self.open_calls = 0
 
     def isClosed(self) -> bool:
-        return True
+        return self.open_calls == 0
+
+    def isOpen(self) -> bool:
+        return self.open_calls > 0
 
     def open(self) -> None:
         self.open_calls += 1
@@ -65,6 +69,7 @@ def test_sample_collection_mode_endpoint_opens_all_layer_doors() -> None:
         servos = [_Servo(), _Servo(), _Servo()]
         shared = SharedVariables()
         controller = SimpleNamespace(
+            state=SorterLifecycle.PAUSED,
             coordinator=SimpleNamespace(shared=shared),
             irl=SimpleNamespace(servos=servos),
             gc=_GlobalConfig(),

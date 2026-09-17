@@ -326,10 +326,11 @@
 				throw new Error(detail?.detail ?? `HTTP ${res.status}`);
 			}
 			const data = await res.json();
-			statusMsg = `Moved to ${data.target_angle}°`;
-			activeLayer = layerIndex;
-			currentAngle = data.target_angle;
+			statusMsg = `Layer ${layerIndex + 1} flaps positioned; chute move requested to ${data.target_angle}°`;
+			await loadLayout();
 		} catch (e: unknown) {
+			activeLayer = null;
+			await loadLayout();
 			error = e instanceof Error ? e.message : 'Move failed';
 		} finally {
 			movingTo = null;

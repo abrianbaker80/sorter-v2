@@ -8,6 +8,7 @@ import threading
 from typing import Callable, Dict, Any, Optional
 
 from fastapi import APIRouter
+from server.manual_flap_control import manual_flap_operation
 from pydantic import BaseModel
 
 import server.shared_state as shared_state
@@ -331,7 +332,8 @@ def _open_all_layer_doors_for_sample_collection() -> Dict[str, Any]:
                     }
                 )
                 continue
-            open_fn()
+            if open_fn() is False:
+                raise RuntimeError("passage command rejected")
             opened += 1
         except Exception as exc:
             errors.append(
@@ -625,6 +627,7 @@ def get_sample_collection_mode() -> Dict[str, Any]:
 
 
 @router.post("/api/system/sample-collection-mode")
+@manual_flap_operation
 def set_sample_collection_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Toggle the feeder's sample-collection bypass.
 
@@ -638,14 +641,15 @@ def set_sample_collection_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
     if shared is None:
         return {"ok": False, "reason": "controller_not_initialized"}
     enabled = bool(payload.get("enabled", False))
-    shared.sample_collection_mode = enabled
     doors = (
         _open_all_layer_doors_for_sample_collection()
         if enabled
         else {"ok": True, "opened": 0, "errors": []}
     )
+    if doors["ok"]:
+        shared.sample_collection_mode = enabled
     return {
-        "ok": True,
+        "ok": doors["ok"],
         "enabled": shared.sample_collection_mode,
         "doors": doors,
     }

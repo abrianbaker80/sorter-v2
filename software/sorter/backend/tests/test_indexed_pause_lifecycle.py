@@ -13,7 +13,7 @@ def test_indexed_pause_preserves_distribution_transaction() -> None:
         resume=Mock(),
         cleanup=Mock(),
     )
-    coordinator.distribution = SimpleNamespace(cleanup=Mock())
+    coordinator.distribution = SimpleNamespace(cleanup=Mock(), resume=Mock(return_value=False))
 
     coordinator.pause()
 
@@ -23,6 +23,7 @@ def test_indexed_pause_preserves_distribution_transaction() -> None:
     coordinator.distribution.cleanup.assert_not_called()
 
     coordinator.resume()
+    coordinator.distribution.resume.assert_called_once_with()
     coordinator.classification.resume.assert_called_once_with()
 
 
