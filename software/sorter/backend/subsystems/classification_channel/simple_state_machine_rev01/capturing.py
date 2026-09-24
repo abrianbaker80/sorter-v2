@@ -74,7 +74,7 @@ class Capturing(Rev01BaseState):
             self.emitKnownObject()
             self.logger.info(f"{LOG_TAG} CAPTURING started (at rest, no carousel move)")
 
-        self._captureCrop(now, frame_bgr, frame_ts, bboxes)
+        self._captureCrop(now, frame_bgr, frame_ts, bboxes, getattr(raw[1], "correct_pixels", None) if raw is not None else None)
 
         c4_state = perception_service.read_state(4)
         if self.ctx.observeMultiFeed(
@@ -125,7 +125,7 @@ class Capturing(Rev01BaseState):
 
     # ---- shared ----
 
-    def _captureCrop(self, now: float, frame_bgr, frame_ts: float, bboxes: list) -> None:
+    def _captureCrop(self, now: float, frame_bgr, frame_ts: float, bboxes: list, color_correct=None) -> None:
         if frame_bgr is None or not bboxes:
             return
         if frame_ts <= self.ctx.last_capture_frame_ts:
@@ -136,6 +136,8 @@ class Capturing(Rev01BaseState):
         crop = self.cv.cropBbox(frame_bgr, primary_bbox, self.ctx.config.crop_padding_px)
         if crop is None:
             return
+        if color_correct is not None:
+            crop = color_correct(crop, "recognition_crop_color_ms")
         sharp = self.sharpness(crop)
         quality = crop_quality.scoreCrop(crop)
         self.ctx.captured_crops.append(crop)

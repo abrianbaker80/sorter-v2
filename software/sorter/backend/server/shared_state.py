@@ -69,10 +69,22 @@ _hardware_start_fn: Optional[Any] = None  # Callable set by main.py
 _hardware_initialize_fn: Optional[Any] = None  # Callable set by main.py
 _hardware_reset_fn: Optional[Any] = None  # Callable set by main.py
 _hardware_c4_drain_fn: Optional[Any] = None
+_hardware_c4_occupied_fn: Optional[Any] = None
+_hardware_c4_checkpoint_fn: Optional[Any] = None
 c4_drain_result: dict[str, Any] | None = None
 hardware_runtime_irl: Optional[Any] = None  # Active IRL during homing before controller exists
 hardware_worker_thread: Optional[threading.Thread] = None
+# Occupied C4 recovery has a private controller until it finishes. Pause must
+# signal that worker directly because its normal runtime command has no
+# published controller to receive it.
+occupied_recovery_cancel_event: Optional[threading.Event] = None
+occupied_recovery_cancel_complete_event: Optional[threading.Event] = None
+occupied_recovery_complete_event: Optional[threading.Event] = None
 hardware_lifecycle_lock = threading.RLock()
+# Serializes manual motion admission against the full occupied-checkpoint
+# preparation window. The lifecycle lock only covers endpoint dispatch, while
+# several stepper/stress routes continue moving in background workers.
+occupied_checkpoint_transition_lock = threading.Lock()
 
 CLASSIFICATION_BASELINE_SAMPLES = 12
 CLASSIFICATION_BASELINE_CAPTURE_TIMEOUT_S = 4.0

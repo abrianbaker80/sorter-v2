@@ -28,41 +28,22 @@ _SCHEMA_VERSION = 5
 # via the normal wal_autocheckpoint threshold instead of once per close.
 _KEEPER_LOCK = threading.Lock()
 _keeper_conn: "sqlite3.Connection | None" = None
-_keeper_path: Path | None = None
 
 
 def _ensure_keeper_connection() -> None:
-    global _keeper_conn, _keeper_path
+    global _keeper_conn
     with _KEEPER_LOCK:
-        requested_path = local_state_db_path().resolve()
-        if _keeper_conn is not None and _keeper_path == requested_path:
-            return
         if _keeper_conn is not None:
-            _keeper_conn.close()
-            _keeper_conn = None
-            _keeper_path = None
+            return
         try:
             # Held open and idle (never runs queries); check_same_thread=False
             # only because it's created on whichever thread inits state first.
             _keeper_conn = sqlite3.connect(
-                requested_path, timeout=5.0, check_same_thread=False
+                local_state_db_path(), timeout=5.0, check_same_thread=False
             )
             _keeper_conn.execute("PRAGMA journal_mode = WAL")
-            _keeper_path = requested_path
         except Exception:
             _keeper_conn = None
-            _keeper_path = None
-
-
-def close_local_state_keeper() -> None:
-    """Close the idle WAL keeper during an orderly shutdown or isolated test."""
-
-    global _keeper_conn, _keeper_path
-    with _KEEPER_LOCK:
-        if _keeper_conn is not None:
-            _keeper_conn.close()
-        _keeper_conn = None
-        _keeper_path = None
 
 _STATE_KEY_MACHINE_ID = "machine_id"
 _STATE_KEY_STEPPER_POSITIONS = "stepper_positions"
@@ -658,6 +639,37 @@ def initialize_local_state() -> None:
                 "total_time_s REAL NOT NULL DEFAULT 0, "
                 "error TEXT"
                 ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS power_stress_runs ("
+                "id TEXT PRIMARY KEY, "
+                "started_at REAL NOT NULL, "
+                "ended_at REAL, "
+                "duration_target_s REAL NOT NULL, "
+                "stepper_speed_microsteps_per_sec INTEGER NOT NULL, "
+                "chute_speed_microsteps_per_sec INTEGER NOT NULL, "
+                "chute_max_deg REAL NOT NULL, "
+                "status TEXT NOT NULL, "
+                "current_phase TEXT, "
+                "total_time_s REAL NOT NULL DEFAULT 0, "
+                "config_json TEXT NOT NULL, "
+                "error TEXT"
+                ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS power_stress_events ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT NOT NULL, "
+                "created_at REAL NOT NULL, "
+                "event_type TEXT NOT NULL, "
+                "phase TEXT, "
+                "details_json TEXT NOT NULL, "
+                "FOREIGN KEY(run_id) REFERENCES power_stress_runs(id) ON DELETE CASCADE"
+                ")"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_power_stress_events_run "
+                "ON power_stress_events(run_id, created_at)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS chute_calibrations ("
@@ -1296,32 +1308,24 @@ def get_cached_part_prices(
     Returns {(part_num, normalized_color_id): (moving_avg_price, cached_at)} for
     the pairs present in the cache."""
     initialize_local_state()
-    normalized = list(
-        dict.fromkeys(
-            (str(part_num), _normalize_cache_color_id(color_id))
-            for part_num, color_id in pairs
-            if part_num
-        )
-    )
     out: dict[tuple[str, str], tuple[float | None, float]] = {}
     with _connection() as conn:
-        # Stay below SQLite's common 999-variable limit while replacing one
-        # SELECT per pair with a handful of indexed batch lookups.
-        for offset in range(0, len(normalized), 400):
-            chunk = normalized[offset : offset + 400]
-            placeholders = ", ".join("(?, ?)" for _ in chunk)
-            params = [value for pair in chunk for value in pair]
-            rows = conn.execute(
-                "SELECT part_num, color_id, moving_avg_price, cached_at "
-                f"FROM hive_part_metadata_cache WHERE (part_num, color_id) IN ({placeholders})",
-                params,
-            ).fetchall()
-            for row in rows:
-                mv = row["moving_avg_price"]
-                out[(str(row["part_num"]), str(row["color_id"]))] = (
-                    float(mv) if isinstance(mv, (int, float)) else None,
-                    float(row["cached_at"]),
-                )
+        for part_num, color_id in pairs:
+            if not part_num:
+                continue
+            norm = _normalize_cache_color_id(color_id)
+            row = conn.execute(
+                "SELECT moving_avg_price, cached_at FROM hive_part_metadata_cache "
+                "WHERE part_num = ? AND color_id = ?",
+                (part_num, norm),
+            ).fetchone()
+            if row is None:
+                continue
+            mv = row["moving_avg_price"]
+            out[(part_num, norm)] = (
+                float(mv) if isinstance(mv, (int, float)) else None,
+                float(row["cached_at"]),
+            )
     return out
 
 
@@ -1818,118 +1822,6 @@ def clear_current_session_bins(
         )
         conn.commit()
         return {"ok": True, "cleared_bins": cleared_bins, "snapshot_id": closed_snapshot_id}
-
-
-def clear_current_session_bin_selection(
-    *,
-    bins: list[tuple[int, int, int]],
-    bin_categories: Any | None = None,
-) -> dict[str, Any]:
-    """Atomically mark an explicit selection of physical bins as emptied.
-
-    Harvest plans may select bins that do not share a layer or section.  The
-    generic clear API only supports one bin, one layer, or the whole machine;
-    looping over that API would create a partially-cleared state if a later
-    request failed.  This helper snapshots and clears the complete selection in
-    one local-state transaction while preserving the pre-clear assignments as
-    audit evidence.
-    """
-
-    normalized = sorted({(int(li), int(si), int(bi)) for li, si, bi in bins})
-    if not normalized:
-        return {"ok": True, "cleared_bins": 0, "snapshot_id": None}
-
-    initialize_local_state()
-    with _connection() as conn:
-        active_session_id = _get_meta(conn, _META_KEY_ACTIVE_SORTING_SESSION_ID)
-        if not active_session_id:
-            return {"ok": True, "cleared_bins": 0, "snapshot_id": None}
-
-        now = time.time()
-        snapshot_id: str | None = None
-        cleared_bins = 0
-        for layer_index, section_index, bin_index in normalized:
-            _ensure_bin_state_row_conn(
-                conn,
-                session_id=active_session_id,
-                layer_index=layer_index,
-                section_index=section_index,
-                bin_index=bin_index,
-            )
-            row = conn.execute(
-                "SELECT bin_epoch, piece_count, unique_item_count FROM bin_state_current "
-                "WHERE session_id = ? AND layer_index = ? AND section_index = ? AND bin_index = ?",
-                (active_session_id, layer_index, section_index, bin_index),
-            ).fetchone()
-            assert row is not None
-            current_epoch = int(row["bin_epoch"])
-            if int(row["piece_count"] or 0) > 0:
-                cleared_bins += 1
-                if snapshot_id is None:
-                    snapshot_id = _get_or_create_open_bin_snapshot_conn(conn, now)
-                _flush_bin_layer_to_snapshot_conn(
-                    conn,
-                    snapshot_id=snapshot_id,
-                    session_id=active_session_id,
-                    layer_index=layer_index,
-                    section_index=section_index,
-                    bin_index=bin_index,
-                    bin_epoch=current_epoch,
-                    piece_count=int(row["piece_count"]),
-                    unique_item_count=int(row["unique_item_count"] or 0),
-                    category_ids_json=_category_ids_json_for_bin(
-                        bin_categories, layer_index, section_index, bin_index
-                    ),
-                    flush_scope="selection",
-                    now=now,
-                )
-            conn.execute(
-                "UPDATE bin_state_current SET bin_epoch = ?, piece_count = 0, "
-                "unique_item_count = 0, last_distributed_at = NULL, updated_at = ? "
-                "WHERE session_id = ? AND layer_index = ? AND section_index = ? AND bin_index = ?",
-                (
-                    current_epoch + 1,
-                    now,
-                    active_session_id,
-                    layer_index,
-                    section_index,
-                    bin_index,
-                ),
-            )
-            conn.execute(
-                "DELETE FROM bin_item_aggregates WHERE session_id = ? AND layer_index = ? "
-                "AND section_index = ? AND bin_index = ?",
-                (active_session_id, layer_index, section_index, bin_index),
-            )
-
-        conn.execute(
-            "INSERT INTO bin_events(session_id, event_type, created_at, details_json) "
-            "VALUES(?, 'selection_cleared', ?, ?)",
-            (
-                active_session_id,
-                now,
-                json.dumps(
-                    {
-                        "scope": "selection",
-                        "bins": [
-                            {
-                                "layer_index": li,
-                                "section_index": si,
-                                "bin_index": bi,
-                            }
-                            for li, si, bi in normalized
-                        ],
-                    },
-                    sort_keys=True,
-                ),
-            ),
-        )
-        conn.commit()
-        return {
-            "ok": True,
-            "cleared_bins": cleared_bins,
-            "snapshot_id": snapshot_id,
-        }
 
 
 def get_current_bin_piece_counts() -> dict[tuple[int, int, int], int]:
@@ -2554,6 +2446,179 @@ def getChuteStressRun(run_id: str) -> dict[str, Any] | None:
             (run_id,),
         ).fetchone()
     return _chuteStressRowToDict(row)
+
+
+def _powerStressRowToDict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    try:
+        config = json.loads(row["config_json"])
+    except (TypeError, json.JSONDecodeError):
+        config = {}
+    return {
+        "id": row["id"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+        "duration_target_s": row["duration_target_s"],
+        "stepper_speed_microsteps_per_sec": row["stepper_speed_microsteps_per_sec"],
+        "chute_speed_microsteps_per_sec": row["chute_speed_microsteps_per_sec"],
+        "chute_max_deg": row["chute_max_deg"],
+        "status": row["status"],
+        "current_phase": row["current_phase"],
+        "total_time_s": row["total_time_s"],
+        "config": config,
+        "error": row["error"],
+    }
+
+
+def recordPowerStressRunStart(
+    *,
+    run_id: str,
+    started_at: float,
+    duration_target_s: float,
+    stepper_speed_microsteps_per_sec: int,
+    chute_speed_microsteps_per_sec: int,
+    chute_max_deg: float,
+    config: dict[str, Any],
+) -> None:
+    initialize_local_state()
+    with _connection() as conn:
+        conn.execute(
+            "INSERT INTO power_stress_runs("
+            "id, started_at, duration_target_s, stepper_speed_microsteps_per_sec, "
+            "chute_speed_microsteps_per_sec, chute_max_deg, status, config_json"
+            ") VALUES(?, ?, ?, ?, ?, ?, 'running', ?)",
+            (
+                run_id,
+                float(started_at),
+                float(duration_target_s),
+                int(stepper_speed_microsteps_per_sec),
+                int(chute_speed_microsteps_per_sec),
+                float(chute_max_deg),
+                json.dumps(config, sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+
+def updatePowerStressRunProgress(
+    *, run_id: str, current_phase: str | None, total_time_s: float
+) -> None:
+    initialize_local_state()
+    with _connection() as conn:
+        conn.execute(
+            "UPDATE power_stress_runs SET current_phase = ?, total_time_s = ? WHERE id = ?",
+            (current_phase, float(total_time_s), run_id),
+        )
+        conn.commit()
+
+
+def finalizePowerStressRun(
+    *,
+    run_id: str,
+    ended_at: float,
+    status: str,
+    total_time_s: float,
+    error: str | None,
+) -> None:
+    initialize_local_state()
+    with _connection() as conn:
+        conn.execute(
+            "UPDATE power_stress_runs SET ended_at = ?, status = ?, "
+            "total_time_s = ?, error = ? WHERE id = ?",
+            (float(ended_at), status, float(total_time_s), error, run_id),
+        )
+        conn.commit()
+
+
+def recordPowerStressEvent(
+    *,
+    run_id: str,
+    created_at: float,
+    event_type: str,
+    phase: str | None,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    initialize_local_state()
+    with _connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO power_stress_events("
+            "run_id, created_at, event_type, phase, details_json"
+            ") VALUES(?, ?, ?, ?, ?)",
+            (
+                run_id,
+                float(created_at),
+                event_type,
+                phase,
+                json.dumps(details, sort_keys=True),
+            ),
+        )
+        conn.commit()
+        event_id = cursor.lastrowid
+    return {
+        "id": event_id,
+        "run_id": run_id,
+        "created_at": float(created_at),
+        "event_type": event_type,
+        "phase": phase,
+        "details": details,
+    }
+
+
+def listPowerStressEvents(run_id: str) -> list[dict[str, Any]]:
+    initialize_local_state()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT id, run_id, created_at, event_type, phase, details_json "
+            "FROM power_stress_events WHERE run_id = ? ORDER BY created_at, id",
+            (run_id,),
+        ).fetchall()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            details = json.loads(row["details_json"])
+        except (TypeError, json.JSONDecodeError):
+            details = {}
+        events.append(
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "created_at": row["created_at"],
+                "event_type": row["event_type"],
+                "phase": row["phase"],
+                "details": details,
+            }
+        )
+    return events
+
+
+def listPowerStressRuns(limit: int = 100) -> list[dict[str, Any]]:
+    initialize_local_state()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT id, started_at, ended_at, duration_target_s, "
+            "stepper_speed_microsteps_per_sec, chute_speed_microsteps_per_sec, "
+            "chute_max_deg, status, current_phase, total_time_s, config_json, error "
+            "FROM power_stress_runs ORDER BY started_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [d for d in (_powerStressRowToDict(row) for row in rows) if d is not None]
+
+
+def getPowerStressRun(run_id: str) -> dict[str, Any] | None:
+    initialize_local_state()
+    with _connection() as conn:
+        row = conn.execute(
+            "SELECT id, started_at, ended_at, duration_target_s, "
+            "stepper_speed_microsteps_per_sec, chute_speed_microsteps_per_sec, "
+            "chute_max_deg, status, current_phase, total_time_s, config_json, error "
+            "FROM power_stress_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    run = _powerStressRowToDict(row)
+    if run is not None:
+        run["events"] = listPowerStressEvents(run_id)
+    return run
 
 
 # ---------------------------------------------------------------------------

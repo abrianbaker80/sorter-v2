@@ -113,6 +113,7 @@ class PerceptionService:
         # across every streaming client, instead of re-rendering on every poll.
         self._preview_lock = threading.Lock()
         self._preview_cache: Dict[int, tuple[float, int, np.ndarray]] = {}
+        self._generation_reset_timestamps: Dict[int, float] = {}
 
         # Reconcile machinery. ``context`` carries everything needed to
         # (re)build a single channel stack from disk at runtime; ``None`` (test
@@ -279,6 +280,7 @@ class PerceptionService:
                     logger=getattr(ctx.gc, "logger", None),
                     log_attribution=getattr(ctx.gc, "log_perception_attribution", False),
                 )
+                self._apply_generation_reset(channel_id, worker)
 
                 # Stop the outgoing worker BEFORE starting the new one: both
                 # read the same camera and (when the runtime is reused) share
@@ -333,6 +335,30 @@ class PerceptionService:
     def read_state(self, channel_id: int) -> ChannelState:
         slot = self._slots.get(channel_id)
         return slot.read() if slot is not None else EMPTY_STATE
+
+    def _apply_generation_reset(self, channel_id: int, worker: InferenceWorker) -> Optional[str]:
+        reset_boundary = self._generation_reset_timestamps.get(channel_id)
+        if reset_boundary is None:
+            return None
+        return worker.reset_tracker_generation(minimum_frame_timestamp=reset_boundary)
+
+    def reset_tracker_generation(self, channel_id: int) -> Optional[str]:
+        """Reset one channel after its physical occupancy has been drained."""
+        with self._start_lock:
+            boundary_ts = time.time()
+            self._generation_reset_timestamps[channel_id] = boundary_ts
+            worker = self._workers.get(channel_id)
+            slot = self._slots.get(channel_id)
+            generation = (
+                worker.reset_tracker_generation(minimum_frame_timestamp=boundary_ts)
+                if worker is not None
+                else None
+            )
+            if worker is None and slot is not None:
+                slot.write(EMPTY_STATE)
+            with self._preview_lock:
+                self._preview_cache.pop(channel_id, None)
+            return generation
 
     def read_bboxes_and_frame(self, channel_id: int):
         """Latest ``(on_channel_bboxes, PerceptionFrame)`` from the last
@@ -421,10 +447,6 @@ class PerceptionService:
             for z in channel.secondary_zones
             if (source_channel is None or z.source_channel == source_channel)
             and (zone_type is None or z.zone_type == zone_type)
-            # Occlusions are fixed hardware, never evidence that an upstream
-            # channel is occupied. Include them only for an explicit diagnostic
-            # query asking for the occlusion type itself.
-            and (z.zone_type != "occlusion" or zone_type == "occlusion")
         }
         if not matching_ids:
             return False
@@ -531,6 +553,7 @@ class PerceptionService:
             max_width=max_width,
             merged_bboxes=debug.get("merged_bboxes"),
             merged_track_ids=debug.get("merged_track_ids"),
+            color_correct=frame.color_correct,
         )
         with self._preview_lock:
             self._preview_cache[channel_id] = (ts, max_width, annotated)
@@ -670,7 +693,7 @@ def _frame_shape_for_capture(capture_thread: Any) -> Optional[tuple[int, int]]:
     that channel. The service caller retries once frames are flowing.
     """
     frame = getattr(capture_thread, "latest_frame", None)
-    raw = getattr(frame, "raw", None) if frame is not None else None
+    raw = (frame.source_bgr if hasattr(frame, "source_bgr") else getattr(frame, "raw", None)) if frame is not None else None
     if raw is None:
         return None
     shape = getattr(raw, "shape", None)

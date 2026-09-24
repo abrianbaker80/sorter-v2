@@ -24,6 +24,12 @@ FFT_HF_RADIUS = 20
 # as piece. Background is estimated from the crop's border pixels (2-means), so
 # this only needs to separate piece from backdrop, not be photometrically exact.
 BACKGROUND_COLOR_DIST = 40.0
+# Relative-to-best-in-burst acceptance margins for extra frames beyond the best
+# one. At (0.93, 0.65) on the labeled dataset: 8/43 blurred frames pass (mostly
+# in bursts where EVERY frame is blurred and something must ship), 8/71 starred
+# frames are dropped in favor of an equally-sharp sibling.
+FFT_RELATIVE_MARGIN = 0.93
+PIECE_SHARPNESS_RELATIVE_MARGIN = 0.65
 # Containment: the same piece should mask to roughly the same area in every
 # frame of its burst; a frame where the piece is partially out of the crop
 # shows a large drop vs the burst MEDIAN (not max — motion blur inflates the
@@ -32,12 +38,6 @@ BACKGROUND_COLOR_DIST = 40.0
 CONTAINMENT_AREA_RATIO = 0.70
 # Below this fraction of the crop there is effectively no piece in the frame.
 MIN_MASK_FRAC = 0.02
-# The detector crop itself is color-independent evidence. A crop whose pixel
-# area is far outside the rest of an at-rest burst usually contains a second
-# pocket/piece or a badly split detection. These deliberately broad bounds do
-# not reject ordinary detector-box jitter.
-MIN_CROP_AREA_RATIO = 0.45
-MAX_CROP_AREA_RATIO = 2.25
 # Crops larger than this (longest side) are downsampled before scoring. Bounds
 # the per-crop cost on the state-machine thread (~2 ms at typical crop sizes on
 # the dev Mac, ~10 ms unbounded at 400 px); within a burst every frame gets the
@@ -53,8 +53,6 @@ class CropQuality:
     lap_var_piece_norm: float
     mask_area_px: int
     mask_frac: float
-    # Pixel area of the original detector crop, before analysis downsampling.
-    crop_area_px: int
     # Raw whole-crop Laplacian variance, kept for logging continuity with the
     # stored `sharpness` values.
     lap_var: float
@@ -99,7 +97,6 @@ def pieceMask(bgr: np.ndarray) -> Optional[np.ndarray]:
 
 
 def scoreCrop(bgr: np.ndarray) -> CropQuality:
-    crop_area_px = int(bgr.shape[0] * bgr.shape[1])
     longest = max(bgr.shape[0], bgr.shape[1])
     if longest > MAX_ANALYSIS_SIZE:
         scale = MAX_ANALYSIS_SIZE / float(longest)
@@ -141,7 +138,6 @@ def scoreCrop(bgr: np.ndarray) -> CropQuality:
         lap_var_piece_norm=lap_var_piece_norm,
         mask_area_px=mask_area,
         mask_frac=mask_frac,
-        crop_area_px=crop_area_px,
         lap_var=lap_var,
     )
 
@@ -162,52 +158,38 @@ def _combinedRankOrder(qualities: list[CropQuality], eligible: list[int]) -> lis
 def selectBurstIndices(qualities: list[CropQuality], max_count: int) -> list[int]:
     """Which frames of one at-rest burst ship to classification.
 
-    Returns capture-order indices, always at least one when max_count permits.
-    Detector-crop geometry removes gross multi-pocket/outlier crops. The color
-    mask is used for containment only when the burst proves that mask reliable;
-    pale parts on a pale background otherwise lose their most informative
-    views. Every geometrically valid view is retained when it fits the caller's
-    existing image ceiling. Sharpness only ranks frames when a smaller ceiling
-    forces a choice (including the single-image anchor).
+    Returns capture-order indices, always at least one. Containment-filters
+    (piece partially/fully out of the crop), then rank-combines the two
+    sharpness metrics, keeps the best frame unconditionally and each further
+    frame only while it stays within the relative margins of the best — so a
+    burst with one junk frame ships fewer, better images instead of padding to
+    a fixed count.
     """
     n = len(qualities)
     if n == 0 or max_count <= 0:
         return []
     eligible = list(range(n))
-
-    if n >= 3:
-        median_crop_area = float(np.median([q.crop_area_px for q in qualities]))
+    if n > 1:
+        median_area = float(np.median([q.mask_area_px for q in qualities]))
         kept = [
             i
             for i in eligible
-            if MIN_CROP_AREA_RATIO * median_crop_area
-            <= qualities[i].crop_area_px
-            <= MAX_CROP_AREA_RATIO * median_crop_area
+            if qualities[i].mask_frac >= MIN_MASK_FRAC
+            and qualities[i].mask_area_px >= CONTAINMENT_AREA_RATIO * median_area
         ]
         if kept:
             eligible = kept
-
-    if len(eligible) > 1:
-        median_mask_frac = float(np.median([qualities[i].mask_frac for i in eligible]))
-        if median_mask_frac >= MIN_MASK_FRAC:
-            median_mask_area = float(
-                np.median([qualities[i].mask_area_px for i in eligible])
-            )
-            kept = [
-                i
-                for i in eligible
-                if qualities[i].mask_frac >= MIN_MASK_FRAC
-                and qualities[i].mask_area_px
-                >= CONTAINMENT_AREA_RATIO * median_mask_area
-            ]
-            if kept:
-                eligible = kept
-
-    if len(eligible) <= max_count:
-        return sorted(eligible)
-
     ordered = _combinedRankOrder(qualities, eligible)
-    return sorted(ordered[:max_count])
+    best = ordered[0]
+    keep = [best]
+    fft_floor = FFT_RELATIVE_MARGIN * qualities[best].fft_hf_ratio
+    lpn_floor = PIECE_SHARPNESS_RELATIVE_MARGIN * qualities[best].lap_var_piece_norm
+    for i in ordered[1:]:
+        if len(keep) >= max_count:
+            break
+        if qualities[i].fft_hf_ratio >= fft_floor and qualities[i].lap_var_piece_norm >= lpn_floor:
+            keep.append(i)
+    return sorted(keep)
 
 
 def bestIndex(qualities: list[CropQuality]) -> Optional[int]:

@@ -2,37 +2,23 @@ from __future__ import annotations
 
 import csv
 import io
-import logging
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Dict, Iterator, List, Literal, NoReturn, Optional, Self
+from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StrictBool,
-    StrictInt,
-    StrictStr,
-    ValidationError,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel
 
 from defs.events import KnownObjectData
 import server.shared_state as shared_state
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 BACKEND_PROCESS_STARTED_AT = time.time()
 
 _VALID_SORTS = ("recent", "oldest")
-_CATALOG_SUCCESS_CACHE_CONTROL = "private, max-age=3600, stale-while-revalidate=86400"
-_CATALOG_NO_STORE = "no-store"
 
 
 # A pending/classifying payload older than this process was started can never
@@ -272,206 +258,6 @@ def getPieceColors() -> ColorsResponse:
         return ColorsResponse(results=[])
     colors = hive_metadata.listBrickLinkColors(gc)
     return ColorsResponse(results=[ColorOption(**c) for c in colors])
-
-
-PartCatalogNamespace = Literal[
-    "rebrickable_part_number", "bricklink_item_number"
-]
-PartCatalogStatus = Literal[
-    "resolved", "no_image", "not_found", "temporarily_unavailable"
-]
-
-
-class _PartCatalogCorrelation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    part_namespace: PartCatalogNamespace
-    color_id: Optional[StrictStr] = None
-    color_namespace: Optional[StrictStr] = None
-
-    @model_validator(mode="after")
-    def validateColorCorrelation(self) -> Self:
-        if (self.color_id is None) != (self.color_namespace is None):
-            raise ValueError("color_id and color_namespace must be provided together")
-        for field_name, value in (
-            ("color_id", self.color_id),
-            ("color_namespace", self.color_namespace),
-        ):
-            if value is not None and (not value or value != value.strip()):
-                raise ValueError(
-                    f"{field_name} must be a nonblank string without outer whitespace"
-                )
-        return self
-
-
-class PartCatalogQuery(_PartCatalogCorrelation):
-    pass
-
-
-class PartCatalogItemRequest(_PartCatalogCorrelation):
-    part_id: StrictStr = Field(min_length=1, max_length=64)
-
-    @field_validator("part_id")
-    @classmethod
-    def validatePartId(cls, value: str) -> str:
-        if value != value.strip():
-            raise ValueError("part_id must not contain outer whitespace")
-        return value
-
-
-class PartCatalogBatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    parts: List[PartCatalogItemRequest] = Field(min_length=1, max_length=250)
-
-
-class PartCatalogResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    requested_part_id: StrictStr
-    requested_part_namespace: PartCatalogNamespace
-    requested_color_id: Optional[StrictStr]
-    requested_color_namespace: Optional[StrictStr]
-    canonical_part_id: Optional[StrictStr]
-    canonical_part_namespace: Optional[PartCatalogNamespace]
-    provider_part_id: Optional[StrictStr]
-    name: Optional[StrictStr]
-    image_url: Optional[StrictStr]
-    image_source: Optional[StrictStr]
-    image_match: Literal["exact", "mapped", "none"]
-    color_specific: StrictBool
-    found: StrictBool
-    status: PartCatalogStatus
-    stale: StrictBool
-    retry_after_seconds: Optional[StrictInt] = Field(ge=0)
-
-
-class PartCatalogBatchResponse(BaseModel):
-    results: List[PartCatalogResponse]
-
-
-def _publicCatalogResponse(result: Any) -> PartCatalogResponse:
-    if not isinstance(result, dict):
-        raise TypeError("catalog resolver result must be a dictionary")
-    return PartCatalogResponse.model_validate(
-        {
-            field_name: result.get(field_name)
-            for field_name in PartCatalogResponse.model_fields
-        }
-    )
-
-
-def _raiseCatalogError(
-    status_code: int,
-    code: str,
-    message: str,
-    retry_after_seconds: Optional[int] = None,
-) -> NoReturn:
-    headers = {"Cache-Control": _CATALOG_NO_STORE}
-    if (
-        isinstance(retry_after_seconds, int)
-        and not isinstance(retry_after_seconds, bool)
-        and retry_after_seconds >= 0
-    ):
-        headers["Retry-After"] = str(retry_after_seconds)
-    raise HTTPException(
-        status_code=status_code,
-        detail={"code": code, "message": message},
-        headers=headers,
-    )
-
-
-def _raiseTemporaryCatalogError(
-    result: Dict[str, Any], response: PartCatalogResponse
-) -> NoReturn:
-    failure_kind = result.get("_failure_kind")
-    if failure_kind == "timeout":
-        status_code = 504
-        code = "PART_CATALOG_TIMEOUT"
-        message = "Part catalog request timed out."
-    elif failure_kind in {"provider_error", "malformed_response"}:
-        status_code = 502
-        code = "PART_CATALOG_PROVIDER_ERROR"
-        message = "Part catalog provider failed."
-    else:
-        status_code = 503
-        code = "PART_CATALOG_UNAVAILABLE"
-        message = "Part catalog is temporarily unavailable."
-    _raiseCatalogError(
-        status_code, code, message, response.retry_after_seconds
-    )
-
-
-def _raiseInternalCatalogError(operation: str) -> NoReturn:
-    logger.exception("Part catalog %s failed", operation)
-    _raiseCatalogError(
-        500,
-        "PART_CATALOG_INTERNAL_ERROR",
-        "Part catalog request failed.",
-    )
-
-
-@router.post(
-    "/api/pieces/catalog/resolve", response_model=PartCatalogBatchResponse
-)
-def resolvePartCatalogBatch(
-    body: PartCatalogBatchRequest, response: Response
-) -> PartCatalogBatchResponse:
-    import hive_metadata
-
-    response.headers["Cache-Control"] = _CATALOG_NO_STORE
-    requests = [part.model_dump() for part in body.parts]
-    try:
-        results = hive_metadata.resolvePartCatalogBatch(requests)
-    except Exception:
-        _raiseInternalCatalogError("batch resolver")
-
-    try:
-        if not isinstance(results, list) or len(results) != len(requests):
-            raise ValueError("catalog batch resolver returned unaligned results")
-        public_results = [_publicCatalogResponse(result) for result in results]
-    except (TypeError, ValueError, ValidationError):
-        _raiseInternalCatalogError("batch response normalization")
-    return PartCatalogBatchResponse(results=public_results)
-
-
-@router.get(
-    "/api/pieces/catalog/{part_id}", response_model=PartCatalogResponse
-)
-def getPartCatalog(
-    part_id: Annotated[
-        str, Path(min_length=1, max_length=64, pattern=r"^\S(?:.*\S)?$")
-    ],
-    query: Annotated[PartCatalogQuery, Query()],
-    response: Response,
-) -> PartCatalogResponse:
-    import hive_metadata
-
-    try:
-        result = hive_metadata.resolvePartCatalog(
-            part_id,
-            query.part_namespace,
-            query.color_id,
-            query.color_namespace,
-        )
-    except Exception:
-        _raiseInternalCatalogError("single resolver")
-
-    try:
-        public_result = _publicCatalogResponse(result)
-    except (TypeError, ValueError, ValidationError):
-        _raiseInternalCatalogError("single response normalization")
-    if public_result.status == "not_found":
-        _raiseCatalogError(
-            404,
-            "PART_CATALOG_NOT_FOUND",
-            "Part catalog entry was not found.",
-        )
-    if public_result.status == "temporarily_unavailable":
-        _raiseTemporaryCatalogError(result, public_result)
-
-    response.headers["Cache-Control"] = _CATALOG_SUCCESS_CACHE_CONTROL
-    return public_result
 
 
 _CSV_COLUMNS = [

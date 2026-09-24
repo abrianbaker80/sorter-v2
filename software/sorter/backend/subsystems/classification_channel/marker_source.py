@@ -98,6 +98,9 @@ class BridgeMarkerSource:
             or not 0 <= float(health.get("last_frame_age_s", math.inf)) <= 0.25
         ):
             raise PositionError("camera bridge unavailable, stale, or incompatible")
+        # Source cadence is metadata for startup continuity, not validation age.
+        fps = float(health.get("fps", 0))
+        self.capture_period_s = 1.0 / fps if math.isfinite(fps) and fps > 0 else None
         epoch = str(UUID(health["source_epoch"]))
         sequence, captured = (
             health["source_sequence"],
@@ -110,6 +113,13 @@ class BridgeMarkerSource:
             or captured <= 0
         ):
             raise PositionError("invalid camera fence")
+        # Passive evidence only: retain the source capture behind this fence.
+        self.last_fence_health = {
+            "epoch": epoch,
+            "sequence": sequence,
+            "source_capture_monotonic_ns": captured,
+            "last_frame_age_s": float(health["last_frame_age_s"]),
+        }
         # The most recent capture may precede the health request by up to the
         # admitted age. Fence that entire budget before the settle interval.
         return FrameFence(epoch, sequence, captured + 250_000_000)
@@ -118,9 +128,11 @@ class BridgeMarkerSource:
         import cv2
         import numpy as np
 
+        self.last_observation = None
         jpeg = self.fetch("/snapshot.jpg")
         identity = capture_identity(jpeg)
         received = self.clock()
+        received_wall = time.time()
         latest = self.fence()
         source_age_ns = latest.captured_ns - 250_000_000 - identity.captured_ns
         if (
@@ -135,6 +147,16 @@ class BridgeMarkerSource:
         if image is None or image.shape[:2] != self.shape:
             raise PositionError("camera image geometry changed")
         measured = phase(image, self.center)
+        # Preserve identity even when no marker fit is returned. This is never
+        # used for source validation or marker control decisions.
+        self.last_observation = {
+            "epoch": identity.epoch,
+            "sequence": identity.sequence,
+            "source_capture_monotonic_ns": identity.captured_ns,
+            "retrieval_monotonic_s": received,
+            "retrieval_wall_s": received_wall,
+            "phase_deg": measured,
+        }
         if measured is None:
             return None
         return MarkerSample(

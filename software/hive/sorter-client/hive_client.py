@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote, urlsplit
 
 import requests
 
@@ -18,95 +14,10 @@ import requests
 class HiveError(Exception):
     """Error returned by the Hive API."""
 
-    def __init__(
-        self,
-        status_code: int,
-        message: str,
-        code: str | None = None,
-        retry_after_seconds: int | None = None,
-        *,
-        local_validation: bool = False,
-    ):
+    def __init__(self, status_code: int, message: str, code: str | None = None):
         self.status_code = status_code
         self.code = code
-        self.retry_after_seconds = retry_after_seconds
-        # Set only by client validation, never from a provider response body.
-        self.local_validation = local_validation
         super().__init__(message)
-
-
-def _parse_retry_after_seconds(value: str | None) -> int | None:
-    """Parse an HTTP Retry-After delta or date without acting on it."""
-    if value is None:
-        return None
-    value = value.strip()
-    if not value:
-        return None
-
-    try:
-        seconds = int(value, 10)
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
-        return max(0, math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds()))
-    return seconds if seconds >= 0 else None
-
-
-def _trusted_catalog_url(value: Any, hostname: str) -> Any:
-    if not isinstance(value, str) or not value or value != value.strip():
-        return None
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != hostname
-        or parsed.username is not None or parsed.password is not None
-        or port not in (None, 443)
-    ):
-        return None
-    return parsed
-
-
-def _validate_catalog_metadata(part_num: str, payload: dict[str, Any]) -> None:
-    name = payload.get("name")
-    image_url = payload.get("img_url")
-    part_url = payload.get("part_url")
-    image_parts = _trusted_catalog_url(image_url, "cdn.rebrickable.com")
-    part_parts = _trusted_catalog_url(part_url, "rebrickable.com")
-    part_path = part_parts.path.split("/") if part_parts is not None else []
-    valid = (
-        payload.get("source") == "hive"
-        and payload.get("part_num") == part_num
-        and ("found" not in payload or payload.get("found") is True) and payload.get("color_id") is None
-        and (name is None or (isinstance(name, str) and bool(name) and name == name.strip()))
-        and (
-            image_url is None
-            or (image_parts is not None and image_parts.path.startswith("/media/"))
-        )
-        and (
-            part_url is None
-            or (
-                len(part_path) >= 3
-                and part_path[1] == "parts"
-                and unquote(part_path[2]) == part_num
-            )
-        )
-        and (image_parts is not None or part_parts is not None)
-    )
-    if not valid:
-        raise HiveError(
-            502,
-            "Hive metadata response failed catalog validation.",
-            "MALFORMED_RESPONSE",
-            local_validation=True,
-        )
 
 
 class HiveClient:
@@ -121,21 +32,15 @@ class HiveClient:
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         url = f"{self.api_url}{path}"
         resp = self._session.request(method, url, **kwargs)
-        if not 200 <= resp.status_code < 300:
+        if not resp.ok:
             try:
                 body = resp.json()
-            except ValueError:
-                body = None
-            if not isinstance(body, dict):
-                body = {}
-            message = body.get("error")
-            code = body.get("code")
-            if not isinstance(message, str) or not message:
-                message = f"Hive request failed with HTTP {resp.status_code}."
-            if not isinstance(code, str):
+                message = body.get("error", resp.text)
+                code = body.get("code")
+            except (ValueError, KeyError):
+                message = resp.text
                 code = None
-            retry_after = _parse_retry_after_seconds(resp.headers.get("Retry-After"))
-            raise HiveError(resp.status_code, message, code, retry_after)
+            raise HiveError(resp.status_code, message, code)
         if resp.status_code == 204:
             return None
         return resp.json()
@@ -153,7 +58,7 @@ class HiveClient:
             payload["local_ui_port"] = str(local_ui_port)
         return self._request("POST", "/api/machine/heartbeat", json=payload)
 
-    def get_part_metadata(self, part_num: str, color_id: int | None = None, *, catalog: bool = False) -> dict:
+    def get_part_metadata(self, part_num: str, color_id: int | None = None) -> dict:
         """GET /api/machine/parts/{part_num} -- flattened per-piece metadata:
         part identity, BrickLink item, the color-selected price + moving average,
         and the resolved physical ``dimensions`` block (mm). ``color_id`` (a
@@ -163,31 +68,9 @@ class HiveClient:
         classification path, so a hung/slow Hive must fail fast rather than
         stall sorting. The caller treats any failure as "no metadata"."""
         params = {"color_id": color_id} if color_id is not None else None
-        try:
-            payload = self._request(
-                "GET",
-                f"/api/machine/parts/{quote(part_num, safe='')}",
-                params=params,
-                timeout=(2, 4),
-            )
-        except ValueError:
-            raise HiveError(
-                502,
-                "Hive metadata response was not valid JSON.",
-                "MALFORMED_RESPONSE",
-                local_validation=True,
-            ) from None
-
-        if not isinstance(payload, dict):
-            raise HiveError(
-                502,
-                "Hive metadata response was not a JSON object.",
-                "MALFORMED_RESPONSE",
-                local_validation=True,
-            )
-        if catalog:
-            _validate_catalog_metadata(part_num, payload)
-        return payload
+        return self._request(
+            "GET", f"/api/machine/parts/{part_num}", params=params, timeout=(2, 4)
+        )
 
     def batch_piece_prices(self, pairs: list[dict]) -> dict:
         """POST /api/machine/parts/prices -- moving-average price for many

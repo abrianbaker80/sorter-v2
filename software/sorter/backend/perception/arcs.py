@@ -87,38 +87,6 @@ def mergeNearbyBboxes(
     return out
 
 
-def mergeC4BboxesPreservingIntake(
-    bboxes: Iterable[Bbox], gap_px: float, channel: ChannelDef
-) -> list[tuple[Bbox, list[Bbox]]]:
-    """Merge over-segmentation without moving evidence across the intake edge.
-
-    Axis-aligned boxes in adjacent carousel pockets can overlap across a
-    diagonal divider. Their union can put an arrived piece's COM outside DROP,
-    hiding it from arrival confirmation. Use the same calibrated COM attribution
-    as the consumer to keep intake and non-intake members separate. Also reject
-    a union that changes that attribution; neighbor boxes cannot manufacture
-    intake evidence merely by being merged.
-    """
-    boxes = [tuple(int(v) for v in b) for b in bboxes]
-    raw_zones = {b: zone for _, _, zone, b in orderedPieceObservations(boxes, channel)}
-    groups: dict[bool, list[Bbox]] = {True: [], False: []}
-    out: list[tuple[Bbox, list[Bbox]]] = []
-    for box in boxes:
-        if box not in raw_zones:
-            # Missing calibration/on-channel attribution cannot justify merging.
-            out.append((box, [box]))
-        else:
-            groups[raw_zones[box] == 1].append(box)
-    for in_intake, members in groups.items():
-        for merged, sources in mergeNearbyBboxes(members, gap_px):
-            attributed = orderedPieceObservations([merged], channel)
-            if attributed and (attributed[0][2] == 1) == in_intake:
-                out.append((merged, sources))
-            else:
-                out.extend((source, [source]) for source in sources)
-    return out
-
-
 def bboxArea(bbox: Bbox) -> int:
     x1, y1, x2, y2 = bbox
     w = x2 - x1
@@ -289,6 +257,31 @@ def exitOnlySections(channel: ChannelDef) -> frozenset[int]:
     return exit_only if exit_only else channel.exit_sections
 
 
+def pieceClearanceToExitDeg(bbox: Bbox, channel: ChannelDef) -> float | None:
+    """Clearance of the entire bbox, not its COM, to the actual exit arc."""
+    exit_sections = exitOnlySections(channel)
+    ordered_exit = _orderedCircularSections(exit_sections)
+    support = _orderedCircularSections(bboxSections(bbox, channel))
+    if not ordered_exit or not support or not bboxInsideChannelMask(bbox, channel):
+        return None
+    cx, cy = channel.center
+    x1, y1, x2, y2 = bbox
+    if x1 <= cx <= x2 and y1 <= cy <= y2:
+        return 0.0
+    span = (support[-1] - support[0]) % SECTION_COUNT
+    if span >= SECTION_COUNT // 2:
+        return 0.0
+    covered = {(support[0] + n) % SECTION_COUNT for n in range(span + 1)}
+    if covered & exit_sections:
+        return 0.0
+    reverse = bool(getattr(channel, "reverse", False))
+    entry = ordered_exit[-1] if reverse else ordered_exit[0]
+    distance = min(((sec - entry) if reverse else (entry - sec)) % SECTION_COUNT
+                   for sec in covered)
+    # Round section occupancy outward, leaving one angular cell at the boundary.
+    return max(0.0, (distance - 1) * SECTION_DEG)
+
+
 def exitComForwardDeg(
     bboxes: Iterable[Bbox], channel: ChannelDef
 ) -> float | None:
@@ -402,23 +395,17 @@ def comForwardToPreciseEntryDeg(
     is no on-channel piece or the channel has no precise arc."""
     best = _leadingExitApproach(bboxes, channel)
     reverse = bool(getattr(channel, "reverse", False))
-    precise_entry = _arcEntryRelativeDeg(channel.precise_sections, reverse)
-    exit_entry = _arcEntryRelativeDeg(exitOnlySections(channel), reverse)
-    if best is None or precise_entry is None or exit_entry is None:
+    entry_rel = _arcEntryRelativeDeg(channel.precise_sections, reverse)
+    if best is None or entry_rel is None:
         return None
-
-    # ``best[0]`` is already branch-cut safe: a piece on the rear arc remains a
-    # large positive distance from the real exit instead of being folded into a
-    # negative "already past it" value.  The precise entry is a fixed distance
-    # before that exit in the configured travel direction, so derive its gap by
-    # subtracting that offset.  Computing a fresh modulo gap here and folding at
-    # 180 degrees made pieces just over half a revolution from precise reverse
-    # through the physical fall-off opening.
+    com_rel = float(best[1]) * SECTION_DEG
     if reverse:
-        precise_to_exit = (precise_entry - exit_entry) % 360.0
+        gap = (com_rel - entry_rel) % 360.0
     else:
-        precise_to_exit = (exit_entry - precise_entry) % 360.0
-    return float(best[0]) - precise_to_exit
+        gap = (entry_rel - com_rel) % 360.0
+    if gap > 180.0:
+        gap -= 360.0
+    return gap
 
 
 def comInPreciseZone(bboxes: Iterable[Bbox], channel: ChannelDef) -> bool:

@@ -54,6 +54,71 @@ def create_positioner(irl, config, on_fault):
     return MarkerPositioner(motor, source, mapping, on_fault)
 
 
+class _BootstrapMarkers(StableMarkers):
+    """Stationary startup evidence uses source chronology, not consumer cadence.
+
+    The newest fit must be fresh to complete. Earlier valid fits may support
+    stability even when processing made them stale at validation. Continuity
+    permits skipped source frames at the bridge-reported capture period, plus
+    the existing freshness budget; missing cadence uses the conservative gap.
+    The controller's existing startup deadline bounds the entire history.
+    """
+
+    def __init__(self, fence, geometry, limits, *, capture_period_s=None):
+        super().__init__(fence, geometry, limits)
+        self.capture_period_s = capture_period_s
+
+    def add(self, sample, now):
+        import math
+        import statistics
+        if sample is None:
+            self.samples.clear()
+            return None
+        if sample.epoch != self.fence.epoch or sample.geometry != self.geometry:
+            self.samples.clear()
+            raise PositionError("camera epoch or geometry changed during bootstrap")
+        # This is a source-frame fence, not an image region or marker filter.
+        if sample.sequence <= self.fence.sequence or sample.captured_ns <= self.fence.captured_ns:
+            if self.samples:
+                self.samples.clear()
+            return None
+        if sample.sequence <= self.last_sequence or sample.captured_ns <= self.last_capture:
+            self.samples.clear()
+            self.last_sequence, self.last_capture = sample.sequence, sample.captured_ns
+            return None
+        if self.samples:
+            previous = self.samples[-1]
+            elapsed = (sample.captured_ns - previous.captured_ns) / 1e9
+            skipped = sample.sequence - previous.sequence - 1
+            expected = skipped * (self.capture_period_s or 0.0)
+            if elapsed - expected > self.limits.max_sample_age_s:
+                self.samples.clear()
+        self.last_sequence, self.last_capture = sample.sequence, sample.captured_ns
+        age = now - sample.received_mono
+        if not math.isfinite(age) or age < 0:
+            return None
+        if not math.isfinite(sample.phase_deg) or not 0 <= sample.phase_deg < 360:
+            self.samples.clear()
+            return None
+        if sample.captured_ns <= self.fence.captured_ns + self.limits.settle_s * 1e9:
+            return None
+        self.samples.append(sample)
+        offsets = [error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples]
+        if max(offsets) - min(offsets) > self.limits.stable_spread_deg:
+            self.samples = [sample]
+            return None
+        if len(self.samples) > 32:
+            self.samples = self.samples[:1] + self.samples[-31:]
+        if (age > self.limits.max_sample_age_s or len(self.samples) < 3
+                or (sample.captured_ns - self.samples[0].captured_ns) / 1e9 < self.limits.stable_span_s):
+            return None
+        offsets = [error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples]
+        return type(sample)(sample.epoch, sample.sequence, sample.captured_ns,
+                            sample.received_mono,
+                            (self.samples[0].phase_deg + statistics.median(offsets)) % 360,
+                            sample.geometry)
+
+
 class PhysicalC4Controller:
     physical_c4_authority = True
 
@@ -148,15 +213,18 @@ class PhysicalC4Controller:
         p = self.positioner
         if self._bootstrap is None:
             self._bootstrap_token = p.motor.stationary_token()
-            self._bootstrap = StableMarkers(
-                p.source.fence(), p.mapping.geometry, p.limits
+            fence = p.source.fence()
+            self._bootstrap = _BootstrapMarkers(
+                fence, p.mapping.geometry, p.limits,
+                capture_period_s=getattr(p.source, "capture_period_s", None),
             )
             self._bootstrap_started = now
         if p.pending is None and p.boundary is None:
             p.motor.check_token(self._bootstrap_token)
             if now - self._bootstrap_started > p.limits.timeout_s:
                 raise PositionError("Cannot establish C4 marker phase")
-            sample = self._bootstrap.add(p.source.sample(), now)
+            observation = p.source.sample()
+            sample = self._bootstrap.add(observation, time.monotonic())
             p.motor.check_token(self._bootstrap_token)
             if sample is None:
                 return

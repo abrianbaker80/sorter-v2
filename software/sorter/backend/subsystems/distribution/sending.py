@@ -1,15 +1,13 @@
 import time
 import queue
 from typing import Optional
-import server.shared_state as shared_state
 from states.base_state import BaseState
 from subsystems.shared_variables import SharedVariables
 from .states import DistributionState
 from irl.config import IRLInterface
 from global_config import GlobalConfig
 from utils.event import knownObjectToEvent
-from defs.known_object import PieceStage, UNVERIFIED_C4_HANDOFF
-from defs.events import PauseCommandData, PauseCommandEvent
+from defs.known_object import PieceStage
 from subsystems.classification_channel.incidents import (
     CLASSIFICATION_TRACK_LOST_INCIDENT_KIND,
     publish_classification_track_lost_incident,
@@ -42,7 +40,7 @@ class Sending(BaseState):
         self._occupancy_state: str | None = None
         self._committed: bool = False
         self._exit_wait_incident_piece_uuid: str | None = None
-        self._harvest_pause_enqueued: bool = False
+        self.settled_piece_uuid: str | None = None
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -82,14 +80,10 @@ class Sending(BaseState):
                     return DistributionState.IDLE
                 return None
 
-        # An orphaned positioning slot can enter SENDING without a new physical
-        # index. A previously completed drop must never be credited twice.
-        if self.piece is not None and self.piece.stage == PieceStage.distributed:
-            self._committed = True
         elapsed_ms = (now - self.start_time) * 1000
         settle_ms = self._settleMs()
+        self._setOccupancyState("sending.wait_chute_settle")
         if elapsed_ms < settle_ms:
-            self._setOccupancyState("sending.wait_chute_settle")
             return None
 
         # Commit the piece once (stats, event, recorder) — must not repeat
@@ -98,23 +92,12 @@ class Sending(BaseState):
             self.logger.info(f"Sending: settle complete ({elapsed_ms:.0f}ms)")
             self._setOccupancyState("sending.commit_piece")
             if self.piece:
-                try:
-                    from project_harvest_runtime import confirm_piece_drop
-
-                    unverified = self.piece.transport_failure_reason == UNVERIFIED_C4_HANDOFF
-                    harvest_result = None if unverified else confirm_piece_drop(self.gc, self.piece)
-                except Exception as exc:
-                    self.logger.exception("Sending: Harvest physical confirmation failed")
-                    self._pauseForHarvestFailure(str(exc))
-                    self._setOccupancyState("sending.harvest_confirmation_failed")
-                    return None
                 self.piece.stage = PieceStage.distributed
                 self.piece.distributed_at = time.time()
                 self.piece.updated_at = time.time()
                 self.event_queue.put(knownObjectToEvent(self.piece))
-                if not unverified:
-                    self.gc.run_recorder.recordPiece(self.piece)
-                tracker = None if unverified else getattr(self.gc, 'set_progress_tracker', None)
+                self.gc.run_recorder.recordPiece(self.piece)
+                tracker = getattr(self.gc, 'set_progress_tracker', None)
                 if tracker is not None:
                     tracker.record(
                         self.piece.part_id,
@@ -127,18 +110,6 @@ class Sending(BaseState):
                         getSetProgressSyncWorker().notify()
                     except Exception:
                         pass
-                if isinstance(harvest_result, dict):
-                    self.gc.runtime_stats.observeHarvestConfirmation(harvest_result)
-                    if harvest_result.get("project_completed"):
-                        self.logger.info(
-                            "Sending: Harvest project quantities are complete; pausing sorter"
-                        )
-                        self._enqueuePause()
-                    elif harvest_result.get("pause_required"):
-                        self.logger.info(
-                            "Sending: Harvest controlled test reached its piece limit; pausing sorter"
-                        )
-                        self._enqueuePause()
             self._committed = True
 
         # Chute-settle timer elapsed and the piece has been committed. Now
@@ -155,35 +126,8 @@ class Sending(BaseState):
             return None
 
         self.shared.set_distribution_gate(True, reason=None)
+        self.settled_piece_uuid = str(self.piece.uuid) if self.piece is not None else None
         return DistributionState.IDLE
-
-    def _enqueuePause(self) -> None:
-        if self._harvest_pause_enqueued:
-            return
-        command_queue = shared_state.command_queue
-        if command_queue is None:
-            self.logger.error(
-                "Sending: cannot enqueue Harvest safety pause because the controller "
-                "command queue is unavailable"
-            )
-            return
-        try:
-            command_queue.put_nowait(
-                PauseCommandEvent(tag="pause", data=PauseCommandData())
-            )
-            self._harvest_pause_enqueued = True
-        except Exception:
-            self.logger.exception("Sending: failed to enqueue Harvest safety pause")
-
-    def _pauseForHarvestFailure(self, detail: str) -> None:
-        try:
-            with shared_state.hardware_lifecycle_lock:
-                shared_state.setHardwareStatus(
-                    error=f"Harvest live sorting paused: {detail}"
-                )
-        except Exception:
-            pass
-        self._enqueuePause()
 
     def _shouldReopenGate(self) -> bool:
         if self.piece is not None and self.piece.c4_marker_exit_boundary is not None:
@@ -308,10 +252,8 @@ class Sending(BaseState):
 
     def cleanup(self) -> None:
         super().cleanup()
-        self._occupancy_state = None
-        self.gc.runtime_stats.endState("distribution.occupancy")
         self.piece = None
         self.start_time = 0.0
         self._committed = False
         self._exit_wait_incident_piece_uuid = None
-        self._harvest_pause_enqueued = False
+        self.settled_piece_uuid = None

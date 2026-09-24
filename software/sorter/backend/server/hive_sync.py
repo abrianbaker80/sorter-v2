@@ -104,14 +104,6 @@ def _machineBusy(gc: Any) -> bool:
         return True
 
 
-def _recordStreamCaughtUp(record_watermark: int | None) -> bool:
-    """Corrections may only follow piece records that Hive already has."""
-    return (
-        record_watermark is not None
-        and piece_records.getMaxRecordId() <= int(record_watermark)
-    )
-
-
 def _is_transient(exc: Exception) -> bool:
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
         return True
@@ -461,11 +453,6 @@ class _TargetSyncer:
         # piece_records. The append-only piece_corrections log gives a clean
         # monotonic cursor; Hive upserts the latest edit per piece.
         if not telemetryAllows(self._id, "piece_metadata"):
-            return False
-        # Hive applies a correction by piece UUID and cannot apply it before the
-        # corresponding piece row exists. Never let the independent correction
-        # cursor outrun the base-record cursor.
-        if not _recordStreamCaughtUp(self._wm[DATA_TYPE_RECORDS]):
             return False
         wm = int(self._wm[DATA_TYPE_CORRECTIONS] or 0)
         if piece_records.getMaxCorrectionId() <= wm:

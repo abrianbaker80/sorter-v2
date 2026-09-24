@@ -16,18 +16,6 @@ MIN_INTERVAL_S = 0.1
 # How often the loop wakes to notice an enable/disable flip while idle.
 _IDLE_POLL_S = 0.25
 
-# C2/C3 move the subject through the frame.  Periodic training samples from
-# those cameras are useful only after their rotor has been still long enough
-# for a new camera frame to arrive.  This wait happens solely in the sampler's
-# background thread; it never pauses or changes sorter motion.
-_MOTION_AWARE_STEPPERS = {
-    "c_channel_2": "c_channel_2_rotor_stepper",
-    "c_channel_3": "c_channel_3_rotor_stepper",
-}
-_MOTION_SETTLE_S = 0.20
-_MOTION_WAIT_TIMEOUT_S = 2.0
-_MOTION_POLL_S = 0.04
-
 # Decay defaults: a run's first samples come fast (burst), then the interval
 # grows geometrically to a slow floor over the ramp so the same rig stops
 # re-uploading near-identical frames forever. Jitter breaks the periodicity so
@@ -72,8 +60,6 @@ class SampleCollector:
         self._saved_count = 0
         self._last_saved_at: float | None = None
         self._last_error: str | None = None
-        self._motion_deferred_count = 0
-        self._last_motion_deferred_roles: list[str] = []
         self._loadPersisted()
 
     @staticmethod
@@ -246,8 +232,6 @@ class SampleCollector:
                 "last_saved_at": last_saved_at,
                 "last_saved_age_s": (now - last_saved_at) if last_saved_at else None,
                 "last_error": self._last_error,
-                "motion_deferred_count": self._motion_deferred_count,
-                "last_motion_deferred_roles": list(self._last_motion_deferred_roles),
             }
 
     def _isSorting(self) -> bool:
@@ -290,49 +274,6 @@ class SampleCollector:
             self._wake.wait(timeout=wait_s)
             self._wake.clear()
 
-    @staticmethod
-    def _stepperForRole(role: str) -> Any | None:
-        attribute = _MOTION_AWARE_STEPPERS.get(role)
-        if attribute is None:
-            return None
-        from server import shared_state
-
-        irl = shared_state.getActiveIRL()
-        return getattr(irl, attribute, None) if irl is not None else None
-
-    def _stationaryFreshFrame(self, role: str, capture: Any) -> Any | None:
-        if role not in _MOTION_AWARE_STEPPERS:
-            return getattr(capture, "latest_frame", None)
-
-        stepper = self._stepperForRole(role)
-        if stepper is None:
-            raise RuntimeError(f"{role} has no active rotor stepper for motion-aware sampling")
-
-        deadline = time.monotonic() + _MOTION_WAIT_TIMEOUT_S
-        stationary_since_mono: float | None = None
-        stationary_since_wall: float | None = None
-        while not self._stop.is_set():
-            now_mono = time.monotonic()
-            if now_mono >= deadline:
-                return None
-
-            if bool(stepper.stopped):
-                if stationary_since_mono is None:
-                    stationary_since_mono = now_mono
-                    stationary_since_wall = time.time()
-                elif now_mono - stationary_since_mono >= _MOTION_SETTLE_S:
-                    frame = getattr(capture, "latest_frame", None)
-                    timestamp = getattr(frame, "timestamp", None)
-                    fresh_after = (stationary_since_wall or 0.0) + _MOTION_SETTLE_S
-                    if isinstance(timestamp, (int, float)) and float(timestamp) >= fresh_after:
-                        return frame
-            else:
-                stationary_since_mono = None
-                stationary_since_wall = None
-
-            self._stop.wait(timeout=min(_MOTION_POLL_S, max(0.0, deadline - now_mono)))
-        return None
-
     def _captureOnce(self) -> None:
         if self._camera_service is None:
             return
@@ -342,22 +283,9 @@ class SampleCollector:
         now = time.time()
         saved = 0
         last_error: str | None = None
-        deferred_roles: list[str] = []
         for role in sorted(feeds.keys()):
             capture = self._camera_service.get_capture_thread_for_role(role)
-            if capture is None:
-                continue
-            try:
-                frame = self._stationaryFreshFrame(role, capture)
-            except Exception as exc:
-                last_error = str(exc)
-                self.gc.logger.warning(
-                    "SampleCollector motion check failed for %s: %s" % (role, exc)
-                )
-                continue
-            if frame is None and role in _MOTION_AWARE_STEPPERS:
-                deferred_roles.append(role)
-                continue
+            frame = getattr(capture, "latest_frame", None) if capture is not None else None
             raw = getattr(frame, "raw", None) if frame is not None else None
             if raw is None or getattr(raw, "size", 0) == 0:
                 continue
@@ -375,5 +303,3 @@ class SampleCollector:
                 self._last_saved_at = now
             if last_error is not None:
                 self._last_error = last_error
-            self._motion_deferred_count += len(deferred_roles)
-            self._last_motion_deferred_roles = deferred_roles

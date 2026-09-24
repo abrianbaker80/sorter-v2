@@ -5,8 +5,6 @@ import uuid
 import time
 
 
-# Persisted in transport_failure_reason: this record owns a possibly empty
-# reject pocket, not a confirmed physical arrival.
 UNVERIFIED_C4_HANDOFF = "c3_handoff_unverified"
 
 
@@ -92,7 +90,6 @@ class ClassificationAttempt:
     # Top color this request returned (Brickognize reports colors per request).
     color_id: Optional[str] = None
     color_name: Optional[str] = None
-    color_confidence: Optional[float] = None
     error: Optional[str] = None
     duration_s: Optional[float] = None
     # Capture timestamps of the exact images submitted in this request. The UI
@@ -116,6 +113,15 @@ class KnownObject:
     c4_pocket_id: int | None = None
     c4_generation: int | None = None
     c4_marker_exit_boundary: int | None = None
+    harvest_project_id: Optional[str] = None
+    harvest_allocation_id: Optional[str] = None
+    transfer_episode_id: Optional[str] = None
+    transfer_first_pass: bool = False
+    transport_failure_reason: Optional[str] = None
+    forced_reject_reason: Optional[str] = None
+    reject_category: Optional[str] = None
+    physical_group_size_unknown: bool = False
+    reject_on_routing_failure: bool = False
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -186,25 +192,6 @@ class KnownObject:
     # rejected for size (when too_big_for_layer is set).
     intended_layer_index: Optional[int] = None
     destination_bin: Optional[Tuple[int, int, int]] = None
-    # Bound to an audited, active Project Harvest allocation while live bag
-    # sorting is enabled. These fields survive through SENDING so the physical
-    # drop can confirm the exact quota reservation.
-    harvest_project_id: Optional[str] = None
-    harvest_activation_id: Optional[str] = None
-    harvest_allocation_id: Optional[str] = None
-    harvest_group_id: Optional[str] = None
-    harvest_group_label: Optional[str] = None
-    harvest_exception: bool = False
-    transfer_episode_id: Optional[str] = None
-    transfer_first_pass: bool = False
-    transport_failure_reason: Optional[str] = None
-    forced_reject_reason: Optional[str] = None
-    reject_category: Optional[str] = None
-    physical_group_size_unknown: bool = False
-    # Pipeline modes that must never stop on a piece-level routing failure set
-    # this flag. If no real bin can be selected, distribution sends the piece
-    # through to the bottom reject instead of raising an operator incident.
-    reject_on_routing_failure: bool = False
     thumbnail: Optional[str] = None
     latest_captured_crop: Optional[str] = None
     latest_captured_crop_ts: Optional[float] = None
@@ -251,13 +238,6 @@ class KnownObject:
     # any single-image calls). They run concurrently, not as retries; the one
     # flagged applied=True is the highest-confidence call that recognized it.
     classification_attempts: List["ClassificationAttempt"] = field(default_factory=list)
-    # Ranked Brickognize candidates from the applied request. Project Harvest
-    # uses these server-side to choose the best candidate that is compatible
-    # with the frozen BOM instead of blindly accepting the global top color.
-    # They intentionally stay off the live websocket; the audited Harvest
-    # allocation records the compact resolver decision that actually routed.
-    classification_item_candidates: List[Dict[str, Any]] = field(default_factory=list)
-    classification_color_candidates: List[Dict[str, Any]] = field(default_factory=list)
     # Which parallel request produced the applied result. None until
     # classification runs. ``combined`` = the full burst set won;
     # ``single_burst`` = the lone-image call beat it.

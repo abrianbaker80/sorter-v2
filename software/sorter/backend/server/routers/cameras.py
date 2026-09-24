@@ -533,14 +533,8 @@ def _capture_frame_for_calibration(
         cap.release()
 
 
-def _grab_live_frame(
-    role: str,
-    after_timestamp: float,
-    timeout: float = 1.0,
-    *,
-    prefer_uncorrected: bool = False,
-) -> np.ndarray | None:
-    """Grab a frame, optionally requiring the pre-profile capture for calibration."""
+def _grab_live_frame(role: str, after_timestamp: float, timeout: float = 1.0) -> np.ndarray | None:
+    """Grab a frame from the running CaptureThread, waiting for one newer than after_timestamp."""
     if shared_state.vision_manager is None or not hasattr(shared_state.vision_manager, "getCaptureThreadForRole"):
         return None
     try:
@@ -550,26 +544,17 @@ def _grab_live_frame(
     if capture is None:
         return None
 
-    def _frame_pixels(frame_obj: Any) -> np.ndarray | None:
-        pixels = (
-            getattr(frame_obj, "uncorrected_raw", None)
-            if prefer_uncorrected
-            else getattr(frame_obj, "raw", None)
-        )
-        return pixels.copy() if isinstance(pixels, np.ndarray) else None
-
     deadline = time.time() + timeout
     while time.time() < deadline:
         frame_obj = capture.latest_frame
-        if frame_obj is not None and frame_obj.timestamp > after_timestamp:
-            pixels = _frame_pixels(frame_obj)
-            if pixels is not None:
-                return pixels
+        if frame_obj is not None and frame_obj.timestamp > after_timestamp and frame_obj.raw is not None:
+            return frame_obj.raw.copy()
         time.sleep(0.03)
-    # A calibration request must not fall back to a corrected frame. Callers
-    # can then capture directly from the source with profiles disabled.
+    # Last resort: return whatever is there
     frame_obj = capture.latest_frame
-    return _frame_pixels(frame_obj) if frame_obj is not None else None
+    if frame_obj is not None and frame_obj.raw is not None:
+        return frame_obj.raw.copy()
+    return None
 
 
 def _analyze_candidate_settings(
@@ -588,11 +573,7 @@ def _analyze_candidate_settings(
         applied_settings = cameraDeviceSettingsToDict(parseCameraDeviceSettings(preview_settings))
         time.sleep(0.25)
         # Grab from live CaptureThread — no second camera open needed
-        frame = _grab_live_frame(
-            role,
-            after_timestamp=preview_started_at,
-            prefer_uncorrected=True,
-        )
+        frame = _grab_live_frame(role, after_timestamp=preview_started_at)
         if frame is None:
             # Fallback: direct capture (CaptureThread might not be running)
             frame = _capture_frame_for_calibration(role, source, after_timestamp=preview_started_at, fallback_settings=applied_settings)
@@ -2430,7 +2411,7 @@ def _calibrate_usb_camera_device_settings(
         ts = time.time()
         preview_camera_device_settings(role, s)
         time.sleep(0.25)
-        frame = _grab_live_frame(role, after_timestamp=ts, prefer_uncorrected=True)
+        frame = _grab_live_frame(role, after_timestamp=ts)
         if frame is None:
             frame = _capture_raw_frame(role, source, s)
         return frame
@@ -2661,10 +2642,8 @@ def _calibrate_usb_camera_device_settings(
     if best_analysis is None:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Calibration target not detected. Keep the complete six-color plate or "
-                "ColorChecker Classic 24 fully visible and evenly lit."
-            ),
+            detail="Calibration target not detected. Make sure the 6-color calibration plate "
+            "is fully visible and well lit.",
         )
 
     _report("detection", "Calibration target detected.", best_analysis)
@@ -2757,10 +2736,7 @@ def _calibrate_android_camera_device_settings(
     if best_settings is None or best_analysis is None:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Calibration target not found. Keep the complete six-color plate or "
-                "ColorChecker Classic 24 fully visible and not clipped."
-            ),
+            detail="Calibration target not found. Make sure the 6-color calibration plate is fully visible and not clipped.",
         )
 
     # Refine exposure: try values around the best with finer steps
@@ -3116,8 +3092,7 @@ def _run_camera_calibration_sync(
             if not apply_color_profile:
                 base_msg = "Camera settings were tuned by the LLM advisor. Final color correction was disabled — no color profile is applied."
             elif profile_saved is not None:
-                target_label = _calibration_target_label(raw_analysis)
-                base_msg = f"Camera settings were tuned by the LLM advisor and a fresh color profile was generated from {target_label}."
+                base_msg = "Camera settings were tuned by the LLM advisor and a fresh color profile was generated from the target plate."
             else:
                 base_msg = "Camera settings were tuned by the LLM advisor. The existing color profile was kept because the target plate was not confidently re-analyzed."
             if review_status == "approved":
@@ -3126,16 +3101,11 @@ def _run_camera_calibration_sync(
                 message = f"{base_msg} Advisor flagged remaining concerns — review the trace."
             else:
                 message = base_msg
-            if profile_saved is not None and not _camera_color_profile_is_active(role, profile_saved):
-                message += " The profile is saved but not active on this camera."
         else:
-            target_label = _calibration_target_label(raw_analysis)
             if not apply_color_profile:
-                message = f"Camera calibrated from {target_label}. Final color correction was disabled per request."
+                message = "Camera calibrated from the 6-color target plate. Final color correction was disabled per request."
             else:
-                message = f"Camera calibrated from {target_label}, and a color profile was saved."
-                if profile_saved is not None and not _camera_color_profile_is_active(role, profile_saved):
-                    message += " The profile is saved but not active on this camera."
+                message = "Camera calibrated from the 6-color target plate, and a color profile was generated."
         result = {
             **saved,
             "color_profile": profile_saved.get("profile") if profile_saved is not None else original_color_profile,
@@ -3417,23 +3387,6 @@ def save_camera_layout(payload: CameraLayoutPayload) -> Dict[str, Any]:
     result = get_camera_config()
     shared_state.publishCamerasConfig(result)
     return result
-
-
-def _calibration_target_label(analysis: Dict[str, Any] | None) -> str:
-    if isinstance(analysis, dict) and analysis.get("target_type") == COLORCHECKER24_TARGET_TYPE:
-        return "the ColorChecker Classic 24"
-    return "the six-color target plate"
-
-
-def _camera_color_profile_is_active(role: str, saved: Dict[str, Any]) -> bool:
-    profile = saved.get("profile")
-    return bool(
-        COLOR_CORRECTION_ENABLED
-        and _canonical_runtime_camera_role(role) in COLOR_CORRECTION_ALLOWED_ROLES
-        and isinstance(profile, dict)
-        and profile.get("enabled")
-        and saved.get("applied_live")
-    )
 
 
 @router.get("/api/cameras/list")
@@ -4076,7 +4029,7 @@ def camera_feed_by_role(
                         else None
                     )
                     frame_obj = (
-                        feed.get_frame(annotated=False, color_correct=color_correct)
+                        feed.get_frame(annotated=False, color_correct=color_correct, max_width=PREVIEW_MAX_WIDTH)
                         if feed is not None
                         else None
                     )
@@ -5042,8 +4995,18 @@ def get_camera_capture_modes(role: str) -> Dict[str, Any]:
             "message": "No camera is assigned to this role.",
         }
 
-    network_stream = isinstance(source, str)
-    modes, backend = ([], "network-stream") if network_stream else _capture_modes_for_source(source)
+    if isinstance(source, str):
+        return {
+            "ok": True,
+            "role": role,
+            "source": source,
+            "supported": False,
+            "modes": [],
+            "current": None,
+            "message": "Resolution selection is not available for network-stream cameras.",
+        }
+
+    modes, backend = _capture_modes_for_source(source)
     svc = shared_state.camera_service
     current: Dict[str, Any] | None = None
     if svc is not None and hasattr(svc, "get_capture_mode_for_role"):
@@ -5071,8 +5034,7 @@ def get_camera_capture_modes(role: str) -> Dict[str, Any]:
                     live = {
                         "width": int(res[0]),
                         "height": int(res[1]),
-                        "fps": telemetry.get("fps"),
-                        "reported_fps": telemetry.get("reported_fps"),
+                        "fps": int(round(float(telemetry.get("fps", 0)))) or None,
                     }
             except Exception:
                 pass
@@ -5086,8 +5048,6 @@ def get_camera_capture_modes(role: str) -> Dict[str, Any]:
         "modes": modes,
         "current": current,
         "live": live,
-        "locally_controlled": not network_stream,
-        "message": "Resolution selection is not available for network-stream cameras; saved local capture settings do not control this stream." if network_stream else None,
     }
 
 

@@ -111,12 +111,12 @@ class RknnYoloRuntime:
         return self._iou_threshold
 
     def infer(
-        self, bgr: np.ndarray, *, conf_threshold: Optional[float] = None
+        self, bgr: np.ndarray, *, conf_threshold: Optional[float] = None, color_correct=None, timings=None
     ) -> Sequence[Bbox]:
         if conf_threshold is None:
-            detections = self._processor.infer(bgr)
+            detections = self._processor.infer(bgr, color_correct=color_correct, timings=timings)
         else:
-            detections = self._processor.infer(bgr, conf_threshold=conf_threshold)
+            detections = self._processor.infer(bgr, conf_threshold=conf_threshold, color_correct=color_correct, timings=timings)
         # ``Detection`` from vision.ml.base carries .bbox as a 4-tuple of ints.
         out: list[Bbox] = []
         for d in detections:
@@ -125,12 +125,12 @@ class RknnYoloRuntime:
         return out
 
     def inferWithScores(
-        self, bgr: np.ndarray, *, conf_threshold: Optional[float] = None
+        self, bgr: np.ndarray, *, conf_threshold: Optional[float] = None, color_correct=None, timings=None
     ) -> Sequence[ScoredBbox]:
         if conf_threshold is None:
-            detections = self._processor.infer(bgr)
+            detections = self._processor.infer(bgr, color_correct=color_correct, timings=timings)
         else:
-            detections = self._processor.infer(bgr, conf_threshold=conf_threshold)
+            detections = self._processor.infer(bgr, conf_threshold=conf_threshold, color_correct=color_correct, timings=timings)
         # ``Detection`` carries .bbox (4-tuple) and .score (float).
         out: list[ScoredBbox] = []
         for d in detections:

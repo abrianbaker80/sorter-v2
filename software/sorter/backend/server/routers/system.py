@@ -8,21 +8,37 @@ import threading
 from typing import Callable, Dict, Any, Optional
 
 from fastapi import APIRouter
-from server.manual_flap_control import manual_flap_operation
 from pydantic import BaseModel
 
 import server.shared_state as shared_state
+from server.routers.motion_safety import occupied_checkpoint_motion_guard
 from subsystems.sample_collection_speed import (
     default_speed_rpm,
     microsteps_from_stepper_config,
 )
 
 router = APIRouter()
+from c4_marker_qualification import router as c4_marker_router
+router.include_router(c4_marker_router)
+
+
+def _occupied_recovery_status():
+    from subsystems.classification_channel.occupied_checkpoint import pending_checkpoint
+    try:
+        checkpoint = pending_checkpoint()
+    except Exception as exc:
+        return {"phase": "invalid", "error": str(exc)}
+    if checkpoint is None:
+        return None
+    return {"phase": checkpoint["phase"], "operation_id": checkpoint["plan"]["operation_id"],
+            "owners": [{"uuid": entry["object"]["uuid"], "disposition": entry["disposition"]}
+                       for entry in checkpoint["plan"]["owners"]]}
 
 
 def _system_status_payload() -> Dict[str, Any]:
     return {
         "c4_drain": shared_state.c4_drain_result,
+        "occupied_recovery": _occupied_recovery_status(),
         "hardware_state": shared_state.hardware_state,
         "hardware_error": shared_state.hardware_error,
         "homing_step": shared_state.hardware_homing_step,
@@ -42,6 +58,8 @@ def get_system_status() -> Dict[str, Any]:
 def reset_system() -> Dict[str, Any]:
     """Return hardware to standby state and tear down active runtime resources."""
     with shared_state.hardware_lifecycle_lock:
+        if _occupied_recovery_status() is not None:
+            return {"ok": False, "message": "Occupied C4 checkpoint blocks destructive reset."}
         worker = shared_state.hardware_worker_thread
         worker_alive = worker is not None and worker.is_alive()
         if worker_alive or shared_state.hardware_state in {"homing", "initializing"}:
@@ -95,14 +113,23 @@ def _start_hardware_worker(
     state: str,
     step: str,
     success_state: str,
-    fn: Callable[[], None] | None,
+    fn: Callable[..., None] | None,
     busy_message: str,
     missing_fn_message: str,
     started_message: str,
+    occupied_recovery: bool = False,
+    allow_reject_drain_checkpoint: bool = False,
 ) -> Dict[str, Any]:
+    cancel_event = threading.Event() if occupied_recovery else None
+    cancel_complete_event = threading.Event() if occupied_recovery else None
+    complete_event = threading.Event() if occupied_recovery else None
+
     def _run() -> None:
         try:
-            fn()
+            if occupied_recovery:
+                fn(cancel_event, cancel_complete_event, complete_event)
+            else:
+                fn()
         except Exception as exc:
             with shared_state.hardware_lifecycle_lock:
                 shared_state.setHardwareStatus(
@@ -120,10 +147,21 @@ def _start_hardware_worker(
         finally:
             with shared_state.hardware_lifecycle_lock:
                 shared_state.hardware_worker_thread = None
+                if occupied_recovery:
+                    if shared_state.occupied_recovery_cancel_event is cancel_event:
+                        shared_state.occupied_recovery_cancel_event = None
+                    if shared_state.occupied_recovery_cancel_complete_event is cancel_complete_event:
+                        shared_state.occupied_recovery_cancel_complete_event = None
+                    if shared_state.occupied_recovery_complete_event is complete_event:
+                        shared_state.occupied_recovery_complete_event = None
 
     thread = threading.Thread(target=_run, daemon=True)
 
     with shared_state.hardware_lifecycle_lock:
+        checkpoint = _occupied_recovery_status()
+        if not occupied_recovery and checkpoint is not None:
+            if not allow_reject_drain_checkpoint:
+                return {"ok": False, "message": "Reconcile the occupied C4 checkpoint before homing or initialization."}
         worker = shared_state.hardware_worker_thread
         worker_busy = worker is not None and worker.is_alive()
         state_busy = shared_state.hardware_state in {"homing", "initializing"}
@@ -152,9 +190,14 @@ def _start_hardware_worker(
             clear_error=True,
             homing_step=step,
         )
+        if occupied_recovery:
+            shared_state.occupied_recovery_cancel_event = cancel_event
+            shared_state.occupied_recovery_cancel_complete_event = cancel_complete_event
+            shared_state.occupied_recovery_complete_event = complete_event
         shared_state.hardware_worker_thread = thread
-
-    thread.start()
+        # Publish and start atomically with respect to Pause so it cannot miss
+        # the short interval where a worker is registered but not yet alive.
+        thread.start()
     return {"ok": True, "hardware_state": state, "message": started_message}
 
 
@@ -171,15 +214,38 @@ def recover_system() -> Dict[str, Any]:
     )
 
 
+@router.post("/api/system/c4-occupied-recovery")
+def occupied_c4_recovery() -> Dict[str, Any]:
+    return _start_hardware_worker(
+        state="homing", step="Recovering checkpointed C4 pieces...", success_state="ready",
+        fn=shared_state._hardware_c4_occupied_fn, busy_message="Occupied recovery already running.",
+        missing_fn_message="Occupied recovery is unavailable.",
+        started_message="Occupied recovery started with feeding blocked.", occupied_recovery=True,
+    )
+
+
+@router.post("/api/system/c4-occupied-checkpoint")
+def checkpoint_occupied_c4() -> Dict[str, Any]:
+    return _start_hardware_worker(
+        state="initializing", step="Saving occupied C4 checkpoint...", success_state="ready",
+        fn=shared_state._hardware_c4_checkpoint_fn, busy_message="C4 checkpoint already in progress.",
+        missing_fn_message="C4 checkpoint is unavailable.",
+        started_message="Saving stationary C4 owners without moving pieces.",
+    )
+
+
 @router.post("/api/system/c4-drain-reset")
 def complete_c4_drain() -> Dict[str, Any]:
     """Operator-authorized destructive drain of all possible C4 pockets to Reject."""
     return _start_hardware_worker(
-        state="homing", step="Draining C4 to Reject...", success_state="ready",
+        state="homing",
+        step="Draining C4 to Reject...",
+        success_state="ready",
         fn=shared_state._hardware_c4_drain_fn,
         busy_message="Hardware recovery already in progress.",
         missing_fn_message="Complete C4 recovery is unavailable.",
         started_message="C4 reject drain and destructive reset started.",
+        allow_reject_drain_checkpoint=True,
     )
 
 
@@ -216,6 +282,12 @@ def restart_system() -> Dict[str, Any]:
     will be restarted automatically.
     """
 
+    from server.occupied_exit import quiesce_occupied_recovery_for_exit
+
+    blocked = quiesce_occupied_recovery_for_exit("restart the backend")
+    if blocked:
+        return {"ok": False, "message": blocked}
+
     def _deferred_exit() -> None:
         import time
         time.sleep(0.5)
@@ -232,6 +304,12 @@ def shutdown_machine() -> Dict[str, Any]:
     The shell command runs from a background thread after a short delay so the
     HTTP response is delivered before the OS starts tearing services down.
     """
+
+    from server.occupied_exit import quiesce_occupied_recovery_for_exit
+
+    blocked = quiesce_occupied_recovery_for_exit("shut down the machine")
+    if blocked:
+        return {"ok": False, "message": blocked}
 
     def _deferred_shutdown() -> None:
         import subprocess
@@ -274,6 +352,12 @@ def reboot_machine() -> Dict[str, Any]:
     background thread after a short delay so the HTTP response is delivered
     before the OS starts tearing services down.
     """
+
+    from server.occupied_exit import quiesce_occupied_recovery_for_exit
+
+    blocked = quiesce_occupied_recovery_for_exit("reboot the machine")
+    if blocked:
+        return {"ok": False, "message": blocked}
 
     def _deferred_reboot() -> None:
         import subprocess
@@ -345,8 +429,7 @@ def _open_all_layer_doors_for_sample_collection() -> Dict[str, Any]:
                     }
                 )
                 continue
-            if open_fn() is False:
-                raise RuntimeError("passage command rejected")
+            open_fn()
             opened += 1
         except Exception as exc:
             errors.append(
@@ -640,7 +723,10 @@ def get_sample_collection_mode() -> Dict[str, Any]:
 
 
 @router.post("/api/system/sample-collection-mode")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard(
+    "open layer flaps for sample collection",
+    when=lambda arguments: bool((arguments.get("payload") or {}).get("enabled")),
+)
 def set_sample_collection_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Toggle the feeder's sample-collection bypass.
 
@@ -654,15 +740,14 @@ def set_sample_collection_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
     if shared is None:
         return {"ok": False, "reason": "controller_not_initialized"}
     enabled = bool(payload.get("enabled", False))
+    shared.sample_collection_mode = enabled
     doors = (
         _open_all_layer_doors_for_sample_collection()
         if enabled
         else {"ok": True, "opened": 0, "errors": []}
     )
-    if doors["ok"]:
-        shared.sample_collection_mode = enabled
     return {
-        "ok": doors["ok"],
+        "ok": True,
         "enabled": shared.sample_collection_mode,
         "doors": doors,
     }

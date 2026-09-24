@@ -20,12 +20,3 @@ HOSTED_COLOR_JOIN_BUDGET_S = 10.0
 # +1/-1 ↔ physical-direction mapping is a best guess until verified on hardware;
 # if a clockwise flip spins the platter the wrong way, invert this sign.
 C4_TRAVEL_SIGN = 1.0 if CLASSIFICATION_CHANNEL_CLOCKWISE else -1.0
-
-# The installed ten-pocket rotor has a mechanically safe staging point five
-# pockets (180 degrees) from C3 and reaches the chute after seven pockets
-# (252 degrees) total.  These are fixed machine stations, not vision-derived
-# piece coordinates: C4 may stop after five pockets only when the chute is not
-# ready, then advances the remaining two pockets to discharge.
-C4_INDEXED_ROUTE_SECTOR_COUNT = 10
-C4_SAFE_STAGING_SECTOR_ADVANCE = 5
-C4_EXIT_SECTOR_ADVANCE = 7

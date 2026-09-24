@@ -113,13 +113,6 @@ def _ensureInitialized() -> None:
                 # The applied color's own score, kept apart from the mold score
                 # in `confidence`. NULL on rows written before the split.
                 ("color_confidence", "REAL"),
-                ("transfer_episode_id", "TEXT"),
-                ("transfer_first_pass", "INTEGER"),
-                ("transport_failure_reason", "TEXT"),
-                ("forced_reject_reason", "TEXT"),
-                ("reject_category", "TEXT"),
-                ("physical_group_size_unknown", "INTEGER"),
-                ("harvest_exception", "INTEGER"),
             ):
                 if _col not in existing_columns:
                     conn.execute(
@@ -226,9 +219,8 @@ def recordPiece(
             "part_id, part_name, color_id, color_name, category_id, confidence, "
             "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
             "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
-            "brickognize_color_rank, color_provider, mold_provider, color_confidence, "
-            "transfer_episode_id, transfer_first_pass, transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "brickognize_color_rank, color_provider, mold_provider, color_confidence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(uuid) DO UPDATE SET "
             "run_id=excluded.run_id, machine_id=excluded.machine_id, "
             "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
@@ -244,14 +236,7 @@ def recordPiece(
             "brickognize_color_rank=excluded.brickognize_color_rank, "
             "color_provider=excluded.color_provider, "
             "mold_provider=excluded.mold_provider, "
-            "color_confidence=excluded.color_confidence, "
-            "transfer_episode_id=COALESCE(excluded.transfer_episode_id, piece_records.transfer_episode_id), "
-            "transfer_first_pass=COALESCE(excluded.transfer_first_pass, piece_records.transfer_first_pass), "
-            "transport_failure_reason=COALESCE(excluded.transport_failure_reason, piece_records.transport_failure_reason), "
-            "forced_reject_reason=COALESCE(excluded.forced_reject_reason, piece_records.forced_reject_reason), "
-            "reject_category=COALESCE(excluded.reject_category, piece_records.reject_category), "
-            "physical_group_size_unknown=COALESCE(excluded.physical_group_size_unknown, piece_records.physical_group_size_unknown), "
-            "harvest_exception=COALESCE(excluded.harvest_exception, piece_records.harvest_exception)",
+            "color_confidence=excluded.color_confidence",
             (
                 uuid_val,
                 run_id,
@@ -277,13 +262,6 @@ def recordPiece(
                 piece.get("color_provider"),
                 piece.get("mold_provider"),
                 piece.get("color_confidence"),
-                piece.get("transfer_episode_id"),
-                piece.get("transfer_first_pass"),
-                piece.get("transport_failure_reason"),
-                piece.get("forced_reject_reason"),
-                piece.get("reject_category"),
-                piece.get("physical_group_size_unknown"),
-                piece.get("harvest_exception"),
             ),
         )
         conn.commit()
@@ -352,7 +330,6 @@ def getCachedPrice(gc: Any, part_id: Optional[str], color_id: Optional[str]) -> 
 _VALUE_STATS_TTL_S = 60.0
 _VALUE_STATS_LOCK = threading.Lock()
 _value_stats_memo: Optional[tuple[float, tuple[int, int], dict[str, Any]]] = None
-_value_stats_refreshing = False
 
 
 def _pieceCountGuard(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -362,17 +339,22 @@ def _pieceCountGuard(conn: sqlite3.Connection) -> tuple[int, int]:
     return (int(row["c"] or 0), int(row["m"] or 0))
 
 
-def _computeValueStats(gc: Any) -> tuple[tuple[int, int], dict[str, Any]]:
+def getValueStats(gc: Any) -> dict[str, Any]:
     # Estimated BrickLink value of every identified piece ever recorded, computed
     # on the fly from the local price DB — no stored price column / backfill
     # needed. We group by (part_id, color_id) so each distinct part is priced
     # once and multiplied by its count, all-time and last-24h. The full result is
-    # memoized for a short TTL because the 24h window drifts. The public wrapper
-    # refreshes stale snapshots in the background so active sorting never makes
-    # a dashboard request wait on historical revaluation or Hive.
+    # memoized (short TTL because the 24h window drifts) and invalidated the
+    # moment the table changes, so repeated dashboard polls are near-free.
+    global _value_stats_memo
+
     cutoff = time.time() - 86400.0
     with _connection() as conn:
         guard = _pieceCountGuard(conn)
+        with _VALUE_STATS_LOCK:
+            memo = _value_stats_memo
+            if memo is not None and memo[1] == guard and time.time() < memo[0]:
+                return memo[2]
         rows = conn.execute(
             "SELECT part_id, color_id, COUNT(*) AS n, "
             "SUM(CASE WHEN COALESCE(recorded_at, seen_at) >= ? THEN 1 ELSE 0 END) AS n24 "
@@ -422,56 +404,6 @@ def _computeValueStats(gc: Any) -> tuple[tuple[int, int], dict[str, Any]]:
             "value_usd": round(d24_value, 2),
         },
     }
-    return guard, result
-
-
-def _refreshValueStats(gc: Any) -> None:
-    global _value_stats_memo, _value_stats_refreshing
-    try:
-        guard, result = _computeValueStats(gc)
-        with _VALUE_STATS_LOCK:
-            _value_stats_memo = (time.time() + _VALUE_STATS_TTL_S, guard, result)
-    except Exception as exc:
-        logger = getattr(gc, "logger", None)
-        if logger is not None:
-            logger.warn(f"piece value background refresh failed: {exc}")
-    finally:
-        with _VALUE_STATS_LOCK:
-            _value_stats_refreshing = False
-
-
-def getValueStats(gc: Any) -> dict[str, Any]:
-    """Return value totals without making dashboard requests wait on Hive.
-
-    A live sorter changes the piece-count guard continuously. Serve a valid
-    snapshot for the full TTL, then return the stale snapshot immediately while
-    one background worker refreshes it. The first ever calculation remains
-    synchronous and is normally completed by the startup pre-warm worker.
-    """
-    global _value_stats_memo, _value_stats_refreshing
-    now = time.time()
-    refresh_thread: threading.Thread | None = None
-    with _VALUE_STATS_LOCK:
-        memo = _value_stats_memo
-        if memo is not None and now < memo[0]:
-            return memo[2]
-        if memo is not None:
-            if not _value_stats_refreshing:
-                _value_stats_refreshing = True
-                refresh_thread = threading.Thread(
-                    target=_refreshValueStats,
-                    args=(gc,),
-                    daemon=True,
-                    name="piece-value-refresh",
-                )
-            stale = memo[2]
-        else:
-            stale = None
-    if refresh_thread is not None:
-        refresh_thread.start()
-    if stale is not None:
-        return stale
-    guard, result = _computeValueStats(gc)
     with _VALUE_STATS_LOCK:
         _value_stats_memo = (time.time() + _VALUE_STATS_TTL_S, guard, result)
     return result
@@ -503,8 +435,7 @@ _SUMMARY_COLUMNS = (
     "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
     "brickognize_listing_id, part_correct, color_corrected_id, "
     "part_feedback_submitted, color_feedback_submitted, "
-    "color_provider, mold_provider, color_confidence, transfer_episode_id, transfer_first_pass, "
-    "transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception"
+    "color_provider, mold_provider, color_confidence"
 )
 
 
@@ -597,13 +528,6 @@ def _rowToSummary(gc: Any, row: sqlite3.Row) -> dict[str, Any]:
         "category_id": row["category_id"],
         "confidence": row["confidence"],
         "color_confidence": row["color_confidence"],
-        "transfer_episode_id": row["transfer_episode_id"],
-        "transfer_first_pass": row["transfer_first_pass"],
-        "transport_failure_reason": row["transport_failure_reason"],
-        "forced_reject_reason": row["forced_reject_reason"],
-        "reject_category": row["reject_category"],
-        "physical_group_size_unknown": row["physical_group_size_unknown"],
-        "harvest_exception": row["harvest_exception"],
         "bin": bin_ref,
         "dead": bool(row["dead"]),
         "has_images": bool(row["has_images"]),
@@ -946,17 +870,22 @@ def getMaxCorrectionId() -> int:
 _AGGREGATES_TTL_S = 60.0
 _AGGREGATES_LOCK = threading.Lock()
 _aggregates_memo: dict[int, tuple[float, tuple[int, int], dict[str, Any]]] = {}
-_aggregates_refreshing: set[int] = set()
 
 
-def _computeAggregates(gc: Any, *, days: int = 365) -> tuple[tuple[int, int], dict[str, Any]]:
-    # One cached payload feeding every records-page chart. The public wrapper
-    # uses the same stale-while-revalidate policy as getValueStats.
+def getAggregates(gc: Any, *, days: int = 365) -> dict[str, Any]:
+    # One cached payload feeding every records-page chart. Same memo policy as
+    # getValueStats: short TTL plus a cheap row-count guard so a new piece
+    # invalidates immediately while idle dashboard polls stay near-free.
     days = max(1, min(days, 3650))
     now = time.time()
     cutoff = now - days * 86400.0
     with _connection() as conn:
         guard = _pieceCountGuard(conn)
+        with _AGGREGATES_LOCK:
+            memo = _aggregates_memo.get(days)
+            if memo is not None and memo[1] == guard and now < memo[0]:
+                return memo[2]
+
         per_day_rows = conn.execute(
             "SELECT date(seen_at, 'unixepoch', 'localtime') AS day, COUNT(*) AS cnt "
             "FROM piece_records "
@@ -1087,49 +1016,6 @@ def _computeAggregates(gc: Any, *, days: int = 365) -> tuple[tuple[int, int], di
             for day, value in sorted(value_by_day.items())
         ],
     }
-    return guard, result
-
-
-def _refreshAggregates(gc: Any, days: int) -> None:
-    try:
-        guard, result = _computeAggregates(gc, days=days)
-        with _AGGREGATES_LOCK:
-            _aggregates_memo[days] = (time.time() + _AGGREGATES_TTL_S, guard, result)
-    except Exception as exc:
-        logger = getattr(gc, "logger", None)
-        if logger is not None:
-            logger.warn(f"piece aggregates background refresh failed: {exc}")
-    finally:
-        with _AGGREGATES_LOCK:
-            _aggregates_refreshing.discard(days)
-
-
-def getAggregates(gc: Any, *, days: int = 365) -> dict[str, Any]:
-    """Return chart aggregates stale-while-revalidate under active sorting."""
-    days = max(1, min(days, 3650))
-    now = time.time()
-    refresh_thread: threading.Thread | None = None
-    with _AGGREGATES_LOCK:
-        memo = _aggregates_memo.get(days)
-        if memo is not None and now < memo[0]:
-            return memo[2]
-        if memo is not None:
-            if days not in _aggregates_refreshing:
-                _aggregates_refreshing.add(days)
-                refresh_thread = threading.Thread(
-                    target=_refreshAggregates,
-                    args=(gc, days),
-                    daemon=True,
-                    name=f"piece-aggregates-refresh-{days}",
-                )
-            stale = memo[2]
-        else:
-            stale = None
-    if refresh_thread is not None:
-        refresh_thread.start()
-    if stale is not None:
-        return stale
-    guard, result = _computeAggregates(gc, days=days)
     with _AGGREGATES_LOCK:
         _aggregates_memo[days] = (time.time() + _AGGREGATES_TTL_S, guard, result)
     return result

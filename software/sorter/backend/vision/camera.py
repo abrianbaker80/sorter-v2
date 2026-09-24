@@ -670,7 +670,7 @@ def apply_camera_color_profile(
     if not _COLOR_ACTIVE_LOGGED:
         _COLOR_ACTIVE_LOGGED = True
         log.warning(
-            "apply_camera_color_profile: enabled C4 branch active — matrix correction will run per frame"
+            "apply_camera_color_profile: enabled branch active — LUT+matrix+gamma applied to requested pixels"
         )
 
     current = clampCameraColorProfile(profile)
@@ -702,9 +702,8 @@ def apply_camera_color_profile(
         rgb = frame[:, :, ::-1].astype(np.float32) / 255.0
 
     # Step 2: Affine CCM (3×3 matrix + bias)
-    # OpenCV's per-pixel 3x3 transform avoids the large temporary allocation
-    # and BLAS dispatch used by tensordot on the full camera frame. Keep the
-    # same float32 matrix, bias, gamma, clipping and rounding below.
+    # OpenCV avoids the full-frame temporary and BLAS dispatch in tensordot.
+    # Keep the same float32 matrix, bias, LUT, gamma, clipping and rounding.
     corrected = cv2.transform(rgb, matrix) + bias
 
     # Step 3: Per-channel gamma (if available)
@@ -748,7 +747,6 @@ class CaptureThread:
         # 90-frame ring buffer (~3 s at 30 FPS) for burst-capture replay. The
         # GIL + deque.append atomicity lets us push without holding a lock.
         self._ring_buffer: deque[CameraFrame] = deque(maxlen=90)
-        self._received_resolution: tuple[int, int] | None = None
         self.profiler = None
         self._picture_settings = clampCameraPictureSettings(config.picture_settings)
         self._device_settings = parseCameraDeviceSettingsForCapture(config.device_settings)
@@ -858,7 +856,7 @@ class CaptureThread:
 
     def getTelemetrySnapshot(self) -> dict[str, object]:
         """Return a small dict of currently-known runtime stats for the
-        camera — received resolution/rate, device-reported fps, exposure, gain,
+        camera — resolution, fps (actual, not requested), exposure, gain,
         focus, white-balance temperature, auto-exposure / auto-wb flags.
         Used by the TelemetryOverlay to paint a corner indicator; also
         safe for general telemetry consumers. Missing values are simply
@@ -872,23 +870,15 @@ class CaptureThread:
                     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
                     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
                     if w > 0 and h > 0:
-                        stats["reported_resolution"] = (w, h)
+                        stats["resolution"] = (w, h)
                 except Exception:
                     pass
                 try:
                     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
                     if fps > 0:
-                        stats["reported_fps"] = fps
+                        stats["fps"] = fps
                 except Exception:
                     pass
-        frames = list(self._ring_buffer)
-        if (cap is not None and frames and self._received_resolution is not None
-                and 0 <= time.time() - frames[-1].timestamp <= 2.0):
-            stats["resolution"] = self._received_resolution
-            if len(frames) > 1:
-                elapsed = frames[-1].timestamp - frames[0].timestamp
-                if elapsed > 0:
-                    stats["fps"] = (len(frames) - 1) / elapsed
         settings = self.getDeviceSettings()
         for src_key, out_key in (
             ("exposure", "exposure"),
@@ -1049,8 +1039,6 @@ class CaptureThread:
             source, is_url, width, height, fps, fourcc = self._get_config_snapshot()
 
             if source != previous_source:
-                self._ring_buffer.clear()
-                self._received_resolution = None
                 previous_source = source
                 open_failures = 0
                 read_failures = 0
@@ -1061,8 +1049,6 @@ class CaptureThread:
                 post_stream_source = None
 
             if self._reopen_event.is_set():
-                self._ring_buffer.clear()
-                self._received_resolution = None
                 self._reopen_event.clear()
                 if cap is not None:
                     cap.release()
@@ -1113,8 +1099,6 @@ class CaptureThread:
                         continue
 
                     cap = candidate
-                    self._ring_buffer.clear()
-                    self._received_resolution = None
                     self._cap = cap
                     open_failures = 0
                     read_failures = 0
@@ -1178,10 +1162,9 @@ class CaptureThread:
             read_started = time.perf_counter() if profiling else 0.0
             try:
                 # VideoCapture.read() is grab() followed by retrieve(). Keep
-                # both calls explicit so the deployed profiler can distinguish
-                # backend wait/acquisition from returned-frame materialization.
-                # Some backends decode during grab(), so these are API-stage
-                # timings rather than a claim about internal decoder placement.
+                # both calls explicit so the profiler separates their API costs.
+                # A backend may decode during grab(), so these are API-stage
+                # timings rather than claims about decoder internals.
                 grab_started = time.perf_counter() if profiling else 0.0
                 ret = cap.grab()
                 if profiling:
@@ -1202,13 +1185,18 @@ class CaptureThread:
             except Exception:
                 ret, frame = False, None
             if profiling:
-                prof.observeDuration(f"camera.{self.name}.read_decode", (time.perf_counter() - read_started) * 1000)
+                prof.observeDuration(
+                    f"camera.{self.name}.read_decode",
+                    (time.perf_counter() - read_started) * 1000,
+                )
             if ret:
                 read_failures = 0
-                # Keep the source-frame timestamp at the successful OpenCV
-                # retrieve boundary. Never refresh it after correction or
-                # publication, so processing delay remains visible as age.
+                # POSIX wall-clock time at successful OpenCV retrieve; later
+                # processing/publication must not make this frame look newer.
                 captured_at = time.time()
+                if profiling:
+                    prof.observeValue(f"camera.{self.name}.retrieved_width_px", float(frame.shape[1]))
+                    prof.observeValue(f"camera.{self.name}.retrieved_height_px", float(frame.shape[0]))
                 if not is_url and width > 0 and height > 0:
                     frame_h, frame_w = frame.shape[:2]
                     if (int(frame_w), int(frame_h)) != (int(width), int(height)):
@@ -1237,7 +1225,10 @@ class CaptureThread:
                 picture_settings = self.getPictureSettings()
                 color_profile = self.getColorProfile()
                 if profiling:
-                    prof.observeDuration(f"camera.{self.name}.settings", (time.perf_counter() - settings_started) * 1000)
+                    prof.observeDuration(
+                        f"camera.{self.name}.settings",
+                        (time.perf_counter() - settings_started) * 1000,
+                    )
                 transform_started = time.perf_counter() if profiling else 0.0
                 picture_started = time.perf_counter() if profiling else 0.0
                 # Apply rotation/flip once; downstream consumers see the same
@@ -1249,7 +1240,8 @@ class CaptureThread:
                         (time.perf_counter() - picture_started) * 1000,
                     )
                 color_started = time.perf_counter() if profiling else 0.0
-                if getattr(color_profile, "enabled", False):
+                defer_color = self.name in ("classification_channel", "carousel")
+                if getattr(color_profile, "enabled", False) and not defer_color:
                     corrected_frame = apply_camera_color_profile(
                         geom_frame,
                         color_profile,
@@ -1262,7 +1254,18 @@ class CaptureThread:
                         f"camera.{self.name}.color_profile_ms",
                         (time.perf_counter() - color_started) * 1000,
                     )
-                    prof.observeDuration(f"camera.{self.name}.transform", (time.perf_counter() - transform_started) * 1000)
+                    prof.observeValue(
+                        f"camera.{self.name}.shared_frame_width_px",
+                        float(corrected_frame.shape[1]),
+                    )
+                    prof.observeValue(
+                        f"camera.{self.name}.shared_frame_height_px",
+                        float(corrected_frame.shape[0]),
+                    )
+                    prof.observeDuration(
+                        f"camera.{self.name}.transform",
+                        (time.perf_counter() - transform_started) * 1000,
+                    )
                 publish_started = time.perf_counter() if profiling else 0.0
                 camera_frame = CameraFrame(
                     raw=corrected_frame,
@@ -1270,9 +1273,11 @@ class CaptureThread:
                     results=[],
                     timestamp=captured_at,
                     uncorrected_raw=geom_frame,
+                    color_profile=color_profile if defer_color else None,
+                    color_role=self.name,
+                    profiler=prof,
                 )
                 self.latest_frame = camera_frame
-                self._received_resolution = (int(frame.shape[1]), int(frame.shape[0]))
                 # deque.append is atomic under the GIL — no lock needed.
                 self._ring_buffer.append(camera_frame)
                 if profiling:

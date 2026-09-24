@@ -318,7 +318,6 @@ class ClassificationChannelExitReleaseStage:
 
 class ClassificationChannelConfig:
     mode: ClassificationChannelMode
-    c4_sector_count: int
     max_zones: int
     intake_angle_deg: float
     intake_body_half_width_deg: float
@@ -350,7 +349,6 @@ class ClassificationChannelConfig:
 
     def __init__(self) -> None:
         self.mode = ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01
-        self.c4_sector_count = 5
         # Keep C4 pipelined instead of serialised: target one piece in the
         # intake/drop zone and three more spread across the platter on the way
         # to the exit. Zone hard-guards still prevent same-sector loading.
@@ -1108,16 +1106,6 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
                 raise ValueError(
                     f"Invalid classification_channel.mode={mode_raw!r} in machine.toml; valid values: {valid}"
                 )
-        sector_count = classification_section.get(
-            "sector_count",
-            classification_section.get("c4_sector_count"),
-        )
-        if sector_count is not None:
-            if type(sector_count) is not int or sector_count < 2:
-                raise ValueError(
-                    "classification_channel.sector_count must be an integer >= 2"
-                )
-            irl_config.classification_channel_config.c4_sector_count = sector_count
 
     feeder_section = raw_toml.get("feeder", {}) if isinstance(raw_toml, dict) else {}
     if isinstance(feeder_section, dict):
@@ -1365,7 +1353,7 @@ def _apply_stepper_software_disable(gc: GlobalConfig, irl: IRLInterface) -> None
             gc.logger.info("Carousel stepper software-disabled (motor suppressed)")
 
 
-def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
+def mkIRLInterface(config: IRLConfig, gc: GlobalConfig, *, restore_servos: bool = True) -> IRLInterface:
     """
     Initialize the hardware interface using SorterInterface directly.
 
@@ -1587,7 +1575,8 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
                 # Start at the standard speed; sorting re-applies open/close
                 # speed per move and homing re-applies the standard speed.
                 servo.apply_homing_speed()
-        restore_servo_states(irl_interface.servos, gc)
+        if restore_servos:
+            restore_servo_states(irl_interface.servos, gc)
 
     irl_interface.machine_profile = build_machine_profile(
         camera_layout=config.camera_layout,

@@ -13,10 +13,8 @@ from vision import VisionManager
 from ..states import FeederState
 from ..analysis import analyzeFeederChannels
 from .config import GoToAngleConfig
-from .eject import EjectController, EjectPhase
+from .eject import EjectController
 from . import geometry
-from ..incidents import feeder_jam_incident_active
-from ..pulse_perception.stuck_watchdog import FeederStuckWatchdog
 
 # Exit handling is a per-channel strategy. A channel runs in either:
 #  - precise-pulse mode (default): meter the piece into the exit one small pulse
@@ -42,13 +40,6 @@ _CONFIG_TTL_S = 1.0
 # After a C3 exit dispense, keep C3 blocked this long so the in-flight piece
 # can register downstream before we consider another move.
 CLASSIFICATION_PENDING_ADMISSION_MS = 1500
-
-
-def _leading_com(state) -> Optional[float]:
-    pieces = getattr(state, "pieces", ())
-    if pieces:
-        return float(pieces[0].com_forward_to_exit_deg)
-    return None
 
 
 def _leading_track_id(state) -> Optional[int]:
@@ -78,7 +69,6 @@ class GoToAngleFeeding(BaseState):
         self._config_loaded_at: float = 0.0
         self._classification_pending_until: float = 0.0
         self._ch3_was_at_exit: bool = False
-        self._stuck_watchdog = FeederStuckWatchdog(gc, request_nudge=self._recovery_move)
         # Per-channel fast-eject controllers, lazily built on first use (steppers
         # may not be ready at __init__ in test contexts). Only channels running
         # in fast-eject mode get one.
@@ -105,6 +95,9 @@ class GoToAngleFeeding(BaseState):
         return self._config
 
     def _busy(self, stepper: "StepperMotor") -> bool:
+        # C1/C2 keep their installed scheduling/completion behavior.
+        if stepper is not getattr(self.irl, "c_channel_3_rotor_stepper", None):
+            return time.monotonic() < self._busy_until.get(stepper._name, 0.0)
         name = stepper._name
         if time.monotonic() < self._busy_until.get(name, 0.0):
             return True
@@ -134,13 +127,6 @@ class GoToAngleFeeding(BaseState):
             self.shared.c3_safe_staging_pending = False
         return False
 
-    def _recovery_move(self, stepper, channel_id: int, cfg) -> bool | None:
-        label = f"ch{channel_id}_recovery"
-        if self._busy(stepper):
-            self.gc.runtime_stats.observePulse(label, "busy", time.monotonic())
-            return None  # Deferred; no command or recovery attempt was spent.
-        return self._move(label, stepper, cfg.stuck_nudge_output_deg, 0, cfg,
-                          enforce_min=False, recovery=True)
 
     def _move(
         self,
@@ -150,7 +136,6 @@ class GoToAngleFeeding(BaseState):
         settle_ms: int,
         cfg: GoToAngleConfig,
         enforce_min: bool = True,
-        recovery: bool = False,
         c3_recovery_direction: int | None = None,
         c3_recovery_deadline: float | None = None,
         c3_safe_staging: bool = False,
@@ -160,6 +145,8 @@ class GoToAngleFeeding(BaseState):
                 c3_recovery_direction not in (-1, 1)
                 or stepper is not getattr(self.irl, "c_channel_3_rotor_stepper", None)):
             raise ValueError("explicit recovery direction is restricted to C3")
+        if stepper is not getattr(self.irl, "c_channel_3_rotor_stepper", None):
+            return self._move_untracked(label, stepper, output_deg, settle_ms, cfg, enforce_min)
         if self._busy(stepper):
             self.gc.runtime_stats.observePulse(label, "busy", time.monotonic())
             return False
@@ -169,8 +156,7 @@ class GoToAngleFeeding(BaseState):
         output_deg = abs(output_deg)
         if enforce_min:
             output_deg = max(cfg.min_move_output_deg, output_deg)
-        if not recovery:
-            output_deg = min(cfg.max_move_output_deg, output_deg)
+        output_deg = min(cfg.max_move_output_deg, output_deg)
         sign = 1 if cfg.forward_direction_sign >= 0 else -1
         if c3_recovery_direction is not None:
             sign *= c3_recovery_direction
@@ -186,9 +172,7 @@ class GoToAngleFeeding(BaseState):
             return False
         target = start_position + stepper.microsteps_for_degrees(motor_deg)
         try:
-            if recovery:
-                stepper.enabled = True
-            stepper.set_speed_limits(16 if recovery else 0, max(16, speed) if recovery else speed)
+            stepper.set_speed_limits(0, speed)
         except Exception as exc:
             self.gc.logger.warning(f"GoToAngle: {label} speed set failed: {exc}")
         exec_ms = stepper.estimateMoveDegreesMs(
@@ -223,6 +207,44 @@ class GoToAngleFeeding(BaseState):
                 self.shared.c3_motion_pending = False
                 self.shared.c3_safe_staging_pending = False
         self.gc.runtime_stats.observePulse(label, "sent" if success else "failed", now_mono)
+        self.gc.logger.info(
+            f"GoToAngle: {label} move output={output_deg:.1f}° motor={motor_deg:.1f}° "
+            f"success={success} exec_ms={exec_ms} settle_ms={settle_ms}"
+        )
+        return success
+
+
+    def _move_untracked(
+        self,
+        label: str,
+        stepper: "StepperMotor",
+        output_deg: float,
+        settle_ms: int,
+        cfg: GoToAngleConfig,
+        enforce_min: bool = True,
+    ) -> bool:
+        if self._busy(stepper):
+            return False
+        speed = int(cfg.move_speed_usteps_per_s)
+        output_deg = abs(output_deg)
+        if enforce_min:
+            output_deg = max(cfg.min_move_output_deg, output_deg)
+        output_deg = min(cfg.max_move_output_deg, output_deg)
+        sign = 1 if cfg.forward_direction_sign >= 0 else -1
+        motor_deg = sign * output_deg * CHANNEL_OUTPUT_GEAR_RATIO
+        # Set the move speed and tell the motor to move to the angle — that's it.
+        # We NEVER set acceleration here; the motor keeps whatever acceleration it
+        # already has.
+        try:
+            stepper.set_speed_limits(0, speed)
+        except Exception as exc:
+            self.gc.logger.warning(f"GoToAngle: {label} speed set failed: {exc}")
+        success = stepper.move_degrees(motor_deg)
+        exec_ms = stepper.estimateMoveDegreesMs(
+            abs(motor_deg), max_speed=speed or 5000
+        )
+        cooldown_ms = (max(0, exec_ms) + max(0, settle_ms)) if success else 500
+        self._busy_until[stepper._name] = time.monotonic() + cooldown_ms / 1000.0
         self.gc.logger.info(
             f"GoToAngle: {label} move output={output_deg:.1f}° motor={motor_deg:.1f}° "
             f"success={success} exec_ms={exec_ms} settle_ms={settle_ms}"
@@ -296,28 +318,12 @@ class GoToAngleFeeding(BaseState):
         )
 
     def _on_ch3_dispense(self) -> None:
-        """Publish a handoff that downstream evidence already confirmed."""
         if hasattr(self.shared, "publish_piece_delivered"):
             try:
                 self.shared.publish_piece_delivered(
                     source=StationId.C3,
                     target=StationId.CLASSIFICATION,
                     delivered_at_mono=time.monotonic(),
-                )
-            except Exception:
-                pass
-        self._classification_pending_until = (
-            time.monotonic() + CLASSIFICATION_PENDING_ADMISSION_MS / 1000.0
-        )
-
-    def _on_ch3_release_attempt(self) -> None:
-        """Arm C4 after a release command without claiming it delivered."""
-        if hasattr(self.shared, "publish_piece_release_attempt"):
-            try:
-                self.shared.publish_piece_release_attempt(
-                    source=StationId.C3,
-                    target=StationId.CLASSIFICATION,
-                    started_at_mono=time.monotonic(),
                 )
             except Exception:
                 pass
@@ -582,6 +588,7 @@ class GoToAngleFeeding(BaseState):
         decision['command'] = dict(leg)
         return decision
 
+
     def _owned_jitter(self, stepper, cfg, duration, deadline):
         """One original firmware cycle; the normal feeder owner holds its origin."""
         if (self._busy(stepper) or stepper.software_disabled
@@ -604,6 +611,7 @@ class GoToAngleFeeding(BaseState):
             self._jitter_owned.discard(name)
             self.shared.c3_motion_pending = False
         return accepted
+
 
     def _classification_ready(self, cfg: GoToAngleConfig) -> bool:
         if not cfg.gate_ch3_on_classification_ready or not self._classification_setup:
@@ -666,9 +674,11 @@ class GoToAngleFeeding(BaseState):
             # One cheap firmware round-trip. On any query error, report stopped so
             # the controller keeps progressing rather than hanging mid-advance.
             try:
+                if ch == 3 and self._busy(_stepper):
+                    return False
                 return bool(_stepper.stopped)
             except Exception:
-                return True
+                return ch != 3
 
         on_success = self._on_ch3_dispense if ch == 3 else (lambda: None)
         ctrl = EjectController(
@@ -682,17 +692,11 @@ class GoToAngleFeeding(BaseState):
         self._eject_controllers[ch] = ctrl
         return ctrl
 
-    def hold_motion(self) -> None:
-        # Finite accepted moves retain their owner and may finish while held.
-        # Only the watchdog clock is suspended until feeding is stepped again.
-        self._stuck_watchdog.pause(time.monotonic())
-
     def step(self) -> Optional[FeederState]:
         self._motion_tick += 1
-        c3_stepper = getattr(self.irl, "c_channel_3_rotor_stepper", None)
-        if c3_stepper is not None:
-            self._busy(c3_stepper)
-            self.shared.c3_motion_pending = c3_stepper._name in self._move_targets
+        stepper = getattr(self.irl, "c_channel_3_rotor_stepper", None)
+        if stepper is not None:
+            self._busy(stepper)
         cfg = self._cfg()
         runtime_stats = self.gc.runtime_stats
 
@@ -705,11 +709,7 @@ class GoToAngleFeeding(BaseState):
             (time.perf_counter() - can_run_started) * 1000.0,
         )
         if not can_run:
-            self.hold_motion()
-            runtime_stats.observeFeederSignals({"wait_chute": True})
             return FeederState.FEEDING
-
-        self._stuck_watchdog.resume(time.monotonic())
 
         perception_service = getattr(self.gc, "perception_service", None)
         if perception_service is not None:
@@ -728,7 +728,6 @@ class GoToAngleFeeding(BaseState):
             (time.perf_counter() - detection_available_started) * 1000.0,
         )
         if not detection_available:
-            runtime_stats.observeFeederSignals({"detection_unavailable": True})
             return FeederState.FEEDING
 
         analyze_started = time.perf_counter()
@@ -840,10 +839,8 @@ class GoToAngleFeeding(BaseState):
         ``ChannelState`` booleans; this method just dispatches its output
         to the existing ``_move`` machinery.
         """
-        from perception.cascade import Action, c1Action, feederChannelAction
+        from perception.cascade import Action, cascade
         from perception.state import EMPTY_STATE
-
-        self._motion_tick += 1
 
         runtime_stats = self.gc.runtime_stats
         t0 = time.perf_counter()
@@ -857,10 +854,15 @@ class GoToAngleFeeding(BaseState):
         c4 = states.get(4, EMPTY_STATE)
 
         now_mono = time.monotonic()
+        self._motion_tick += 1
         self._last_perception_tick = now_mono
+        owner = getattr(self.shared, "request_c3_recovery", None)
+        if owner is not None and owner != self._recover_transfer:
+            raise RuntimeError("C3 recovery already has a feeder owner")
         self.shared.request_c3_recovery = self._recover_transfer
-        episode = getattr(self.shared, "c3_transfer_episode", None)
-        transfer_hold = bool(episode and episode.unresolved and episode.forced_reject_reason)
+        stepper = getattr(self.irl, "c_channel_3_rotor_stepper", None)
+        if stepper is not None:
+            self._busy(stepper)
         # Hold C2/C3 drop-zone occupancy across brief detector dropouts so the
         # cascade (and the ``not c3.in_drop`` upstream gate below) see a stable
         # "occupied" instead of flickering empty for a frame. Applied before the
@@ -868,11 +870,7 @@ class GoToAngleFeeding(BaseState):
         c2 = self._latch_drop(2, c2, now_mono, cfg)
         c3 = self._latch_drop(3, c3, now_mono, cfg)
 
-        # Refresh owned completion even while the downstream gate is closed.
-        for channel in (1, 2, 3):
-            stepper = getattr(self.irl, f"c_channel_{channel}_rotor_stepper", None)
-            if stepper is not None and getattr(cfg, f"enable_ch{channel}"):
-                self._busy(stepper)
+        actions = cascade(c2, c3, c4)
 
         if cfg.enable_ch3:
             # C3's downstream is the classification channel (C4). The feeder does
@@ -895,63 +893,23 @@ class GoToAngleFeeding(BaseState):
                 and perception_service.secondary_zone_occupied(4, source_channel=3)
             ):
                 c3_downstream_ready = False
-            # The classification controller owns C4 admission.  The generic
-            # cascade still derives C3 readiness from the C4 camera, which can
-            # legitimately see resident indexed pockets (or fixed geometry).
-            # Recompute only C3's action from the authoritative gate.
-            c3_action = feederChannelAction(
-                c3, downstream_clear=c3_downstream_ready, greedy=True
+            c3_action = actions.c3
+            if getattr(self.shared, "c4_runtime_owner", None) is not None:
+                from perception.cascade import feederChannelAction
+                c3_action = feederChannelAction(c3, downstream_clear=c3_downstream_ready, greedy=True)
+            self._drive_channel(
+                "ch3", 3, c3_action, c3, c4, c3_downstream_ready,
+                self.irl.c_channel_3_rotor_stepper, cfg, perception_service, now_mono,
             )
-            self._stuck_watchdog.observe(
-                channel_id=3,
-                channel_label="C3",
-                upstream_label="C2",
-                upstream_channel_id=2,
-                upstream_stepper=getattr(self.irl, "c_channel_2_rotor_stepper", None),
-                upstream_enabled=bool(cfg.enable_ch2),
-                leading_pos_deg=_leading_com(c3),
-                leading_track_id=_leading_track_id(c3),
-                wants_advance=(
-                    c3_downstream_ready
-                    and c3_action in (Action.ADVANCE, Action.PRECISE)
-                ),
-                cfg=cfg,
-                now=now_mono,
-            )
-            if not feeder_jam_incident_active(self.gc, channel_label="C3"):
-                self._drive_channel(
-                    "ch3", 3, c3_action, c3, c4, c3_downstream_ready,
-                    self.irl.c_channel_3_rotor_stepper, cfg, perception_service, now_mono,
-                )
         if cfg.enable_ch2:
-            # A piece can coast out of the drawn drop zone before reaching the
-            # exit zone.  Keep carrying any on-channel piece forward; otherwise
-            # that neutral arc becomes a permanent software dead zone.
-            c2_action = (Action.IDLE if transfer_hold else feederChannelAction(
-                c2, downstream_clear=not c3.in_drop, greedy=True
-            ))
-            self._stuck_watchdog.observe(
-                channel_id=2,
-                channel_label="C2",
-                upstream_label="C1",
-                upstream_channel_id=1,
-                upstream_stepper=getattr(self.irl, "c_channel_1_rotor_stepper", None),
-                upstream_enabled=bool(cfg.enable_ch1),
-                leading_pos_deg=_leading_com(c2),
-                leading_track_id=_leading_track_id(c2),
-                wants_advance=c2_action in (Action.ADVANCE, Action.PRECISE),
-                cfg=cfg,
-                now=now_mono,
+            self._drive_channel(
+                "ch2", 2, actions.c2, c2, c3, not c3.in_drop,
+                self.irl.c_channel_2_rotor_stepper, cfg, perception_service, now_mono,
             )
-            if not transfer_hold and not feeder_jam_incident_active(self.gc, channel_label="C2"):
-                self._drive_channel(
-                    "ch2", 2, c2_action, c2, c3, not c3.in_drop,
-                    self.irl.c_channel_2_rotor_stepper, cfg, perception_service, now_mono,
-                )
         # C1 has no exit zone of its own — no fast-eject / recovery applies.
         if cfg.enable_ch1:
             stepper = self.irl.c_channel_1_rotor_stepper
-            if c1Action(c2) == Action.ADVANCE and not self._busy(stepper):
+            if actions.c1 == Action.ADVANCE and not self._busy(stepper):
                 self._move(
                     "ch1",
                     stepper,
@@ -960,30 +918,133 @@ class GoToAngleFeeding(BaseState):
                     cfg,
                 )
 
-        ready = self._classification_ready(cfg)
-        runtime_stats.observeFeederState(
-            now_mono, c2.in_drop, c3.in_drop, True, ready,
-            feederChannelAction(c2, downstream_clear=True, greedy=True).value,
-            feederChannelAction(c3, downstream_clear=True, greedy=True).value,
-        )
-        busy = {
-            ch: getattr(self.irl, f"c_channel_{ch}_rotor_stepper", None)
-            for ch in (1, 2, 3)
-        }
-        runtime_stats.observeFeederSignals({
-            "wait_classification_ready": cfg.enable_ch3 and c3.n_pieces > 0 and not ready,
-            "wait_ch2_dropzone_clear": cfg.enable_ch1 and c2.in_drop,
-            "wait_ch3_dropzone_clear": cfg.enable_ch2 and c2.n_pieces > 0 and c3.in_drop,
-            "ch2_dropzone_occupied": c2.in_drop,
-            "ch3_dropzone_occupied": c3.in_drop,
-            "wait_stepper_busy": bool(self._move_targets),
-            **{f"stepper_busy_ch{ch}": stepper is not None and stepper._name in self._move_targets
-               for ch, stepper in busy.items()},
-        })
-
         return FeederState.FEEDING
 
     def _drive_channel(
+        self,
+        label: str,
+        ch: int,
+        action,
+        state,
+        downstream,
+        downstream_ready: bool,
+        stepper: "StepperMotor",
+        cfg: GoToAngleConfig,
+        perception_service,
+        now: float,
+    ) -> None:
+        """Drive one feeder channel for a perception tick. Fast-eject channels
+        hand their exit handling to the per-channel EjectController; when the
+        controller does not take the tick (piece not near the exit), or for
+        precise-mode channels, fall back to the normal cascade action."""
+        # An open transfer is serviced only by request_c3_recovery. Normal
+        # feeding must not become a second command writer during that episode.
+        episode = getattr(self.shared, "c3_transfer_episode", None)
+        if ch == 3 and episode is not None and episode.unresolved:
+            return
+        if ch == 3 and getattr(self.shared, "c4_runtime_owner", None) is not None:
+            return self._drive_physical_c3(label=label, ch=ch, action=action, state=state,
+                downstream=downstream, downstream_ready=downstream_ready,
+                stepper=stepper, cfg=cfg, perception_service=perception_service, now=now)
+        if self._fast_eject_enabled(ch, cfg):
+            ctrl = self._get_eject_controller(ch, cfg, perception_service)
+            if ctrl is not None:
+                consumed = ctrl.tick(
+                    state=state,
+                    downstream=downstream,
+                    downstream_ready=downstream_ready,
+                    cfg=cfg,
+                    now=now,
+                )
+                if consumed:
+                    return
+                # Not consumed ⇒ the controller is idle and the piece isn't near
+                # the exit. Run the normal drop-zone advance/idle. The controller
+                # owns every in-exit case, so ``action`` here is ADVANCE/IDLE,
+                # never PRECISE.
+        self._apply_action(
+            label, action, stepper, cfg, advance_clearance_deg=state.advance_clearance_deg
+        )
+
+    def _apply_action(
+        self,
+        label: str,
+        action,
+        stepper: "StepperMotor",
+        cfg: GoToAngleConfig,
+        advance_clearance_deg: float | None = None,
+    ) -> None:
+        from perception.cascade import Action
+
+        if self._busy(stepper):
+            return
+        if action == Action.ADVANCE:
+            # Free advance to clear the drop zone, but never push the
+            # most-forward piece into the exit zone: cap the move to its
+            # forward distance to the exit edge. Once the piece reaches the
+            # exit, the PRECISE/FREEZE branch (gated on downstream readiness)
+            # meters it out instead of this ungated advance dumping it through.
+            output_deg = cfg.advance_output_deg
+            enforce_min = True
+            if (
+                advance_clearance_deg is not None
+                and advance_clearance_deg < output_deg
+            ):
+                output_deg = advance_clearance_deg
+                enforce_min = False
+            self._move(
+                f"{label}_advance",
+                stepper,
+                output_deg,
+                cfg.settle_after_move_ms,
+                cfg,
+                enforce_min=enforce_min,
+            )
+        elif action == Action.PRECISE:
+            self._move(
+                f"{label}_precise",
+                stepper,
+                cfg.precise_pulse_output_deg,
+                cfg.precise_pulse_pause_ms,
+                cfg,
+                enforce_min=False,
+            )
+        # IDLE / FREEZE: no move.
+
+    def reconcile_verified_c3_pause(self, expected_position: int) -> None:
+        """Cancel interrupted C3 work only after the installed pause barrier.
+
+        Cancellation is not target completion and cannot retire a transfer.
+        The coordinator has already verified fresh safe C3/C4 observations.
+        """
+        episode = getattr(self.shared, "c3_transfer_episode", None)
+        if episode is not None and episode.unresolved:
+            raise RuntimeError("Cannot cancel an unresolved C3 transfer")
+        stepper = self.irl.c_channel_3_rotor_stepper
+        if not stepper.stationary_verified():
+            raise RuntimeError("C3 pause cancellation requires verified stop")
+        position = int(stepper.position)
+        if position != expected_position:
+            raise RuntimeError("C3 moved after the verified pause boundary")
+        name = stepper._name
+        target = self._move_targets.pop(name, None)
+        if target is not None:
+            self._last_c3_cancelled_motion = {
+                "target": target, "position": position,
+                "reason": "verified_retained_pause", "at_wall": time.time(),
+            }
+        self._busy_until.pop(name, None)
+        self._jitter_owned.discard(name)
+        self._completion_checked_tick.pop(name, None)
+        self.shared.c3_motion_pending = False
+        self.shared.c3_safe_staging_pending = False
+
+    def cleanup(self) -> None:
+        super().cleanup()
+        for ctrl in self._eject_controllers.values():
+            ctrl.reset()
+
+    def _drive_physical_c3(
         self,
         label: str,
         ch: int,
@@ -1018,7 +1079,7 @@ class GoToAngleFeeding(BaseState):
             ctrl = self._eject_controllers.get(ch)
             if ctrl is not None and ctrl.phase != EjectPhase.IDLE:
                 return
-            self._apply_action(label, action, stepper, cfg,
+            self._apply_physical_action(label, action, stepper, cfg,
                                advance_clearance_deg=clearance, c3_safe_staging=True)
             return
 
@@ -1094,7 +1155,7 @@ class GoToAngleFeeding(BaseState):
             reserve = getattr(self.shared, "reserve_c4_transfer", None)
             if callable(reserve) and not reserve(state, release_evidence):
                 return
-        moved = self._apply_action(
+        moved = self._apply_physical_action(
             label,
             action,
             stepper,
@@ -1117,7 +1178,7 @@ class GoToAngleFeeding(BaseState):
             self.shared.c3_release_leader_id = _leading_track_id(state)
             self._on_ch3_release_attempt()
 
-    def _apply_action(
+    def _apply_physical_action(
         self,
         label: str,
         action,
@@ -1170,7 +1231,24 @@ class GoToAngleFeeding(BaseState):
         # IDLE / FREEZE: no move.
         return False
 
-    def cleanup(self) -> None:
-        super().cleanup()
-        for ctrl in self._eject_controllers.values():
-            ctrl.reset()
+    def _on_ch3_release_attempt(self) -> None:
+        """Arm C4 after a release command without claiming it delivered."""
+        if hasattr(self.shared, "publish_piece_release_attempt"):
+            try:
+                self.shared.publish_piece_release_attempt(
+                    source=StationId.C3,
+                    target=StationId.CLASSIFICATION,
+                    started_at_mono=time.monotonic(),
+                )
+            except Exception:
+                pass
+        self._classification_pending_until = (
+            time.monotonic() + CLASSIFICATION_PENDING_ADMISSION_MS / 1000.0
+        )
+
+
+    def hold_motion(self) -> None:
+        self._motion_tick += 1
+        stepper = getattr(self.irl, "c_channel_3_rotor_stepper", None)
+        if stepper is not None:
+            self._busy(stepper)

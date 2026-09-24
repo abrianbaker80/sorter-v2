@@ -13,12 +13,8 @@ from local_metrics import (
     recordRuntimePerfMetricSnapshot,
 )
 _saved_api_keys = get_api_keys()
-for _provider, _env_var in {
-    "openrouter": "OPENROUTER_API_KEY",
-    "rebrickable": "REBRICKABLE_API_KEY",
-}.items():
-    if _saved_api_keys.get(_provider):
-        os.environ[_env_var] = _saved_api_keys[_provider]
+if _saved_api_keys.get("openrouter"):
+    os.environ["OPENROUTER_API_KEY"] = _saved_api_keys["openrouter"]
 
 from global_config import mkGlobalConfig, GlobalConfig
 from runtime_variables import mkRuntimeVariables
@@ -43,6 +39,7 @@ from run_recorder import RunRecorder
 from lifetime_stats import LifetimeStatsTracker
 from message_queue.handler import handleServerToMainEvent
 from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand
+from defs.sorter_controller import SorterLifecycle
 from defs.events import RuntimeStatsEvent, RuntimeStatsData
 from irl.config import (
     ClassificationChannelMode,
@@ -51,6 +48,7 @@ from irl.config import (
     mkIRLInterface,
 )
 from subsystems.feeder.calibration import calibrateFeederChannels
+from subsystems.classification_channel.incidents import c4_reject_drain_start_disposition
 from vision import VisionManager
 from process_guard import acquire_backend_process_guard, ProcessGuardError
 from hardware.waveshare_bus_service import close_all_waveshare_bus_services
@@ -176,6 +174,11 @@ def _maybeStartPerception(gc: GlobalConfig, irl_config, camera_service) -> None:
     )
     service.start()
     gc.perception_service = service
+    try:
+        import c4_marker_telemetry
+        c4_marker_telemetry.start(service, gc.logger, irl_config)
+    except Exception as exc:
+        gc.logger.warning(f"Passive C4 marker telemetry unavailable: {exc}")
     gc.logger.info(
         f"Perception (rev04) started: channels={sorted(service.channels().keys())} "
         f"workers={sorted(service.workers().keys())}"
@@ -421,6 +424,16 @@ def main() -> None:
             shutdown_reason["value"] = signal.Signals(signum).name
         except Exception:
             shutdown_reason["value"] = "signal shutdown"
+        # A supervisor signal must not tear down the interface underneath the
+        # private C4 recovery worker. It is cancelled and joined only after its
+        # stop sequence is verified; otherwise the signal is ignored and the
+        # service remains available for inspection.
+        from server.occupied_exit import quiesce_occupied_recovery_for_exit
+
+        blocked = quiesce_occupied_recovery_for_exit("shut down the backend")
+        if blocked:
+            print(f"[shutdown_guard] {blocked}", file=sys.stderr)
+            return
         shutdown_requested.set()
 
     # SIGTERM is used by the supervisor/system service for "hard restart".
@@ -791,9 +804,18 @@ def main() -> None:
             from subsystems.classification_channel.complete_drain import drain_all_pockets
 
             shared_state.setHardwareStatus(homing_step="Draining every C4 pocket to Reject...")
-            receipt = drain_all_pockets(irl, irl_config, progress=lambda message:
-                shared_state.setHardwareStatus(homing_step=message))
+            receipt = drain_all_pockets(
+                irl,
+                irl_config,
+                progress=lambda message: shared_state.setHardwareStatus(homing_step=message),
+            )
             shared_state.c4_drain_result = {"status": "drained", **receipt}
+            perception_service = getattr(gc, "perception_service", None)
+            reset_perception = getattr(perception_service, "reset_tracker_generation", None)
+            if perception_service is not None and not callable(reset_perception):
+                raise RuntimeError("C4 perception cannot be reset after a successful drain")
+            if callable(reset_perception):
+                reset_perception(4)
 
         classification_mode = getattr(
             getattr(irl_config, "classification_channel_config", None),
@@ -805,7 +827,7 @@ def main() -> None:
             in (
                 ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01,
                 ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
-                ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01,
+            ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01,
             )
             and not _noPowerModeActive(gc)
             and not physical_c4
@@ -816,10 +838,7 @@ def main() -> None:
 
             shared_state.setHardwareStatus(homing_step="Aligning classification channel...")
             if not maybeRunSpokeHome(gc, irl, irl_config, vision):
-                raise RuntimeError(
-                    "Classification-channel optical home could not establish and verify "
-                    "the C4 pocket-position origin."
-                )
+                gc.logger.warning("Classification-channel rev01 spoke home did not complete")
 
         if _noPowerModeActive(gc):
             gc.logger.info("Skipping carousel homing in no-power development mode.")
@@ -855,26 +874,6 @@ def main() -> None:
             irl, irl_config, gc, vision, main_to_server_queue, rv
         )
 
-        try:
-            from project_harvest_runtime import rehydrate_active_bin_assignments
-
-            harvest_recovery = rehydrate_active_bin_assignments(
-                gc, next_controller.irl.distribution_layout
-            )
-            if harvest_recovery.get("changed"):
-                gc.logger.info(
-                    "Rehydrated %s active Harvest bin assignments for %s."
-                    % (
-                        harvest_recovery.get("assignment_count"),
-                        harvest_recovery.get("activation_id"),
-                    )
-                )
-        except Exception as exc:
-            next_controller.coordinator.cleanup()
-            raise RuntimeError(
-                f"Active Harvest bin assignment recovery failed: {exc}"
-            ) from exc
-
         chute = getattr(next_controller.coordinator.distribution, "chute", None) if hasattr(next_controller, "coordinator") else None
         if chute is not None and not _noPowerModeActive(gc):
             gc.logger.info("Homing chute...")
@@ -895,7 +894,21 @@ def main() -> None:
                 shared_state.setHardwareStatus(homing_step=message))
             shared_state.c4_drain_result = {"status": "ready", **receipt}
         elif drain_c4:
-            gc.runtime_stats.reconcileC4Drain()
+            reconcile_drain = getattr(gc.runtime_stats, "reconcileC4Drain", None)
+            if callable(reconcile_drain):
+                reconcile_drain()
+            else:
+                # Older runtime statistics do not track C4 ownership. The new
+                # controller is empty after recovery, so only clear a matching
+                # C4 incident and never manufacture a delivery record.
+                incident = gc.runtime_stats.activeIncident()
+                if isinstance(incident, dict) and incident.get("channel") in {
+                    "c4",
+                    "classification_channel",
+                }:
+                    gc.runtime_stats.clearActiveIncident(
+                        resolved_by="complete_c4_reject_drain"
+                    )
 
         _drain_runtime_commands("safe recovery finish")
         with controller_lock:
@@ -963,13 +976,72 @@ def main() -> None:
                     shared_state.c4_drain_result = {"status": "ready", **receipt}
             else:
                 _home_hardware(drain_c4=True)
+            from subsystems.classification_channel.occupied_checkpoint import CheckpointStore
+
+            CheckpointStore().complete_by_reject_drain({
+                "reason": "uncertain occupied C4 material was routed through the verified full-pocket reject sweep"
+            })
         except Exception as exc:
-            shared_state.c4_drain_result = {**shared_state.c4_drain_result,
-                                          "status": "blocked", "error": str(exc)}
+            shared_state.c4_drain_result = {
+                **shared_state.c4_drain_result,
+                "status": "blocked",
+                "error": str(exc),
+            }
             raise
         shared_state.c4_drain_result = {**shared_state.c4_drain_result, "status": "ready"}
 
     shared_state._hardware_c4_drain_fn = _complete_c4_drain
+
+    def _recover_occupied_c4(cancel_event=None, cancel_complete_event=None, complete_event=None) -> None:
+        nonlocal irl, controller
+        from subsystems.classification_channel.occupied_recovery import recover_occupied
+
+        with controller_lock:
+            if controller is not None:
+                raise RuntimeError("Occupied restart recovery requires a standby backend with no controller")
+        active = shared_state.getActiveIRL()
+        if active is not None and getattr(active, "interfaces", {}):
+            raise RuntimeError("Another runtime already owns the hardware")
+
+        def build_runtime():
+            real_irl = mkIRLInterface(irl_config, gc, restore_servos=False)
+            _replace_irl(real_irl)
+            setHardwareRuntimeIRL(real_irl)
+            try:
+                return SorterController(real_irl, irl_config, gc, vision, main_to_server_queue, rv)
+            except Exception:
+                from subsystems.classification_channel.occupied_recovery import stop_recovery_hardware
+                stop_recovery_hardware(real_irl)
+                raise
+
+        def publish_runtime(restored):
+            nonlocal controller
+            with controller_lock:
+                controller = restored
+                setController(restored)
+
+        recover_occupied(
+            gc=gc,
+            build_runtime=build_runtime,
+            publish_runtime=publish_runtime,
+            cancel_event=cancel_event,
+            cancel_complete_event=cancel_complete_event,
+            complete_event=complete_event,
+        )
+
+    shared_state._hardware_c4_occupied_fn = _recover_occupied_c4
+
+    def _checkpoint_occupied_c4() -> None:
+        from subsystems.classification_channel.occupied_recovery import prepare_controller_checkpoint
+        with controller_lock:
+            if controller is None:
+                raise RuntimeError("No paused controller is available for checkpoint")
+            prepare_controller_checkpoint(controller)
+
+    shared_state._hardware_c4_checkpoint_fn = _checkpoint_occupied_c4
+    from c4_marker_qualification import run as run_c4_marker_qualification
+    shared_state._hardware_c4_marker_fn = lambda: run_c4_marker_qualification(
+        shared_state.getActiveIRL(), irl_config, gc)
     setHardwareStartFn(_home_hardware)
     setHardwareInitializeFn(_initialize_hardware)
     setHardwareResetFn(lambda: _cleanup_runtime_hardware("system reset"))
@@ -1036,6 +1108,10 @@ def main() -> None:
     last_runtime_perf_snapshot = time.time()
     last_profiler_snapshot = time.time()
     last_main_loop_started = time.perf_counter()
+    automatic_c4_reject_started = False
+    automatic_c4_reject_resume = False
+    automatic_c4_reject_failed = False
+    automatic_c4_reject_retry_at = 0.0
 
     try:
         while not shutdown_requested.is_set():
@@ -1047,6 +1123,44 @@ def main() -> None:
                 (loop_started - last_main_loop_started) * 1000.0,
             )
             last_main_loop_started = loop_started
+            if automatic_c4_reject_started:
+                drain = shared_state.c4_drain_result or {}
+                if shared_state.hardware_state == "error" or drain.get("status") == "blocked":
+                    failure = drain.get("error") or shared_state.hardware_error or "hardware recovery failed"
+                    gc.logger.error(
+                        f"Automatic C4 reject recovery blocked: {failure}"
+                    )
+                    incident = gc.runtime_stats.activeIncident()
+                    if isinstance(incident, dict) and incident.get("channel") in {"c4", "classification_channel"}:
+                        incident.update(
+                            severity="critical",
+                            status="waiting_for_operator",
+                            awaiting_operator=True,
+                            operator_message=f"Automatic C4 reject failed because the hardware recovery failed: {failure}",
+                        )
+                        gc.runtime_stats.setActiveIncident(incident)
+                    automatic_c4_reject_started = False
+                    automatic_c4_reject_resume = False
+                    automatic_c4_reject_failed = True
+                elif shared_state.hardware_state == "ready" and drain.get("status") == "ready":
+                    with controller_lock:
+                        recovered_controller = controller
+                    if automatic_c4_reject_resume and recovered_controller is not None:
+                        perception = getattr(gc, "perception_service", None)
+                        active_incident = gc.runtime_stats.activeIncident()
+                        try:
+                            current = perception.read_state(4) if perception is not None else None
+                            age = time.time() - float(current.ts) if current is not None else float("inf")
+                        except Exception:
+                            age = float("inf")
+                        if active_incident is None and 0.0 <= age <= 1.0:
+                            recovered_controller.resume()
+                            automatic_c4_reject_resume = False
+                            automatic_c4_reject_started = False
+                        # Keep the recovered runtime paused until C4 has a fresh
+                        # frame; the camera service continues independently.
+                    else:
+                        automatic_c4_reject_started = False
             try:
                 event = server_to_main_queue.get(block=False)
                 with controller_lock:
@@ -1122,7 +1236,7 @@ def main() -> None:
 
             with controller_lock:
                 current_controller = controller
-            if current_controller is not None:
+            if current_controller is not None and shared_state.hardware_state not in {"homing", "initializing"}:
                 with gc.profiler.timer("main.loop.controller_step_ms"):
                     controller_step_started = time.perf_counter()
                     current_controller.step()
@@ -1131,9 +1245,134 @@ def main() -> None:
                         (time.perf_counter() - controller_step_started) * 1000.0,
                     )
 
+            reject_requested = getattr(gc.runtime_stats, "c4RejectRequested", lambda: False)()
+            if (reject_requested and not automatic_c4_reject_started
+                    and not automatic_c4_reject_failed
+                    and time.monotonic() >= automatic_c4_reject_retry_at):
+                # Two-piece uncertainty waits for its in-controller verified stop.
+                # Legacy track-loss requests need a fresh stop from the current owner;
+                # the supported standby recovery verifies its own new hardware binding.
+                classification = getattr(
+                    getattr(current_controller, "coordinator", None), "classification", None
+                ) if current_controller is not None else None
+                two_piece = getattr(classification, "_two_piece", None)
+                motor = None
+                if current_controller is not None:
+                    try:
+                        motor = current_controller.irl.carousel_stepper
+                    except Exception:
+                        motor = None
+                if two_piece is not None:
+                    reject_ready = bool(two_piece.automaticRejectReady())
+                    if not reject_ready and not two_piece.hasSafetyHold():
+                        try:
+                            reject_ready = bool(motor and motor.stationary_verified())
+                        except Exception:
+                            reject_ready = False
+                elif current_controller is not None:
+                    try:
+                        reject_ready = bool(motor and motor.stationary_verified())
+                    except Exception:
+                        reject_ready = False
+                else:
+                    reject_ready = True
+                try:
+                    motor_stalled = bool(
+                        current_controller is not None
+                        and (motor is None or motor.stalled)
+                    )
+                except Exception:
+                    motor_stalled = True
+                hardware_state_ready = shared_state.hardware_state not in {
+                    "error",
+                    "homing",
+                    "initializing",
+                }
+                if (motor_stalled or shared_state.hardware_state == "error") and not automatic_c4_reject_started:
+                    reason = (
+                        "carousel motor reports stalled"
+                        if motor_stalled
+                        else shared_state.hardware_error or "hardware runtime is in error state"
+                    )
+                    incident = gc.runtime_stats.activeIncident()
+                    if (
+                        isinstance(incident, dict)
+                        and incident.get("channel") in {"c4", "classification_channel"}
+                        and incident.get("status") == "reject_pending"
+                    ):
+                        incident.update(
+                            status="waiting_for_operator",
+                            awaiting_operator=True,
+                            operator_message=f"Automatic C4 reject is blocked by a physical hardware fault: {reason}.",
+                        )
+                        gc.runtime_stats.setActiveIncident(incident)
+                    automatic_c4_reject_failed = True
+                if reject_ready and not motor_stalled and hardware_state_ready:
+                    try:
+                        from server.routers.system import complete_c4_drain
+
+                        result = complete_c4_drain()
+                    except Exception as exc:
+                        gc.logger.error(f"Could not start automatic C4 reject recovery: {exc}")
+                        result = {"ok": False}
+                    disposition, retry_at = c4_reject_drain_start_disposition(
+                        result, time.monotonic()
+                    )
+                    if disposition == "started":
+                        automatic_c4_reject_resume = (
+                            current_controller is not None
+                            and current_controller.state == SorterLifecycle.RUNNING
+                        )
+                        automatic_c4_reject_started = True
+                        automatic_c4_reject_retry_at = 0.0
+                        if two_piece is not None:
+                            two_piece.automaticRejectStarted()
+                        else:
+                            clear_request = getattr(gc.runtime_stats, "clearC4RejectRequest", None)
+                            if callable(clear_request):
+                                clear_request()
+                    elif disposition == "retry":
+                        gc.logger.warning(
+                            "Automatic C4 reject recovery start was not accepted; "
+                            "the reject request remains pending and will retry: "
+                            f"{result.get('message') or 'unsupported lifecycle state'}"
+                        )
+                        automatic_c4_reject_retry_at = retry_at
+                    else:
+                        failure = disposition.partition(":")[2]
+                        gc.logger.error(
+                            f"Automatic C4 reject recovery could not start: {failure}"
+                        )
+                        incident = gc.runtime_stats.activeIncident()
+                        if (
+                            isinstance(incident, dict)
+                            and incident.get("channel") in {"c4", "classification_channel"}
+                            and incident.get("status") == "reject_pending"
+                        ):
+                            incident.update(
+                                severity="critical",
+                                status="waiting_for_operator",
+                                awaiting_operator=True,
+                                operator_message=(
+                                    "Automatic C4 reject is blocked because the supported "
+                                    f"recovery could not start: {failure}."
+                                ),
+                            )
+                            gc.runtime_stats.setActiveIncident(incident)
+                        automatic_c4_reject_failed = True
+
             time.sleep(gc.timeouts.main_loop_sleep_ms / 1000.0)
     except KeyboardInterrupt:
         shutdown_reason["value"] = "KeyboardInterrupt"
+        from server.occupied_exit import quiesce_occupied_recovery_for_exit
+
+        blocked = quiesce_occupied_recovery_for_exit("shut down the backend")
+        if blocked:
+            gc.logger.error(blocked)
+            # Keep the process and its worker alive for a safe operator retry.
+            shutdown_requested.clear()
+            while not shutdown_requested.wait(0.5):
+                pass
     finally:
         _shutdown_runtime(shutdown_reason["value"])
 

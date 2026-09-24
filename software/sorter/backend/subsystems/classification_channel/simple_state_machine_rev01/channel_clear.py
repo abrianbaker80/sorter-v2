@@ -12,6 +12,7 @@ from .constants import C4_TRAVEL_SIGN, LOG_TAG
 # Forward == the same travel direction the normal classification flow uses to
 # push a piece to the fall-off (discharge applies C4_TRAVEL_SIGN), so a piece is
 # carried OUT the exit, never back toward the entry.
+_CLEAR_STEP_OUTPUT_DEG = 72.0  # one 5-sector spoke per increment
 _CLEAR_MAX_OUTPUT_DEG = 720.0  # two full revolutions before giving up
 
 
@@ -94,7 +95,7 @@ def clearChannelByAdvancing(
     *,
     vision: Any = None,
     speed_usteps_per_s: Optional[int] = None,
-    step_output_deg: Optional[float] = None,
+    step_output_deg: float = _CLEAR_STEP_OUTPUT_DEG,
     max_output_deg: float = _CLEAR_MAX_OUTPUT_DEG,
     label: str = LOG_TAG,
 ) -> ChannelClearResult:
@@ -116,8 +117,6 @@ def clearChannelByAdvancing(
         gc.logger.warning(f"{label} channel clear: set_speed_limits failed: {exc}")
 
     platter = C4FiveSectorPlatter.from_irl_config(irl_config)
-    if step_output_deg is None:
-        step_output_deg = platter.sector_size_deg
     step_microsteps = platter.output_degrees_to_motor_microsteps(
         C4_TRAVEL_SIGN * abs(step_output_deg)
     )

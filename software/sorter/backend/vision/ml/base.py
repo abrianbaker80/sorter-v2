@@ -25,12 +25,14 @@ class Detection:
     score: float
 
 
-def letterbox(image: np.ndarray, size: int) -> tuple[np.ndarray, float, float, float]:
+def letterbox(image: np.ndarray, size: int, *, color_correct=None) -> tuple[np.ndarray, float, float, float]:
     height, width = image.shape[:2]
     scale = min(float(size) / float(height), float(size) / float(width))
     resized_w = int(round(width * scale))
     resized_h = int(round(height * scale))
     resized = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+    if color_correct is not None:
+        resized = color_correct(resized, "detector_color_ms")
     canvas = np.full((size, size, 3), 114, dtype=np.uint8)
     pad_x = (size - resized_w) / 2.0
     pad_y = (size - resized_h) / 2.0

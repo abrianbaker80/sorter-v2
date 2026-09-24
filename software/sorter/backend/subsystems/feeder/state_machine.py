@@ -112,6 +112,12 @@ class FeederStateMachine(BaseSubsystem):
                 )
             self.gc.profiler.enterState("feeder", self.current_state.value)
 
+    def reconcile_verified_c3_pause(self, expected_position: int) -> None:
+        state = self.states_map[self.current_state]
+        reconcile = getattr(state, "reconcile_verified_c3_pause", None)
+        if reconcile is not None:
+            reconcile(expected_position)
+
     def cleanup(self) -> None:
         self.gc.profiler.exitState("feeder")
         self.states_map[self.current_state].cleanup()

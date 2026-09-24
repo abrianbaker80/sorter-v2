@@ -1,0 +1,30 @@
+{
+  "result": "DEADLINE_ORDER_CANDIDATE_RETAINED_HEALTHY_STANDBY",
+  "old": {
+    "pid": 199608,
+    "pgid": 199608,
+    "start_ticks": 31616547,
+    "cwd": "/home/ubuntu/sorter-upstream-fresh-20260919/software/sorter/backend",
+    "exe": "/usr/bin/python3.12"
+  },
+  "new": {
+    "pid": 200804,
+    "pgid": 200804,
+    "start_ticks": 31654673,
+    "cwd": "/home/ubuntu/sorter-upstream-fresh-20260919/software/sorter/backend",
+    "exe": "/usr/bin/python3.12"
+  },
+  "all_336_candidate_hashes_verified": true,
+  "configuration_unchanged": true,
+  "rollback_used": false,
+  "another_hardware_startup_attempt": false,
+  "system": {
+    "c4_drain": null,
+    "occupied_recovery": null,
+    "hardware_state": "standby",
+    "hardware_error": null,
+    "homing_step": null,
+    "no_power_development_mode": false
+  },
+  "at": "2026-09-23T23:28:07.419746+00:00"
+}

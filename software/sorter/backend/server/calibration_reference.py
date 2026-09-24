@@ -19,8 +19,6 @@ REFERENCE_TILE_HEX: Final[dict[str, str]] = {
     label: f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
     for label, rgb in REFERENCE_TILE_RGB.items()
 }
-
-
 # ColorChecker Classic 24, post-November-2014 chart formulation, row-major
 # patch order. These encoded sRGB targets were generated from the
 # `ColorChecker24 - After November 2014` CIE xyY values distributed by

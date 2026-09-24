@@ -95,6 +95,8 @@ class PieceTransport(ABC):
         return False
 
 
+
+
 class ClassificationChannelTransport(PieceTransport):
     """Two-stage transport for the dedicated classification C-channel.
 
@@ -151,7 +153,6 @@ class ClassificationChannelTransport(PieceTransport):
         self._piece_uuid_by_track_id = {}
         self._hood_piece_uuid = None
         self._positioning_piece_uuid = None
-        self._canceled_positioning_piece_uuid = None
         if self._zone_manager is not None:
             self._zone_manager = type(self._zone_manager)(self._dynamic_config)
 
@@ -206,13 +207,6 @@ class ClassificationChannelTransport(PieceTransport):
             piece_for_distribution_drop=self._exit_piece,
         )
 
-    def resetC4Distribution(self) -> None:
-        """Exclusive complete C4 recovery; never called by pause/track loss."""
-        self._wait_piece = None
-        self._exit_piece = None
-        self._classification_piece = None
-        self._canceled_positioning_piece_uuid = None
-
     def placePieceForDistribution(self, obj: KnownObject) -> None:
         """Stage an externally-owned piece directly into the positioning slot.
 
@@ -230,52 +224,6 @@ class ClassificationChannelTransport(PieceTransport):
         # Any unconsumed cancellation belongs to the previous transaction.
         self._canceled_positioning_piece_uuid = None
         self._wait_piece = obj
-
-    def cancelPieceForDistribution(self, piece_uuid: str) -> KnownObject | None:
-        """Remove an unconfirmed piece from the distribution-positioning slot.
-
-        Track-loss recovery uses this when C4 cannot prove a normal discharge.
-        The piece must not be promoted to the drop slot because doing so would
-        let distribution record a physical drop that was never confirmed.
-        """
-        if self._dynamic_mode:
-            if self._positioning_piece_uuid != piece_uuid:
-                return None
-            piece = self.removePiece(piece_uuid)
-            if piece is not None:
-                self._canceled_positioning_piece_uuid = piece_uuid
-            return piece
-        piece = self._wait_piece
-        if piece is None:
-            # A still-owned indexed pocket can lose only its software slot.
-            # Preserve cancellation acknowledgement even when that slot is gone;
-            # READY must not interpret the missing record as a physical drop.
-            self._canceled_positioning_piece_uuid = piece_uuid
-            return None
-        if piece.uuid != piece_uuid:
-            return None
-        self._wait_piece = None
-        self._canceled_positioning_piece_uuid = piece_uuid
-        return piece
-
-    def consumeCanceledPieceForDistribution(
-        self,
-        piece_uuid: str | None = None,
-    ) -> bool:
-        """Acknowledge that a positioned piece was canceled, not dropped."""
-        if self._canceled_positioning_piece_uuid is None:
-            return False
-        if (
-            piece_uuid is not None
-            and self._canceled_positioning_piece_uuid != piece_uuid
-        ):
-            return False
-        self._canceled_positioning_piece_uuid = None
-        return True
-
-    def isCanceledPieceForDistribution(self, piece_uuid: str) -> bool:
-        """Expose cancellation state without consuming distribution's signal."""
-        return self._canceled_positioning_piece_uuid == piece_uuid
 
     def getPieceAtClassification(self) -> KnownObject | None:
         if self._dynamic_mode:
@@ -298,6 +246,26 @@ class ClassificationChannelTransport(PieceTransport):
 
     def getPieceForDistributionDrop(self) -> KnownObject | None:
         return self._exit_piece
+
+    def acknowledgeCompletedDistributionDrop(self, piece_uuid: str) -> KnownObject:
+        """Clear the final two-stage drop slot after distribution has settled.
+
+        Recovery calls this only after the distributor reports its successful
+        SENDING-to-IDLE transition and the distribution gate is open. Keep the
+        method narrow so an uncommitted or differently-owned drop cannot be
+        silently forgotten.
+        """
+        if self._dynamic_mode:
+            raise RuntimeError("Completed-drop acknowledgement is unsupported in dynamic mode")
+        piece = self._exit_piece
+        if piece is None or piece.uuid != piece_uuid:
+            raise RuntimeError("Distribution drop slot does not match the completed owner")
+        if piece.stage != PieceStage.distributed or piece.distributed_at is None:
+            raise RuntimeError("Distribution drop owner has not been committed")
+        if self._classification_piece is not None or self._wait_piece is not None:
+            raise RuntimeError("Distribution slots still contain an active owner")
+        self._exit_piece = None
+        return piece
 
     def getActivePieceCount(self) -> int:
         if self._dynamic_mode:
@@ -506,3 +474,60 @@ class ClassificationChannelTransport(PieceTransport):
         if self._zone_manager is not None:
             self._zone_manager.remove_piece(piece_uuid)
         return piece
+
+    def resetC4Distribution(self) -> None:
+        """Exclusive complete C4 recovery; never called by pause/track loss."""
+        self._wait_piece = None
+        self._exit_piece = None
+        self._classification_piece = None
+        self._canceled_positioning_piece_uuid = None
+
+    def cancelPieceForDistribution(self, piece_uuid: str) -> KnownObject | None:
+        """Remove an unconfirmed piece from the distribution-positioning slot.
+
+        Track-loss recovery uses this when C4 cannot prove a normal discharge.
+        The piece must not be promoted to the drop slot because doing so would
+        let distribution record a physical drop that was never confirmed.
+        """
+        if self._dynamic_mode:
+            if self._positioning_piece_uuid != piece_uuid:
+                return None
+            piece = self.removePiece(piece_uuid)
+            if piece is not None:
+                self._canceled_positioning_piece_uuid = piece_uuid
+            return piece
+        piece = self._wait_piece
+        if piece is None:
+            # A still-owned indexed pocket can lose only its software slot.
+            # Preserve cancellation acknowledgement even when that slot is gone;
+            # READY must not interpret the missing record as a physical drop.
+            self._canceled_positioning_piece_uuid = piece_uuid
+            return None
+        if piece.uuid != piece_uuid:
+            return None
+        self._wait_piece = None
+        self._canceled_positioning_piece_uuid = piece_uuid
+        return piece
+
+    def consumeCanceledPieceForDistribution(
+        self,
+        piece_uuid: str | None = None,
+    ) -> bool:
+        """Acknowledge that a positioned piece was canceled, not dropped."""
+        if self._canceled_positioning_piece_uuid is None:
+            return False
+        if (
+            piece_uuid is not None
+            and self._canceled_positioning_piece_uuid != piece_uuid
+        ):
+            return False
+        self._canceled_positioning_piece_uuid = None
+        return True
+
+    def isCanceledPieceForDistribution(self, piece_uuid: str) -> bool:
+        """Expose cancellation state without consuming distribution's signal."""
+        return self._canceled_positioning_piece_uuid == piece_uuid
+
+
+
+

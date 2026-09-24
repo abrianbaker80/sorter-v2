@@ -98,12 +98,7 @@ def _this_device_hosts() -> frozenset[str]:
             hosts.add(f"{hostname}.local")
     tailscale_name = _tailscale_hostname()
     if tailscale_name:
-        tailscale_name = tailscale_name.strip().lower().rstrip(".")
-        if tailscale_name:
-            hosts.add(tailscale_name)
-            # MagicDNS accepts both the authoritative FQDN and its first label.
-            # Keep both origins valid without allowing unrelated tailnet hosts.
-            hosts.add(tailscale_name.split(".", 1)[0])
+        hosts.add(tailscale_name.strip().lower())
     hosts.update(_local_ip_addresses())
     return frozenset(hosts)
 
@@ -217,10 +212,13 @@ def _tailscale_hostname() -> str | None:
 
     resolved = _query_tailscale_hostname()
     if resolved:
-        # Persist so future boots resolve the name even if Tailscale isn't up yet
-        # when this process starts.
+        # Persist changes so future boots resolve the name even if Tailscale
+        # isn't up yet when this process starts. Avoid rewriting the same value:
+        # the state store updates its timestamp on every upsert, and this
+        # refresh can run from otherwise read-only API requests.
         try:
-            set_tailscale_hostname(resolved)
+            if get_tailscale_hostname() != resolved:
+                set_tailscale_hostname(resolved)
         except Exception:
             pass
     else:
@@ -232,7 +230,8 @@ def _tailscale_hostname() -> str | None:
 
 def _query_tailscale_hostname() -> str | None:
     # `tailscale status --json` reads the local daemon's state (no network
-    # needed). Self.DNSName is the authoritative name MagicDNS resolves.
+    # needed). Self.DNSName is the authoritative name MagicDNS resolves; its
+    # first label is the device name.
     try:
         result = subprocess.run(
             ["tailscale", "status", "--json"],
@@ -251,7 +250,7 @@ def _query_tailscale_hostname() -> str | None:
         return None
     dns_name = (self_node.get("DNSName") or "").rstrip(".")
     if dns_name:
-        return dns_name
+        return dns_name.split(".")[0]
     return self_node.get("HostName") or None
 
 

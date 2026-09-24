@@ -95,15 +95,8 @@ class BackendSupervisor:
         self._start_backend(reason="initial start")
         self._health_thread.start()
 
-    def request_shutdown(self) -> None:
-        """Prevent every current or pending restart before shutdown can block."""
-        with self._lock:
-            self._shutdown.set()
-            self._restart_requested = False
-            self._state = "stopping"
-
     def shutdown(self) -> None:
-        self.request_shutdown()
+        self._shutdown.set()
         self._stop_backend(reason="supervisor shutdown")
 
     def status(self) -> dict[str, Any]:
@@ -136,7 +129,7 @@ class BackendSupervisor:
 
     def request_restart(self, *, reason: str) -> bool:
         with self._lock:
-            if self._shutdown.is_set() or self._restart_requested:
+            if self._restart_requested:
                 return False
             self._restart_requested = True
             self._manual_stop_requested = False
@@ -195,9 +188,6 @@ class BackendSupervisor:
 
     def _start_backend(self, *, reason: str) -> None:
         with self._lock:
-            if self._shutdown.is_set():
-                self._state = "stopped"
-                return
             process = self._process
             if process is not None and process.poll() is None:
                 return
@@ -547,38 +537,6 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _serve_until_shutdown(
-    server: ThreadingHTTPServer,
-    supervisor: BackendSupervisor,
-) -> None:
-    shutdown_requested = threading.Event()
-
-    def _request_shutdown(*_args: Any) -> None:
-        supervisor.request_shutdown()
-        shutdown_requested.set()
-
-    def _shutdown_server() -> None:
-        shutdown_requested.wait()
-        server.shutdown()
-
-    signal.signal(signal.SIGINT, _request_shutdown)
-    signal.signal(signal.SIGTERM, _request_shutdown)
-    shutdown_thread = threading.Thread(
-        target=_shutdown_server,
-        daemon=True,
-        name="supervisor-shutdown",
-    )
-    shutdown_thread.start()
-
-    try:
-        server.serve_forever()
-    finally:
-        shutdown_requested.set()
-        supervisor.shutdown()
-        server.server_close()
-        shutdown_thread.join(timeout=1.0)
-
-
 def main() -> None:
     args = _parse_args()
     script_dir = Path(__file__).resolve().parent
@@ -596,12 +554,23 @@ def main() -> None:
 
     server = ThreadingHTTPServer((str(args.host), int(args.control_port)), _handler_factory(supervisor))
 
+    def _shutdown(*_args: Any) -> None:
+        server.shutdown()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
     print(
         f"[supervisor] control=http://{args.host}:{args.control_port} "
         f"backend_health={args.health_url} command={' '.join(args.backend_command)}",
         flush=True,
     )
-    _serve_until_shutdown(server, supervisor)
+
+    try:
+        server.serve_forever()
+    finally:
+        supervisor.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":

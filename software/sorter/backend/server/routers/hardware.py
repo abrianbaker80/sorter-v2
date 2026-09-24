@@ -9,7 +9,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from server.manual_flap_control import manual_flap_operation
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -36,7 +35,6 @@ from irl.bin_layout import (
     _LAYER_MAX_DIMENSION_DEFAULTS_MM,
 )
 from subsystems.distribution.chute import BinAddress, CHUTE_MAX_ANGLE
-from defs.sorter_controller import SorterLifecycle
 from irl.parse_user_toml import (
     DEFAULT_CAROUSEL_HOME_PIN_CHANNEL,
     DEFAULT_CHUTE_FIRST_BIN_CENTER,
@@ -48,7 +46,6 @@ from irl.parse_user_toml import (
     DEFAULT_CHUTE_SECTION_WIDTH_DEG,
 )
 from local_state import (
-    clear_current_session_bin_selection,
     clear_current_session_bins,
     get_bin_snapshot,
     get_bin_snapshot_pieces,
@@ -58,6 +55,7 @@ from local_state import (
     list_bin_snapshots,
 )
 from server import shared_state
+from server.routers.motion_safety import occupied_checkpoint_motion_guard
 from server.routers.steppers import _stepper_mapping, _halt_stepper
 from server.waveshare_inventory import get_waveshare_inventory_manager
 from machine_platform.control_board import discover_control_boards
@@ -1153,7 +1151,6 @@ def get_live_servo_feedback() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo")
-@manual_flap_operation
 def save_servo_hardware_config(
     payload: ServoHardwareSettingsPayload,
 ) -> Dict[str, Any]:
@@ -1308,7 +1305,6 @@ class ServoSpeedSettingsPayload(BaseModel):
 
 
 @router.post("/api/hardware-config/servo/speeds")
-@manual_flap_operation
 def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
     _SPEED_RANGE = (1, 2000)
 
@@ -1355,7 +1351,7 @@ def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/toggle")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("toggle a layer flap")
 def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
     _ensure_not_homing("toggle a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1369,7 +1365,7 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
         _apply_pca_servo_speed(servo, _speeds.get("close_speed") if currently_open else _speeds.get("open_speed"))
         servo.toggle()
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
-        is_open = feedback.get("is_open") if feedback.get("available") else None
+        is_open = bool(feedback.get("is_open")) if feedback.get("available") else False
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to toggle layer {layer_index + 1} servo: {e}")
 
@@ -1388,8 +1384,6 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
         "is_open": is_open,
         "feedback": feedback,
         "message": (
-            f"Layer {layer_index + 1} servo move requested; position not yet confirmed."
-            if is_open is None else
             f"Layer {layer_index + 1} servo opened."
             if is_open
             else f"Layer {layer_index + 1} servo closed."
@@ -1398,7 +1392,7 @@ def toggle_layer_servo(layer_index: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/preview")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("preview a layer flap")
 def preview_layer_servo(
     layer_index: int,
     payload: ServoLayerPreviewPayload,
@@ -1462,7 +1456,7 @@ def preview_layer_servo(
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/calibrate")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("calibrate a layer flap")
 def calibrate_layer_servo(layer_index: int) -> Dict[str, Any]:
     _ensure_not_homing("calibrate a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1488,7 +1482,7 @@ def calibrate_layer_servo(layer_index: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/nudge")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("nudge a layer flap")
 def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str, Any]:
     _ensure_not_homing("nudge a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1517,8 +1511,7 @@ def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str,
             current_angle = current_pos // 10
 
         new_angle = max(0, min(180, current_angle + payload.degrees))
-        if servo.move_to(new_angle) is False:
-            raise RuntimeError("Servo command rejected or busy")
+        servo.move_to(new_angle)
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
     except HTTPException:
         raise
@@ -1534,8 +1527,19 @@ def nudge_layer_servo(layer_index: int, payload: ServoNudgePayload) -> Dict[str,
     }
 
 
+@router.get("/api/hardware-config/servo/layers/{layer_index}/diagnostics")
+def get_layer_servo_diagnostics(layer_index: int) -> Dict[str, Any]:
+    servo = _live_servo_for_layer(layer_index)
+    if not hasattr(servo, "diagnostics"):
+        raise HTTPException(status_code=501, detail="Diagnostics unavailable for this servo backend.")
+    try:
+        return {"ok": True, "layer_index": layer_index, **servo.diagnostics()}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Servo diagnostics unavailable: {exc}")
+
+
 @router.post("/api/hardware-config/servo/layers/{layer_index}/move-to")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("move a layer flap")
 def move_to_layer_servo(layer_index: int, payload: ServoLayerMovePayload) -> Dict[str, Any]:
     _ensure_not_homing("move a servo")
     servo = _live_servo_for_layer(layer_index)
@@ -1546,8 +1550,7 @@ def move_to_layer_servo(layer_index: int, payload: ServoLayerMovePayload) -> Dic
     try:
         _, _cfg = _read_machine_params_config()
         _apply_pca_servo_speed(servo, _servo_settings_from_config(_cfg).get("homing_speed"))
-        if servo.move_to(angle) is False:
-            raise RuntimeError("Servo command rejected or busy")
+        servo.move_to(angle)
         feedback = _live_servo_feedback_for_layer(layer_index, servo)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to move layer {layer_index + 1} servo: {e}")
@@ -1571,7 +1574,6 @@ def _servo_calibration_state(servo: Any) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/lock")
-@manual_flap_operation
 def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> Dict[str, Any]:
     _ensure_not_homing("lock a servo angle")
     if payload.which not in {"open", "closed"}:
@@ -1626,7 +1628,6 @@ def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> 
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/clear")
-@manual_flap_operation
 def clear_layer_servo_angle(layer_index: int, payload: ServoLayerClearPayload) -> Dict[str, Any]:
     _ensure_not_homing("clear a servo angle")
     if payload.which not in {"open", "closed", "both"}:
@@ -1734,7 +1735,6 @@ def get_waveshare_servos(port: str | None = None) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/set-id")
-@manual_flap_operation
 def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[str, Any]:
     """Change a servo's ID on the bus."""
     _ensure_not_homing("change a Waveshare servo ID")
@@ -1786,7 +1786,7 @@ def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[st
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/calibrate")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("calibrate a Waveshare layer flap")
 def calibrate_waveshare_servo(servo_id: int) -> Dict[str, Any]:
     """Auto-calibrate the open/close range of a single servo on the bus."""
     _ensure_not_homing("calibrate a Waveshare servo")
@@ -1828,7 +1828,7 @@ def calibrate_waveshare_servo(servo_id: int) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/move")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("move a Waveshare layer flap")
 def move_waveshare_servo(servo_id: int, payload: ServoMovePayload) -> Dict[str, Any]:
     """Move a single servo to its open/close/center position based on EEPROM limits."""
     _ensure_not_homing("move a Waveshare servo")
@@ -1891,7 +1891,7 @@ def move_waveshare_servo(servo_id: int, payload: ServoMovePayload) -> Dict[str, 
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/nudge")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("nudge a Waveshare layer flap")
 def nudge_waveshare_servo(servo_id: int, payload: ServoNudgePayload) -> Dict[str, Any]:
     _ensure_not_homing("nudge a Waveshare servo")
     if servo_id < 1 or servo_id > 253:
@@ -2027,6 +2027,7 @@ def get_live_chute_status() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/chute/calibrate/find-endstop")
+@occupied_checkpoint_motion_guard("home the chute")
 def calibrate_chute_find_endstop() -> Dict[str, Any]:
     _ensure_not_homing("home the chute")
     irl = _active_irl()
@@ -2337,6 +2338,7 @@ def derive_chute_aiming_config(payload: ChuteAimingDerivePayload) -> Dict[str, A
 
 
 @router.post("/api/hardware-config/chute/move-to-angle")
+@occupied_checkpoint_motion_guard("move the chute")
 def move_chute_to_angle(payload: ChuteMoveToAnglePayload) -> Dict[str, Any]:
     _ensure_not_homing("move the chute")
     chute = _live_chute()
@@ -2358,6 +2360,7 @@ def move_chute_to_angle(payload: ChuteMoveToAnglePayload) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/chute/move-to-virtual-bin")
+@occupied_checkpoint_motion_guard("move the chute")
 def move_chute_to_virtual_bin(payload: ChuteVirtualBinPayload) -> Dict[str, Any]:
     # "Test aim" for the calibration circle: aim at a bin in an arbitrary,
     # not-necessarily-installed layout using the canonical aiming formula.
@@ -2511,6 +2514,7 @@ def save_carousel_hardware_config(
 
 
 @router.post("/api/hardware-config/carousel/home")
+@occupied_checkpoint_motion_guard("home the classification carousel")
 def home_carousel_to_endstop() -> Dict[str, Any]:
     _ensure_not_homing("home the carousel")
     irl = _active_irl()
@@ -2533,6 +2537,7 @@ def home_carousel_to_endstop() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/carousel/calibrate")
+@occupied_checkpoint_motion_guard("calibrate the classification carousel")
 def calibrate_carousel() -> Dict[str, Any]:
     """Calibrate carousel by measuring steps for one full revolution."""
     _ensure_not_homing("calibrate the carousel")
@@ -3218,152 +3223,6 @@ def clear_bin_contents(
     }
 
 
-def apply_harvest_bin_assignments(
-    *, assignments: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Atomically install an exact one-category-per-bin Harvest routing map."""
-
-    if not isinstance(assignments, list) or not assignments:
-        raise HTTPException(status_code=400, detail="Harvest assignments are required.")
-    categories_before = copy.deepcopy(_current_bin_categories())
-    categories_after = copy.deepcopy(categories_before)
-    normalized: list[dict[str, Any]] = []
-    coordinates_seen: set[tuple[int, int, int]] = set()
-    categories_seen: set[str] = set()
-    for index, assignment in enumerate(assignments, start=1):
-        try:
-            layer_index = int(assignment["layer_index"])
-            section_index = int(assignment["section_index"])
-            bin_index = int(assignment["bin_index"])
-            category_id = str(assignment["category_id"]).strip()
-        except (KeyError, TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=400, detail=f"Harvest assignment {index} is invalid."
-            ) from exc
-        coordinates = (layer_index, section_index, bin_index)
-        if (
-            layer_index < 0
-            or layer_index >= len(categories_after)
-            or section_index < 0
-            or section_index >= len(categories_after[layer_index])
-            or bin_index < 0
-            or bin_index >= len(categories_after[layer_index][section_index])
-            or not category_id
-        ):
-            raise HTTPException(
-                status_code=400, detail=f"Harvest assignment {index} is out of range."
-            )
-        if coordinates in coordinates_seen or category_id in categories_seen:
-            raise HTTPException(
-                status_code=400,
-                detail="Harvest destinations and categories must be unique.",
-            )
-        coordinates_seen.add(coordinates)
-        categories_seen.add(category_id)
-        normalized.append(
-            {
-                **assignment,
-                "layer_index": layer_index,
-                "section_index": section_index,
-                "bin_index": bin_index,
-                "category_id": category_id,
-            }
-        )
-
-    for layer in categories_after:
-        for section in layer:
-            for bin_categories in section:
-                bin_categories[:] = [
-                    value for value in bin_categories if value not in categories_seen
-                ]
-    for assignment in normalized:
-        categories_after[assignment["layer_index"]][assignment["section_index"]][
-            assignment["bin_index"]
-        ] = [assignment["category_id"]]
-    _apply_and_persist_bin_categories(categories_after)
-    return {
-        "categories_before": categories_before,
-        "categories_after": categories_after,
-        "assignments": normalized,
-    }
-
-
-def restore_harvest_bin_assignments(
-    *, categories_before: list[list[list[list[str]]]]
-) -> None:
-    """Restore a validated category snapshot after a failed activation transaction."""
-
-    reference_layout = mkLayoutFromConfig(getBinLayout())
-    if not layoutMatchesCategories(reference_layout, categories_before):
-        raise HTTPException(status_code=500, detail="Harvest rollback layout mismatch.")
-    _apply_and_persist_bin_categories(copy.deepcopy(categories_before))
-
-
-def clear_selected_bins(
-    *, selected_bins: list[tuple[int, int, int]]
-) -> dict[str, Any]:
-    """Clear contents and release assignments for an exact bin selection.
-
-    This is used by Harvest after an operator attests that the named physical
-    bins have already been emptied.  The selection is validated and persisted
-    as one operation so the UI never has to emulate a batch with a sequence of
-    partially-successful single-bin requests.
-    """
-
-    _ensure_not_homing("clear selected bins")
-    normalized = sorted({(int(li), int(si), int(bi)) for li, si, bi in selected_bins})
-    if not normalized:
-        raise HTTPException(status_code=400, detail="Select at least one bin.")
-
-    categories_before = copy.deepcopy(_current_bin_categories())
-    categories_after = copy.deepcopy(categories_before)
-    for layer_index, section_index, bin_index in normalized:
-        if layer_index < 0 or layer_index >= len(categories_after):
-            raise HTTPException(status_code=400, detail="Invalid layer index.")
-        if section_index < 0 or section_index >= len(categories_after[layer_index]):
-            raise HTTPException(status_code=400, detail="Invalid section index.")
-        if bin_index < 0 or bin_index >= len(categories_after[layer_index][section_index]):
-            raise HTTPException(status_code=400, detail="Invalid bin index.")
-        categories_after[layer_index][section_index][bin_index] = []
-
-    _apply_and_persist_bin_categories(categories_after)
-    try:
-        cleared = clear_current_session_bin_selection(
-            bins=normalized,
-            bin_categories=categories_before,
-        )
-    except Exception:
-        # Keep category assignments consistent if the durable contents update
-        # fails before it commits.
-        _apply_and_persist_bin_categories(categories_before)
-        raise
-
-    for layer_index, section_index, bin_index in normalized:
-        _clear_runtime_bin_contents(
-            scope="bin",
-            layer_index=layer_index,
-            section_index=section_index,
-            bin_index=bin_index,
-        )
-
-    return {
-        "ok": True,
-        "scope": "selection",
-        "selected_bin_count": len(normalized),
-        "cleared_bins": int(cleared.get("cleared_bins", 0)),
-        "snapshot_id": cleared.get("snapshot_id"),
-        "released_assignments": sum(
-            1
-            for layer_index, section_index, bin_index in normalized
-            if categories_before[layer_index][section_index][bin_index]
-        ),
-        "message": (
-            f"Marked {len(normalized)} selected bin(s) as physically emptied "
-            "and released their previous assignments."
-        ),
-    }
-
-
 @router.get("/api/bins/layout")
 def get_bins_layout() -> Dict[str, Any]:
     """Return the full bin grid: layers → sections → bins, with chute angles."""
@@ -3424,16 +3283,13 @@ def get_bins_layout() -> Dict[str, Any]:
             except Exception:
                 pass
         servos = list(getattr(shared_state.controller_ref.irl, "servos", []))
-        # A closed door intercepts; all others must be open. Unknown, moving,
-        # failed or ambiguous configurations have no active destination.
-        try:
-            closed = [i for i, servo in enumerate(servos) if servo.isClosed()]
-            if len(closed) == 1 and all(
-                i == closed[0] or servo.isOpen() for i, servo in enumerate(servos)
-            ):
-                active_layer = closed[0]
-        except Exception:
-            active_layer = None
+        for i, servo in enumerate(servos):
+            try:
+                if hasattr(servo, "isOpen") and servo.isOpen():
+                    active_layer = i
+                    break
+            except Exception:
+                pass
 
         # Read category assignments from the live distribution layout
         dist_layout = getattr(shared_state.controller_ref.irl, "distribution_layout", None)
@@ -3503,103 +3359,64 @@ def set_bins_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/move-to")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("move to a bin")
 def move_to_bin(payload: MoveToBinPayload) -> Dict[str, Any]:
-    return _move_to_bin(payload)
-
-
-def _move_to_bin(payload: MoveToBinPayload) -> Dict[str, Any]:
-    """Select the intercepting flap, verify settling, then request chute travel."""
-    _ensure_not_homing("move to a bin")
-    controller = shared_state.controller_ref
-    if controller is None or not hasattr(controller, "irl"):
+    """Move chute to a specific bin and open the correct layer servo."""
+    if shared_state.controller_ref is None or not hasattr(shared_state.controller_ref, "irl"):
         raise HTTPException(status_code=503, detail="Hardware controller not initialized.")
-    if controller.state not in {SorterLifecycle.PAUSED, SorterLifecycle.READY}:
-        raise HTTPException(status_code=409, detail="Pause sorting before moving to a bin.")
-    irl = controller.irl
+
+    irl = shared_state.controller_ref.irl
     chute = getattr(irl, "chute", None)
     if chute is None:
         raise HTTPException(status_code=503, detail="Chute subsystem not available.")
+
     servos = list(getattr(irl, "servos", []))
     if payload.layer_index < 0 or payload.layer_index >= len(servos):
         raise HTTPException(status_code=400, detail=f"Invalid layer index {payload.layer_index}.")
-    address = BinAddress(payload.layer_index, payload.section_index, payload.bin_index)
-    try:
-        bins = chute.layout.layers[address.layer_index].sections[address.section_index].bins
-        if address.section_index < 0 or address.bin_index < 0 or address.bin_index >= len(bins):
-            raise IndexError()
-        target_angle = chute.getAngleForBin(address)
-    except (IndexError, TypeError):
-        raise HTTPException(status_code=400, detail="Invalid bin coordinates.")
+
+    address = BinAddress(
+        layer_index=payload.layer_index,
+        section_index=payload.section_index,
+        bin_index=payload.bin_index,
+    )
+
+    target_angle = chute.getAngleForBin(address)
     if target_angle is None:
         raise HTTPException(status_code=400, detail="Bin is unreachable (angle out of range).")
-    if not chute.homed or not chute.stepper.stopped:
-        raise HTTPException(status_code=409, detail="Chute must be homed and stopped before selecting a bin.")
 
-    try:
-        # Validate every flap before any new command; a blocked upstream door
-        # cannot be ignored merely because the destination servo is healthy.
-        for i, servo in enumerate(servos):
-            if not servo.available or not getattr(servo, "is_calibrated", True):
-                raise RuntimeError(f"Layer {i + 1} flap is unavailable or uncalibrated")
-            # Permit an explicit retry after a settled failure, while preserving
-            # the driver's failure latch for automatic completion checks.
-            feedback = servo.feedback() if hasattr(servo, "feedback") else {}
-            stopped = feedback.get("stopped")
-            if stopped is None:
-                stopped = servo.stopped
-            if not stopped:
-                if feedback.get("error"):
-                    raise RuntimeError(f"Layer {i + 1} flap state unavailable: {feedback['error']}")
-                raise RuntimeError(f"Layer {i + 1} flap is still moving")
-        # Match automatic sorting: close destination, open passage on all others.
-        order = [payload.layer_index] + [i for i in range(len(servos)) if i != payload.layer_index]
-        for i in order:
-            servo = servos[i]
-            opened = i != payload.layer_index
-            if hasattr(servo, "command_door"):
-                # The checked driver also releases torque left by a prior jog
-                # when the target is already settled, without cycling the flap.
-                servo.command_door(opened)
-                continue
-            if (servo.isOpen() if opened else servo.isClosed()):
-                continue
-            speed = getattr(servo, "apply_open_speed" if opened else "apply_close_speed", None)
-            if speed is not None:
-                speed()
-            accepted = servo.open() if opened else servo.close()
-            if accepted is False:
-                raise RuntimeError(f"Layer {i + 1} flap command was rejected")
-        deadline = time.monotonic() + 4.0  # 3500 ms firmware release limit + transport margin.
-        while True:
-            settled = True
-            for i, servo in enumerate(servos):
-                if not servo.stopped:
-                    settled = False
-                elif not (servo.isClosed() if i == payload.layer_index else servo.isOpen()):
-                    raise RuntimeError(f"Layer {i + 1} flap did not reach its requested state")
-            if settled:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Timed out waiting for layer flaps to settle")
-            time.sleep(0.02)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=f"Bin move failed: {exc}") from exc
+    # Close all servos first, then open the target layer
+    for i, servo in enumerate(servos):
+        try:
+            if hasattr(servo, "isOpen") and servo.isOpen():
+                servo.close()
+        except Exception:
+            pass
 
     try:
         estimated_ms = chute.moveToBin(address)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Chute move failed: {exc}") from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chute move failed: {e}")
+
+    # Open the target layer servo
+    target_servo = servos[payload.layer_index]
+    try:
+        if hasattr(target_servo, "open"):
+            target_servo.open()
+    except Exception:
+        pass
+
     return {
-        "ok": True, "flap_state": "settled", "position_source": "firmware_profile",
-        "chute_state": "requested", "target_angle": round(target_angle, 2),
-        "estimated_ms": estimated_ms, "layer_index": payload.layer_index,
-        "section_index": payload.section_index, "bin_index": payload.bin_index,
+        "ok": True,
+        "target_angle": round(target_angle, 2),
+        "estimated_ms": estimated_ms,
+        "layer_index": payload.layer_index,
+        "section_index": payload.section_index,
+        "bin_index": payload.bin_index,
     }
 
 
 @router.post("/api/bins/move-to-section")
-@manual_flap_operation
+@occupied_checkpoint_motion_guard("point at a bin section")
 def move_to_section(payload: MoveToSectionPayload) -> Dict[str, Any]:
     """Point the chute at the center of a section without opening any servo."""
     _ensure_not_homing("point at a section")

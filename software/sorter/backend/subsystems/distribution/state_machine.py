@@ -36,6 +36,7 @@ class DistributionStateMachine(BaseSubsystem):
         self.shared.c4_reset_distribution = self.reset_c4
         self.chute = irl.chute
         self.current_state = DistributionState.IDLE
+        self.last_settled_drop_uuid: str | None = None
         self.states_map = {
             DistributionState.IDLE: Idle(irl, gc, shared),
             DistributionState.POSITIONING: Positioning(
@@ -65,6 +66,11 @@ class DistributionStateMachine(BaseSubsystem):
             next_state = self.states_map[self.current_state].step()
         if next_state and next_state != self.current_state:
             prev_state = self.current_state
+            prev_state_impl = self.states_map[prev_state]
+            if prev_state == DistributionState.SENDING and next_state == DistributionState.IDLE:
+                settled_uuid = getattr(prev_state_impl, "settled_piece_uuid", None)
+                if settled_uuid:
+                    self.last_settled_drop_uuid = str(settled_uuid)
             self.logger.info(
                 f"Distribution: {prev_state.value} -> {next_state.value}"
             )
@@ -78,6 +84,10 @@ class DistributionStateMachine(BaseSubsystem):
                     "distribution", prev_state.value, next_state.value
                 )
             self.gc.profiler.enterState("distribution", self.current_state.value)
+
+    def cleanup(self) -> None:
+        self.gc.profiler.exitState("distribution")
+        self.states_map[self.current_state].cleanup()
 
     def resume(self) -> bool:
         """Restore retained positioning before allowing classification to resume."""
@@ -112,6 +122,5 @@ class DistributionStateMachine(BaseSubsystem):
         transport.resetC4Distribution()
         self.shared.set_distribution_gate(True, reason="C4 reject recovery")
 
-    def cleanup(self) -> None:
-        self.gc.profiler.exitState("distribution")
-        self.states_map[self.current_state].cleanup()
+
+

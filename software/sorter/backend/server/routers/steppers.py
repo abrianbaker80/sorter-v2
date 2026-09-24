@@ -29,6 +29,10 @@ from irl.parse_user_toml import (
     DEFAULT_STEPPER_STALLGUARD,
 )
 from server import shared_state
+from server.routers.motion_safety import (
+    occupied_checkpoint_motion_guard,
+    recovery_related_stepper,
+)
 
 router = APIRouter()
 
@@ -47,6 +51,7 @@ class StateResponse(BaseModel):
 
 class CommandResponse(BaseModel):
     success: bool
+    message: Optional[str] = None
 
 
 class StepperPulseResponse(BaseModel):
@@ -203,6 +208,14 @@ def _ensure_no_blocking_fault(action: str) -> None:
 
 
 def _ensure_manual_motion_allowed(action: str) -> None:
+    from subsystems.power_stress import getActivePowerStressRunner
+
+    power_runner = getActivePowerStressRunner()
+    if power_runner is not None and power_runner.isActive():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot {action} while power stress is active.",
+        )
     state = shared_state.hardware_state
     if _hardware_worker_alive() or state in {"homing", "initializing"}:
         raise HTTPException(
@@ -218,12 +231,7 @@ def _active_irl_config() -> Any | None:
         config = getattr(coordinator, "irl_config", None)
         if config is not None:
             return config
-    config = getattr(shared_state.vision_manager, "_irl_config", None)
-    if config is not None:
-        return config
-    from irl.config import mkIRLConfig
-
-    return mkIRLConfig()
+    return None
 
 
 def _halt_stepper(stepper: Any, *, force: bool = False) -> None:
@@ -556,11 +564,65 @@ def getState() -> StateResponse:
 
 @router.post("/pause", response_model=CommandResponse)
 def pause() -> CommandResponse:
+    with shared_state.hardware_lifecycle_lock:
+        worker = shared_state.hardware_worker_thread
+        cancel_event = shared_state.occupied_recovery_cancel_event
+        cancel_complete_event = shared_state.occupied_recovery_cancel_complete_event
+        complete_event = shared_state.occupied_recovery_complete_event
+        if cancel_event is not None and worker is not None and worker.is_alive():
+            if complete_event is None or not complete_event.is_set():
+                cancel_event.set()
+        else:
+            worker = None
+
+    if worker is not None:
+        # Do not acknowledge a physical pause until the private recovery worker
+        # has completed its bounded stop sequence and verified the stop.
+        worker.join(timeout=14.0)
+        if worker.is_alive():
+            return CommandResponse(
+                success=False,
+                message="Occupied recovery cancellation is still stopping hardware.",
+            )
+        if complete_event is not None and complete_event.is_set():
+            return CommandResponse(
+                success=True,
+                message="Occupied recovery completed; the sorter remains paused.",
+            )
+        if cancel_complete_event is not None and cancel_complete_event.is_set():
+            from subsystems.classification_channel.occupied_checkpoint import pending_checkpoint
+
+            try:
+                checkpoint = pending_checkpoint()
+            except Exception:
+                return CommandResponse(
+                    success=False,
+                    message="Occupied recovery exited safely, but its checkpoint cannot be verified.",
+                )
+            if checkpoint is not None and checkpoint.get("phase") == "prepared":
+                return CommandResponse(
+                    success=True,
+                    message="Occupied recovery cancelled before hardware startup; checkpoint remains prepared.",
+                )
+            if checkpoint is None:
+                return CommandResponse(
+                    success=False,
+                    message="Occupied recovery exited, but neither completion nor a durable checkpoint can be verified.",
+                )
+            return CommandResponse(
+                success=True,
+                message="Occupied recovery cancelled after stop verification.",
+            )
+        return CommandResponse(
+            success=False,
+            message="Occupied recovery ended without verified cancellation; inspect hardware status.",
+        )
+
     if shared_state.command_queue is None:
         raise HTTPException(status_code=500, detail="Command queue not initialized")
     event = PauseCommandEvent(tag="pause", data=PauseCommandData())
     shared_state.command_queue.put(event)
-    return CommandResponse(success=True)
+    return CommandResponse(success=True, message="Pause command queued.")
 
 
 @router.post("/resume", response_model=CommandResponse)
@@ -575,6 +637,9 @@ def resume() -> CommandResponse:
 
 
 @router.post("/stepper/pulse", response_model=StepperPulseResponse)
+@occupied_checkpoint_motion_guard(
+    "pulse a stepper", when=recovery_related_stepper
+)
 def pulse_stepper(
     stepper: str,
     direction: str,
@@ -647,6 +712,9 @@ def _estimate_jitter_duration_s(amplitude_steps: int, cycles: int, speed: int, a
 
 
 @router.post("/stepper/jitter", response_model=StepperJitterResponse)
+@occupied_checkpoint_motion_guard(
+    "jitter a stepper", when=recovery_related_stepper
+)
 def jitter_stepper(
     stepper: str,
     amplitude_deg: float = 2.0,
@@ -743,6 +811,9 @@ def jitter_stepper(
 
 
 @router.post("/stepper/move-degrees", response_model=StepperMoveDegreesResponse)
+@occupied_checkpoint_motion_guard(
+    "move a stepper", when=recovery_related_stepper
+)
 def move_stepper_degrees(
     stepper: str,
     degrees: float,
@@ -828,6 +899,10 @@ def move_stepper_degrees(
 @router.post(
     "/api/classification-channel/sector-move",
     response_model=C4SectorMoveResponse,
+)
+@occupied_checkpoint_motion_guard(
+    "move the classification channel",
+    when=lambda arguments: bool(arguments.get("execute")),
 )
 def classification_channel_sector_move(
     from_sector: int,
@@ -1315,6 +1390,11 @@ class _PulsedMotion(_SweepMotion):
 
 
 @router.post("/stepper/stallguard-sweep", response_model=StallGuardSweepResponse)
+@occupied_checkpoint_motion_guard(
+    "run a StallGuard sweep",
+    when=lambda arguments: recovery_related_stepper(arguments)
+    or arguments.get("profile") == "chute_random",
+)
 def stallguard_sweep(
     stepper: str,
     speed: int,
@@ -2057,6 +2137,7 @@ def clear_stall_incident() -> Dict[str, Any]:
 
 
 @router.post("/stall-incident/rehome")
+@occupied_checkpoint_motion_guard("re-home the chute")
 def rehome_after_stall() -> Dict[str, Any]:
     """Clear stall latches AND re-home the chute in place, then drop the hold.
 

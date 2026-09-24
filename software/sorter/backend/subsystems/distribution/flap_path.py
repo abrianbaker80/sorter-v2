@@ -6,8 +6,6 @@ def validate_flaps(servos, target_layer: int | None) -> None:
         raise RuntimeError("No distribution flaps are configured")
     if target_layer is not None and not 0 <= target_layer < len(servos):
         raise RuntimeError("Destination flap is not configured")
-    # Keep the existing contract: destination closed, all other layers open.
-    # Layer eligibility must never remove a physical door from this path.
     for index, servo in enumerate(servos):
         if not servo.available or not getattr(servo, "is_calibrated", True):
             raise RuntimeError(f"Layer {index + 1} flap is unavailable or uncalibrated")

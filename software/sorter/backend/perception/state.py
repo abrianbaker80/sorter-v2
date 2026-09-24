@@ -22,9 +22,7 @@ class PieceObservation:
     zone their centre sits in — NOT by cross-frame identity. ``sv_bt_track_id``
     adds an advisory stable id (perception ByteTrack — see
     ``perception.tracking``) for diagnostics, the stream overlay, and any future
-    identity-aware consumer. The C4 admission gate uses confirmation (a non-None
-    id) to keep one-frame detector ghosts from starting a classification cycle;
-    motion and discharge still reason from physical position and zones."""
+    identity-aware consumer, but the control flow does not depend on it."""
 
     # Signed travel-direction gap (channel-output degrees) from this piece's COM
     # to the entry edge of the REAL exit (exit-only) arc — same quantity and sign
@@ -44,9 +42,11 @@ class PieceObservation:
     # Advisory stable identity from the perception ByteTrack tracker: the same
     # physical piece keeps one id frame-to-frame as it slides down the channel,
     # surviving brief detector dropouts. ``None`` when tracking is unavailable or
-    # the box is not yet a confirmed track. C4 admission uses confirmation; other
-    # control logic and diagnostics may use the position without identity.
+    # the box is not yet a confirmed track. Not used by control logic (see class
+    # docstring) — diagnostics / overlay / future identity-aware consumers only.
     sv_bt_track_id: int | None = None
+    # Conservative bbox-edge clearance to the actual fall-off, in travel direction.
+    clearance_to_exit_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -113,16 +113,12 @@ class ChannelState:
     # channel has no exit arc. The single-leading ``exit_com_*`` fields above are
     # ``pieces[0]``; this additionally exposes the TRAILING pieces a multi-piece
     # holding flow needs to tell apart the piece staged for discharge from the one
-    # still being classified in the drop zone. Motion reasons by position + zone;
-    # C4 admission additionally requires a confirmed ``sv_bt_track_id`` when
-    # ``n_confirmed_pieces`` is not None.
+    # still being classified in the drop zone. No cross-frame identity — reason by
+    # position + zone, not tracking.
     pieces: tuple[PieceObservation, ...] = ()
-    # Number of bboxes backed by a tracker-confirmed object in this frame.
-    # ``None`` means tracking is unavailable, so consumers may fall back to
-    # frame-debounced raw detections. Zero means the detector saw only tentative
-    # boxes that must not yet create a C4 piece. Kept last to preserve the
-    # positional constructor order of every pre-existing field.
-    n_confirmed_pieces: int | None = None
+    # Numeric IDs are meaningful only within this tracker lifetime.
+    tracker_generation: str | None = None
+    channel_center: tuple[float, float] | None = None
 
 
 EMPTY_STATE = ChannelState(ts=EMPTY_STATE_TS, in_drop=False, in_exit=False, n_pieces=0)

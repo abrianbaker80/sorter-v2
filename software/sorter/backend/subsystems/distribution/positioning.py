@@ -1,21 +1,19 @@
 import time
 import queue
 import random
-import math
 from typing import Optional
 import server.shared_state as shared_state
 from states.base_state import BaseState
 from subsystems.shared_variables import SharedVariables
 from .states import DistributionState
-from .flap_path import validate_flaps, flap_settled
-from .chute import Chute, BinAddress, GEAR_RATIO
+from .chute import Chute, BinAddress
 from irl.bin_layout import DistributionLayout, Bin, extractCategories
 from irl.config import IRLInterface
 from global_config import GlobalConfig
 from sorting_profile import SortingProfile, MISC_CATEGORY
 from blob_manager import setBinCategories
 from defs.events import PauseCommandData, PauseCommandEvent
-from defs.known_object import PieceStage, UNVERIFIED_C4_HANDOFF
+from defs.known_object import PieceStage
 from utils.event import knownObjectToEvent
 
 
@@ -23,7 +21,6 @@ BINS_FULL_ALERT_PREFIX = "No bin available"
 MISC_PASSTHROUGH_ALERT_PREFIX = "Misc passthrough"
 CHUTE_JAM_ALERT_PREFIX = "Chute jam"
 SERVO_BUS_ALERT_PREFIX = "Servo bus offline"
-HARVEST_RUNTIME_ALERT_PREFIX = "Harvest live sorting paused"
 DISTRIBUTION_CHUTE_JAM_INCIDENT_KIND = "distribution_chute_jam"
 DISTRIBUTION_SERVO_BUS_OFFLINE_INCIDENT_KIND = "distribution_servo_bus_offline"
 DISTRIBUTION_NO_BIN_AVAILABLE_INCIDENT_KIND = "distribution_no_bin_available"
@@ -74,7 +71,6 @@ class Positioning(BaseState):
         self._phase: str = "init"
         self._target_address: BinAddress | None = None
         self._door_servo_index: int | None = None
-        self._door_servo_indices: list[int] = []
         self._state_entered_at: float = 0.0
         self._moving_started_at: float = 0.0
         self._piece = None
@@ -82,10 +78,9 @@ class Positioning(BaseState):
         self._blocked_layers: set[int] = set()
         self._servo_offline_layers: set[int] = set()
         self._jam_pause_enqueued: bool = False
+        self._jam_ignored_logged: bool = False
         self._servo_bus_pause_enqueued: bool = False
-        self._harvest_pause_enqueued: bool = False
         self._chute_move_estimated_ms: int = 0
-        self._restore_chute_target: bool = False
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -100,12 +95,13 @@ class Positioning(BaseState):
 
     def step(self) -> Optional[DistributionState]:
         now = time.monotonic()
-
-        if self._phase == "passthrough":
-            return self._finishPassthrough(now)
+        if self._phase == "physical_passthrough":
+            from .flap_path import flap_path_settled
+            if self.gc.disable_servos or flap_path_settled(self.irl.servos, None):
+                return DistributionState.READY
+            return None
 
         if self._phase == "init":
-            self.shared.set_distribution_gate(False, reason="positioning")
             # Fresh evaluation per piece — an earlier transient servo
             # glitch must not permanently disable a layer.
             self._blocked_layers.clear()
@@ -123,16 +119,13 @@ class Positioning(BaseState):
                 self._setOccupancyState("positioning.wait_piece_for_distribution")
                 return DistributionState.IDLE
 
-            if (getattr(self.shared, "sample_collection_mode", False)
-                    or piece.transport_failure_reason == UNVERIFIED_C4_HANDOFF
-                    or piece.c4_discard):
+            if getattr(self.shared, "sample_collection_mode", False):
                 self.logger.info(
-                    "Positioning: discard passthrough — opening all layer doors"
+                    "Positioning: sample collection mode — opening all layer doors for discard passthrough"
                 )
                 self._clearBinsFullAlertIfOwned()
                 self._clearChuteJamAlertIfOwned()
-                if not self._openAllDoorsForPassthrough():
-                    return None
+                self._openAllDoorsForPassthrough()
                 piece.stage = PieceStage.distributing
                 piece.distributing_at = time.time()
                 piece.distribution_target_selected_at = piece.distributing_at
@@ -141,18 +134,12 @@ class Positioning(BaseState):
                 self._piece = piece
                 self.event_queue.put(knownObjectToEvent(piece))
                 self._setOccupancyState("positioning.sample_collection_passthrough")
-                return self._finishPassthrough(now)
+                return DistributionState.READY
 
-            if getattr(piece, "forced_reject_reason", None):
-                # An already locked reject cannot be promoted by late metadata.
-                piece.part_id = None
-                piece.category_id = None
-                piece.high_value_routed = False
-            harvest_route = self._reserveHarvestRoute(piece)
-            if harvest_route is False:
-                return DistributionState.IDLE
-
-            if piece.too_big:
+            if piece.too_big or piece.c4_discard:
+                if piece.uuid in getattr(self.shared, "retained_recovery_routes", {}):
+                    from subsystems.classification_channel.occupied_checkpoint import RecoveryError
+                    raise RecoveryError("Retained bin route conflicts with oversize disposition")
                 # Oversize for any real bin — send it down the center of the
                 # chute to the misc bottom bin (open every usable door so it
                 # falls straight through). Never claims a bin, never raises a
@@ -163,8 +150,7 @@ class Positioning(BaseState):
                 )
                 self._clearBinsFullAlertIfOwned()
                 self._clearChuteJamAlertIfOwned()
-                if not self._openAllDoorsForPassthrough():
-                    return None
+                self._openAllDoorsForPassthrough()
                 piece.stage = PieceStage.distributing
                 piece.distributing_at = time.time()
                 piece.distribution_target_selected_at = piece.distributing_at
@@ -174,12 +160,9 @@ class Positioning(BaseState):
                 self._piece = piece
                 self.event_queue.put(knownObjectToEvent(piece))
                 self._setOccupancyState("positioning.passthrough_too_big")
-                return self._finishPassthrough(now)
+                return DistributionState.READY
 
-            harvest_active = isinstance(harvest_route, tuple)
-            if harvest_active:
-                address, category_id = harvest_route
-            elif piece.part_id is not None:
+            if piece.part_id is not None:
                 category_id = self.sorting_profile.getCategoryIdForPart(piece.part_id, piece.color_id)
             else:
                 category_id = MISC_CATEGORY
@@ -187,12 +170,12 @@ class Positioning(BaseState):
             # clears the profile's high_value_routing threshold is rerouted into
             # the configured category (e.g. Yellow/Orange Tiles), so it lands in
             # that category's bin regardless of its normal classification.
+            # An unknown piece is reject-bound even if stale metadata exists.
             high_value_category = (
-                None
-                if harvest_active
-                else self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
+                self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
+                if piece.part_id is not None else None
             )
-            if high_value_category is not None and not getattr(piece, "forced_reject_reason", None):
+            if high_value_category is not None:
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.part_id}) moving-avg "
                     f"${piece.moving_avg_price} clears high-value threshold — routing to "
@@ -204,16 +187,22 @@ class Positioning(BaseState):
             # classification time via a live BrickLink-id lookup) routes within the
             # parallel not-in-inventory bin pool, sub-sorted by its normal category.
             # Everyone else routes among the normal bins; the pools never mix.
-            route_not_in_inventory = not harvest_active and piece.not_in_inventory is True
+            route_not_in_inventory = piece.part_id is not None and piece.not_in_inventory is True
             if route_not_in_inventory:
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.part_id}) not in active "
                     f"inventory — routing within not-in-inventory bins as {category_id}"
                 )
-            if not harvest_active:
+            retained_routes = getattr(self.shared, "retained_recovery_routes", None)
+            if retained_routes is not None and piece.uuid in retained_routes:
+                address = self._retainedRecoveryAddress(retained_routes[piece.uuid], category_id, route_not_in_inventory)
+            else:
                 address, _ = self._findOrAssignBinForCategory(
                     category_id, not_in_inventory=route_not_in_inventory
                 )
+            if retained_routes is not None and address is None and category_id != MISC_CATEGORY:
+                from subsystems.classification_channel.occupied_checkpoint import RecoveryError
+                raise RecoveryError("Recognized recovery owner has no safe destination bin")
             if address is None and self._servo_bus_pause_enqueued:
                 # Fatal: the servo bus is offline, so every layer is
                 # unusable. ``_findOrAssignBinForCategory`` already set
@@ -227,7 +216,7 @@ class Positioning(BaseState):
                 # and without raising the operator no-bin incident.
                 if (
                     category_id != MISC_CATEGORY
-                    and not bool(getattr(piece, "reject_on_routing_failure", False))
+                    and not piece.reject_on_routing_failure
                     and not self._consumeNoBinPassthroughApproval(piece)
                     and self._raiseNoBinAvailableIncident(piece, category_id)
                 ):
@@ -241,8 +230,7 @@ class Positioning(BaseState):
                     f"Positioning: no bin for category {category_id} — passthrough to bottom"
                 )
                 self._raiseBinsFullAlert(category_id)
-                if not self._openAllDoorsForPassthrough():
-                    return None
+                self._openAllDoorsForPassthrough()
                 piece.stage = PieceStage.distributing
                 piece.distributing_at = time.time()
                 piece.distribution_target_selected_at = piece.distributing_at
@@ -252,13 +240,15 @@ class Positioning(BaseState):
                 self._piece = piece
                 self.event_queue.put(knownObjectToEvent(piece))
                 self._setOccupancyState("positioning.passthrough_no_bin")
-                return self._finishPassthrough(now)
+                return DistributionState.READY
 
             if self._exceedsLayerMaxDimension(piece, address.layer_index):
+                if piece.uuid in getattr(self.shared, "retained_recovery_routes", {}):
+                    from subsystems.classification_channel.occupied_checkpoint import RecoveryError
+                    raise RecoveryError("Retained bin route no longer fits the piece")
                 # The piece fits a real bin by category, but is physically too
                 # large for that bin's layer. Reroute it to the misc bottom bin
-                # (center-of-chute passthrough) and mark why. A live Harvest
-                # allocation is confirmed as an exception after the drop.
+                # (center-of-chute passthrough) and mark why.
                 layer_max = self._layerMaxDimensionMm(address.layer_index)
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) exceeds "
@@ -266,8 +256,7 @@ class Positioning(BaseState):
                 )
                 self._clearBinsFullAlertIfOwned()
                 self._clearChuteJamAlertIfOwned()
-                if not self._openAllDoorsForPassthrough():
-                    return None
+                self._openAllDoorsForPassthrough()
                 piece.stage = PieceStage.distributing
                 piece.distributing_at = time.time()
                 piece.distribution_target_selected_at = piece.distributing_at
@@ -275,22 +264,18 @@ class Positioning(BaseState):
                 piece.destination_bin = None
                 piece.too_big_for_layer = True
                 piece.intended_layer_index = address.layer_index
-                if harvest_active:
-                    piece.harvest_exception = True
                 piece.updated_at = time.time()
                 self._piece = piece
                 self.event_queue.put(knownObjectToEvent(piece))
                 self._setOccupancyState("positioning.passthrough_too_big_for_layer")
-                return self._finishPassthrough(now)
+                return DistributionState.READY
 
             self._clearBinsFullAlertIfOwned()
             self._clearChuteJamAlertIfOwned()
             self.logger.info(
                 f"Positioning: moving to bin at layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
             )
-            self._target_address = address
-            self._piece = piece
-            if not self._startDoorAndChutePositioning(address.layer_index):
+            if not self._selectDoor(address.layer_index):
                 self.logger.warning(
                     f"Positioning: layer {address.layer_index} is unavailable for distribution, retrying with remaining layers"
                 )
@@ -326,9 +311,15 @@ class Positioning(BaseState):
                 address.bin_index,
             )
             piece.updated_at = time.time()
+            self._piece = piece
             self.event_queue.put(knownObjectToEvent(piece))
 
-            init_ms = (self._moving_started_at - self._state_entered_at) * 1000
+            if not self.gc.disable_servos:
+                self._door_servo_index = address.layer_index
+            self._target_address = address
+            self._startChuteMove()
+            self._moving_started_at = now
+            init_ms = (now - self._state_entered_at) * 1000
             if self.gc.disable_servos:
                 self.logger.info(f"Positioning: init phase took {init_ms:.0f}ms, now waiting for chute")
             else:
@@ -338,8 +329,7 @@ class Positioning(BaseState):
         if self._phase == "moving":
             self._setOccupancyState("positioning.wait_servo_and_chute_motion")
             chute_stopped = self.chute.stepper.stopped
-            moving_servo_indices = self._movingDoorServoIndices()
-            servo_stopped = not moving_servo_indices
+            servo_stopped = self._isDoorServoStopped()
             if not chute_stopped or not servo_stopped:
                 # Jam detection: if we've been "waiting for movement" for
                 # way longer than the estimated move time, something is
@@ -354,10 +344,7 @@ class Positioning(BaseState):
                     if not chute_stopped:
                         stuck.append("chute stepper did not stop")
                     if not servo_stopped:
-                        stuck.append(
-                            "layer servo flap(s) did not stop: "
-                            + ", ".join(str(i) for i in moving_servo_indices)
-                        )
+                        stuck.append(f"layer-{self._door_servo_index} servo flap did not close")
                     self._raiseChuteJamAlert(
                         f"{' and '.join(stuck)} after {elapsed_ms:.0f}ms (budget {budget_ms}ms)"
                     )
@@ -366,8 +353,6 @@ class Positioning(BaseState):
                     # over. Returning IDLE here would let the next piece
                     # start a new move on top of the stuck one.
                     return None
-                return None
-            if not self._verifyChuteTarget(now):
                 return None
             self.shared.set_chute_motion(False, target_bin=self._target_address)
             if self._piece is not None and self._piece.distribution_positioned_at is None:
@@ -382,178 +367,11 @@ class Positioning(BaseState):
 
         return None
 
-    def _reserveHarvestRoute(self, piece):
-        """Return an exact activated destination, None, or False on a fatal gate."""
-
-        try:
-            from project_harvest_runtime import reserve_piece
-
-            allocation = reserve_piece(self.gc, piece)
-        except Exception as exc:
-            self.logger.exception("Positioning: Harvest allocation failed")
-            self._raiseHarvestRuntimeAlert(str(exc))
-            return False
-        if allocation is None:
-            return None
-        destination = allocation.get("destination")
-        if not isinstance(destination, dict):
-            self._raiseHarvestRuntimeAlert("the active allocation has no destination")
-            return False
-        try:
-            address = BinAddress(
-                int(destination["layer_index"]),
-                int(destination["section_index"]),
-                int(destination["bin_index"]),
-            )
-            target_bin = self.layout.layers[address.layer_index].sections[
-                address.section_index
-            ].bins[address.bin_index]
-        except (KeyError, IndexError, TypeError, ValueError):
-            self._raiseHarvestRuntimeAlert("the activated bin no longer exists")
-            return False
-        category_id = str(destination.get("category_id") or "")
-        if category_id not in target_bin.category_ids:
-            self._raiseHarvestRuntimeAlert(
-                "the activated bin assignment changed after green light"
-            )
-            return False
-        from local_state import get_current_bin_piece_counts
-
-        count = get_current_bin_piece_counts().get(
-            (address.layer_index, address.section_index, address.bin_index), 0
-        )
-        max_pieces = getattr(self.layout.layers[address.layer_index], "max_pieces_per_bin", None)
-        if max_pieces is not None and count >= max_pieces:
-            self._raiseHarvestRuntimeAlert(
-                f"activated destination {destination.get('bin_id')} is full"
-            )
-            return False
-        if not self.chute.isBinReachable(address):
-            self._raiseHarvestRuntimeAlert(
-                f"activated destination {destination.get('bin_id')} is unreachable"
-            )
-            return False
-
-        piece.harvest_project_id = allocation["project_id"]
-        piece.harvest_activation_id = allocation["activation_id"]
-        piece.harvest_allocation_id = allocation["allocation_id"]
-        piece.harvest_group_id = allocation["group_id"]
-        piece.harvest_group_label = str(destination.get("group_label") or allocation["group_id"])
-        piece.harvest_exception = bool(allocation.get("exception"))
-        if not piece.reject_category and allocation.get("match_kind") == "surplus_exception":
-            piece.reject_category = "surplus"
-        self.logger.info(
-            "Positioning: Harvest piece %s reserved for %s in %s"
-            % (piece.uuid, piece.harvest_group_label, destination.get("bin_id"))
-        )
-        return address, category_id
-
-    def _raiseHarvestRuntimeAlert(self, detail: str) -> None:
-        message = f"{HARVEST_RUNTIME_ALERT_PREFIX}: {detail}"
-        try:
-            with shared_state.hardware_lifecycle_lock:
-                shared_state.setHardwareStatus(error=message)
-        except Exception:
-            pass
-        if self._harvest_pause_enqueued:
-            return
-        command_queue = shared_state.command_queue
-        if command_queue is None:
-            self.logger.error(
-                "Positioning: cannot enqueue Harvest safety pause because the controller "
-                "command queue is unavailable"
-            )
-            return
-        try:
-            command_queue.put_nowait(
-                PauseCommandEvent(tag="pause", data=PauseCommandData())
-            )
-            self._harvest_pause_enqueued = True
-        except Exception:
-            self.logger.exception("Positioning: failed to enqueue Harvest safety pause")
-
-    def retain_ready_route(self, piece) -> None:
-        """Reuse positioning for a retained READY load without reallocating it."""
-        self._piece = piece
-        self._target_address = BinAddress(*piece.destination_bin) if piece.destination_bin is not None else None
-        self._phase = "moving" if self._target_address is not None else "passthrough"
-        self._state_entered_at = time.monotonic()
-        self._door_servo_indices = list(range(len(self.irl.servos))) if not self.gc.disable_servos else []
-        self.shared.set_distribution_gate(False, reason="restoring_retained_route")
-
-    def resume(self) -> None:
-        if self._phase not in {"moving", "passthrough"}:
-            return
-        if self._phase == "moving":
-            self._restore_chute_target = True
-        # Retry only the retained route on explicit resume. The checked driver
-        # coalesces identical pending/settled requests and refuses opposing busy
-        # commands. Never allocate a replacement destination to recover a flap.
-        self._moving_started_at = time.monotonic()
-        self.shared.set_distribution_gate(False, reason="positioning")
-        if self.gc.disable_servos or not self._door_servo_indices:
-            return
-        try:
-            target = self._target_address.layer_index if self._target_address else None
-            validate_flaps(self.irl.servos, target)
-            # Rebuild the entire retained path, including any flap whose earlier
-            # command failed before it could be added to the completion list.
-            self._door_servo_indices = ([target] if target is not None else []) + [
-                i for i in range(len(self.irl.servos)) if i != target
-            ]
-            for index in self._door_servo_indices:
-                servo = self.irl.servos[index]
-                opened = index != target
-                speed = getattr(servo, "apply_open_speed" if opened else "apply_close_speed", None)
-                if speed is not None:
-                    speed()
-                accepted = servo.open() if opened else servo.close()
-                if accepted is False:
-                    raise RuntimeError(f"Layer {index + 1} flap command rejected")
-        except Exception as exc:
-            self._raiseChuteJamAlert(f"retained flap route retry failed: {exc}")
-
-    def _verifyChuteTarget(self, now: float) -> bool:
-        if self.gc.disable_chute:
-            return True
-        if not self.chute.homed:
-            # The stall monitor owns the needs-homing hold. Never replace it
-            # with a different incident or move using an invalid reference.
-            return False
-        if (not self._restore_chute_target
-                and (now - self._moving_started_at) * 1000 < self._chute_move_estimated_ms):
-            return False
-        try:
-            target = self.chute.getAngleForBin(self._target_address)
-            current = self.chute.current_angle
-            tolerance = abs(self.chute.stepper.degrees_for_microsteps(1)) / GEAR_RATIO
-            if (target is None or not math.isfinite(target)
-                    or not math.isfinite(current) or not math.isfinite(tolerance)
-                    or tolerance <= 0):
-                raise ValueError("invalid chute target or position feedback")
-            if abs(current - target) <= tolerance:
-                self._restore_chute_target = False
-                return True
-            if self._restore_chute_target:
-                # One restoration per resume; retain the original piece, bin,
-                # doors and allocation. Do not run the route reservation again.
-                self._restore_chute_target = False
-                self._startChuteMove()
-                return False
-            self._raiseChuteJamAlert(
-                f"chute stopped at {current:.3f} degrees; target is {target:.3f} degrees"
-            )
-        except Exception as exc:
-            self._restore_chute_target = False
-            self._raiseChuteJamAlert(f"could not verify chute target: {exc}")
-        return False
-
     def _startChuteMove(self) -> None:
         assert self._target_address is not None
         self.shared.set_chute_motion(True, target_bin=self._target_address)
         if self._piece is not None and self._piece.distribution_motion_started_at is None:
             self._piece.distribution_motion_started_at = time.time()
-        self._moving_started_at = time.monotonic()
         estimated_ms = self.chute.moveToBin(self._target_address)
         self._chute_move_estimated_ms = int(estimated_ms)
         self.logger.info(
@@ -563,17 +381,13 @@ class Positioning(BaseState):
 
     def cleanup(self) -> None:
         super().cleanup()
-        self._occupancy_state = None
-        self.gc.runtime_stats.endState("distribution.occupancy")
         target_address = self._target_address
         self._phase = "init"
         self._target_address = None
         self._door_servo_index = None
-        self._door_servo_indices = []
         self._state_entered_at = 0.0
         self._moving_started_at = 0.0
         self._piece = None
-        self._restore_chute_target = False
         self.shared.set_chute_motion(False, target_bin=target_address)
 
     def _layerMaxDimensionMm(self, layer_index: int) -> Optional[float]:
@@ -646,22 +460,17 @@ class Positioning(BaseState):
             f"Positioning: disabling layer {layer_index} temporarily because {reason}"
         )
 
-    def _movingDoorServoIndices(self) -> list[int]:
-        moving: list[int] = []
-        for layer_index in self._door_servo_indices:
-            try:
-                target_layer = self._target_address.layer_index if self._target_address else None
-                if not flap_settled(self.irl.servos[layer_index], opened=layer_index != target_layer):
-                    moving.append(layer_index)
-            except Exception as exc:
-                self._markLayerUnavailable(
-                    layer_index,
-                    f"servo stop check failed: {exc}",
-                )
-                # A failed completion read cannot count as a settled flap.
-                moving.append(layer_index)
-                self._raiseChuteJamAlert(f"layer {layer_index + 1} flap state failed: {exc}")
-        return moving
+    def _isDoorServoStopped(self) -> bool:
+        if self._door_servo_index is None:
+            return True
+        try:
+            return self.irl.servos[self._door_servo_index].stopped
+        except Exception as exc:
+            self._markLayerUnavailable(
+                self._door_servo_index,
+                f"servo stop check failed: {exc}",
+            )
+            return True
 
     def _raiseBinsFullAlert(self, category_id: str) -> None:
         return
@@ -848,8 +657,22 @@ class Positioning(BaseState):
     def _raiseChuteJamAlert(self, detail: str) -> None:
         """Hard alert: chute / servo can't physically move. Raises the red
         banner *and* enqueues a pause so the operator has to intervene.
+
+        Honors the Chute Jam incident policy: when it is Off, the condition
+        is logged once per move and otherwise ignored - no incident, no
+        banner, no pause - and positioning keeps waiting for the motion to
+        finish. The policy used to gate only the incident card, so a machine
+        set to Off still paused on a red banner.
         """
         elapsed_ms = int(max(0.0, time.monotonic() - self._moving_started_at) * 1000.0)
+        if _incidentHandlingOff(DISTRIBUTION_CHUTE_JAM_INCIDENT_KIND):
+            if not self._jam_ignored_logged:
+                self._jam_ignored_logged = True
+                self.logger.warning(
+                    f"{CHUTE_JAM_ALERT_PREFIX} check tripped ({detail}) but Chute Jam "
+                    "handling is Off - ignoring and waiting for the motion to finish"
+                )
+            return
         self._publishDistributionIncident(
             DISTRIBUTION_CHUTE_JAM_INCIDENT_KIND,
             detail=detail,
@@ -896,6 +719,7 @@ class Positioning(BaseState):
         except Exception:
             pass
         self._jam_pause_enqueued = False
+        self._jam_ignored_logged = False
         self._clearDistributionIncident(DISTRIBUTION_CHUTE_JAM_INCIDENT_KIND)
 
     def _clearBinsFullAlertIfOwned(self) -> None:
@@ -910,94 +734,69 @@ class Positioning(BaseState):
         except Exception:
             pass
 
-    def _finishPassthrough(self, now: float) -> Optional[DistributionState]:
-        if self._movingDoorServoIndices():
-            if (now - self._moving_started_at) * 1000 > CHUTE_MOVE_TIMEOUT_MS:
-                self._raiseChuteJamAlert("pass-through flaps did not settle")
-            return None
-        if self._piece is not None and self._piece.distribution_positioned_at is None:
-            self._piece.distribution_positioned_at = time.time()
-        return DistributionState.READY
-
-    def _openAllDoorsForPassthrough(self) -> bool:
-        """Command every passage flap, then retain POSITIONING until verified."""
-        self._target_address = None
-        self._door_servo_indices = []
-        self._moving_started_at = time.monotonic()
-        if not self.gc.disable_servos:
-            try:
-                validate_flaps(self.irl.servos, None)
-                for i, servo in enumerate(self.irl.servos):
-                    if hasattr(servo, "apply_open_speed"):
-                        servo.apply_open_speed()
-                    if servo.open() is False:
-                        raise RuntimeError(f"Layer {i + 1} passage command rejected")
-                    self._door_servo_indices.append(i)
-            except Exception as exc:
-                self._raiseChuteJamAlert(f"pass-through flap command failed: {exc}")
-                return False
-        self._phase = "passthrough"
-        return True
-
-    def _startDoorAndChutePositioning(self, target_layer_index: int) -> bool:
-        """Start independent distribution motions without serializing them.
-
-        The target door is the only command that must succeed before the chute
-        can safely start. Once it is accepted, the chute and the remaining door
-        motions can run concurrently; POSITIONING still waits for every issued
-        motion before opening the distribution gate.
+    def _openAllDoorsForPassthrough(self) -> None:
+        """Open every usable layer door so a piece with no assigned bin
+        falls straight through to the bottom tray. A follow-up
+        ``_selectDoor`` on the next piece will re-close the appropriate
+        layer.
         """
         if self.gc.disable_servos:
-            self._startChuteMove()
+            return
+        for i, servo in enumerate(self.irl.servos):
+            if not self._isLayerUsable(i):
+                continue
+            try:
+                if servo.isClosed():
+                    if hasattr(servo, "apply_open_speed"):
+                        servo.apply_open_speed()
+                    servo.open()
+            except Exception as exc:
+                self._markLayerUnavailable(
+                    i,
+                    f"opening for passthrough failed: {exc}",
+                )
+
+    def _selectDoor(self, target_layer_index: int) -> bool:
+        if self.gc.disable_servos:
             return True
         if not self._isLayerUsable(target_layer_index):
             self._markLayerUnavailable(target_layer_index, "the target servo is unavailable")
             return False
 
-        try:
-            validate_flaps(self.irl.servos, target_layer_index)
-        except Exception as exc:
-            self._raiseChuteJamAlert(f"required flap path unavailable: {exc}")
-            return False
         target_servo = self.irl.servos[target_layer_index]
 
-        try:
-            if hasattr(target_servo, "apply_close_speed"):
-                target_servo.apply_close_speed()
-            if target_servo.close() is False:
-                raise RuntimeError("target flap command rejected")
-        except Exception as exc:
-            self._markLayerUnavailable(
-                target_layer_index,
-                f"closing target servo failed: {exc}",
-            )
-            self._raiseChuteJamAlert(f"target flap command failed: {exc}")
-            return False
-
-        self._door_servo_index = target_layer_index
-        self._door_servo_indices = [target_layer_index]
-        self._startChuteMove()
-
-        # Request the full door configuration. The servo driver coalesces an
-        # accepted pending target and skips an already settled target.
+        # Never trust shadow state: re-issue the full door configuration
+        # before every dispense. Open every other usable layer (park), then
+        # command the target closed — even if we stayed on the same layer
+        # or the shadow flags claim the door is already in the right spot.
+        # A dropped serial write, a partial move, or a mid-flight power
+        # glitch can leave the physical flap out of sync without us
+        # noticing until a piece lands in the wrong bin.
         opened_layers: list[int] = []
         for i, servo in enumerate(self.irl.servos):
-            if i == target_layer_index:
+            if i == target_layer_index or not self._isLayerUsable(i):
                 continue
             try:
                 if hasattr(servo, "apply_open_speed"):
                     servo.apply_open_speed()
-                if servo.open() is False:
-                    raise RuntimeError("passage flap command rejected")
-                self._door_servo_indices.append(i)
+                servo.open()
                 opened_layers.append(i)
             except Exception as exc:
                 self._markLayerUnavailable(
                     i,
                     f"opening parked servo failed: {exc}",
                 )
-                self._raiseChuteJamAlert(f"layer {i + 1} passage flap failed: {exc}")
-                return False
+
+        try:
+            if hasattr(target_servo, "apply_close_speed"):
+                target_servo.apply_close_speed()
+            target_servo.close()
+        except Exception as exc:
+            self._markLayerUnavailable(
+                target_layer_index,
+                f"closing target servo failed: {exc}",
+            )
+            return False
 
         # Single line capturing the full intended door state for this dispense,
         # so a wrong-layer piece can be traced to exactly what the controller
@@ -1007,6 +806,28 @@ class Positioning(BaseState):
             f"opened parked layers {opened_layers}"
         )
         return True
+
+    def _retainedRecoveryAddress(self, retained, category_id, not_in_inventory):
+        from local_state import get_current_bin_piece_counts
+        from subsystems.classification_channel.occupied_checkpoint import RecoveryError
+        try:
+            layer_idx, section_idx, bin_idx = retained
+            layer = self.layout.layers[layer_idx]
+            section = layer.sections[section_idx]
+            target = section.bins[bin_idx]
+            address = BinAddress(layer_idx, section_idx, bin_idx)
+            limit = getattr(layer, "max_pieces_per_bin", None)
+            count = get_current_bin_piece_counts().get(tuple(retained), 0)
+            valid = (getattr(layer, "enabled", True) and getattr(section, "enabled", True)
+                     and self._isLayerUsable(layer_idx) and self.chute.isBinReachable(address)
+                     and category_id in target.category_ids
+                     and bool(target.not_in_inventory) == not_in_inventory
+                     and (limit is None or count < limit))
+        except (IndexError, TypeError, ValueError, AttributeError) as exc:
+            raise RecoveryError("Retained recovery destination is invalid") from exc
+        if not valid:
+            raise RecoveryError("Retained recovery destination is unavailable; owner remains retained")
+        return address
 
     def _findOrAssignBinForCategory(
         self, category_id: str, not_in_inventory: bool = False
@@ -1159,3 +980,22 @@ class Positioning(BaseState):
             f"bins_with_cats={bins_with_cats}, skipped={skipped})"
         )
         return None, False
+
+    def retain_ready_route(self, piece) -> None:
+        self._piece = piece
+        self._target_address = BinAddress(*piece.destination_bin) if piece.destination_bin is not None else None
+        self._door_servo_index = self._target_address.layer_index if self._target_address is not None and not self.gc.disable_servos else None
+        self._phase = "moving" if self._target_address is not None else "physical_passthrough"
+
+    def resume(self) -> None:
+        if self._piece is None:
+            return
+        self.shared.set_distribution_gate(False, reason="restoring_retained_route")
+        if self._target_address is None:
+            self._openAllDoorsForPassthrough()
+            self._phase = "physical_passthrough"
+        else:
+            if not self._selectDoor(self._target_address.layer_index):
+                raise RuntimeError("Retained distribution flap route unavailable")
+            self._startChuteMove()
+            self._moving_started_at = time.monotonic()

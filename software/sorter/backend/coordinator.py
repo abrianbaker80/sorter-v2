@@ -9,6 +9,7 @@ from sorting_profile import mkSortingProfile
 import queue
 import threading
 import time
+import math
 from machine_setup import get_machine_setup_definition
 from machine_runtime import build_machine_runtime
 from subsystems.bus import TickBus
@@ -56,6 +57,7 @@ class Coordinator:
         self.machine_runtime = build_machine_runtime(self.machine_setup.key)
         self.manual_feed_mode = self.machine_setup.manual_feed_mode
         self._channel_exit_auto_threads: dict[str, threading.Thread] = {}
+        self._retained_pause = None
         self.gc.use_channel_bus = bool(
             getattr(self.gc, "use_channel_bus", False)
             or getattr(self.machine_setup, "uses_classification_channel", False)
@@ -420,6 +422,20 @@ class Coordinator:
         self._channel_exit_auto_threads[channel] = thread
         thread.start()
 
+    def _serviceRetainedSafetyHold(self) -> bool:
+        held = getattr(self.classification, "hasRetainedSafetyHold", None)
+        if held is None or not held():
+            return False
+        # The controller owns this interlock, not the dismissible incident UI.
+        # Check before distribution, even when another incident occupies the UI.
+        self.shared.set_classification_gate(False, reason="c4_ownership_hold")
+        self.shared.set_distribution_gate(False, reason="c4_ownership_hold")
+        self.classification.serviceRetainedSafetyHold()
+        feeder_hold = getattr(self.feeder, "hold_motion", None)
+        if feeder_hold is not None:
+            feeder_hold()
+        return True
+
     def step(self) -> None:
         prof = self.gc.profiler
         prof.hit("coordinator.step.calls")
@@ -443,9 +459,8 @@ class Coordinator:
             if getattr(delegate, 'physical_c4_authority', False) and delegate.fault:
                 self.feeder.hold_motion()
                 return
-            activate_recovery = getattr(delegate, 'applyRetainedTransferRecovery', None)
-            if activate_recovery is not None:
-                activate_recovery()
+            if self._serviceRetainedSafetyHold():
+                return
             active_incident = self._active_incident()
             if active_incident is not None:
                 self._maybe_start_auto_incident_resolution(active_incident)
@@ -457,8 +472,7 @@ class Coordinator:
                 feeder_hold = getattr(self.feeder, "hold_motion", None)
                 if feeder_hold is not None:
                     feeder_hold()
-                if (not getattr(self, "_distribution_resume_pending", False)
-                        and self._classification_should_step_during_incident(active_incident)):
+                if self._classification_should_step_during_incident(active_incident):
                     with prof.timer("coordinator.step.classification_ms"):
                         classification_started = time.perf_counter()
                         self.classification.step()
@@ -472,6 +486,21 @@ class Coordinator:
                     "coordinator.step.total_ms",
                     (time.perf_counter() - coordinator_started) * 1000.0,
                 )
+                return
+            reconciling = getattr(self.classification, "reconcilingPause", None)
+            if not getattr(delegate, "physical_c4_authority", False) and (self._retained_pause is not None or (reconciling is not None and reconciling())):
+                self.shared.set_classification_gate(False, reason="pause_reconciliation")
+                feeder_hold = getattr(self.feeder, "hold_motion", None)
+                if feeder_hold is not None:
+                    feeder_hold()
+                if self._retained_pause is not None and not self._pauseIntakeReady():
+                    return
+                self.classification.step()
+                if not self.classification.reconcilingPause() and self._active_incident() is None:
+                    # A stopped, settled C3 now has fresh physical observations.
+                    # Only now retire its old eject-controller bookkeeping.
+                    self.feeder.cleanup()
+                    self._retained_pause = None
                 return
             with prof.timer("coordinator.step.distribution_ms"):
                 distribution_started = time.perf_counter()
@@ -493,14 +522,23 @@ class Coordinator:
                     "coordinator.step.classification_ms",
                     (time.perf_counter() - classification_started) * 1000.0,
                 )
+            if getattr(delegate, 'physical_c4_authority', False) and delegate.fault:
+                self.feeder.hold_motion()
+                return
             with prof.timer("coordinator.step.feeder_ms"):
-                # A physical fault closes the admission path immediately;
-                # the queued lifecycle pause is consumed on the next main tick.
-                if getattr(delegate, 'physical_c4_authority', False) and delegate.fault:
-                    self.feeder.hold_motion()
-                    return
                 feeder_started = time.perf_counter()
-                if self.manual_feed_mode:
+                # Classification can publish an ownership hold in this same
+                # tick. Do not admit another piece before the next top-of-loop
+                # incident check notices it.
+                active_incident = self._active_incident()
+                if self._serviceRetainedSafetyHold():
+                    pass
+                elif active_incident is not None:
+                    self._hold_process_for_incident(active_incident)
+                    feeder_hold = getattr(self.feeder, "hold_motion", None)
+                    if feeder_hold is not None:
+                        feeder_hold()
+                elif self.manual_feed_mode:
                     prof.hit("coordinator.step.feeder_skipped.manual_feed_mode")
                     feeder_hold = getattr(self.feeder, "hold_motion", None)
                     if feeder_hold is not None:
@@ -528,9 +566,72 @@ class Coordinator:
 
     def cleanup(self) -> None:
         self._distribution_resume_pending = False
+        delegate = getattr(self.classification, "_delegate", None)
+        if getattr(delegate, "physical_c4_authority", False):
+            # Stop may later Resume this same controller. Retain the selected
+            # destination, in-flight C3 owner and FIFO until explicit recovery.
+            self.pause()
+            return
+        retained = getattr(self.classification, "retainsC4OwnersOnPause", None)
+        if retained is not None and retained():
+            self.classification.cleanup()
+            feeder_hold = getattr(self.feeder, "hold_motion", None)
+            if feeder_hold is not None:
+                feeder_hold()
+            if self._retained_pause is None:
+                self._retained_pause = {"started": None, "settled": None, "position": None}
+                try:
+                    if not self.irl.c_channel_3_rotor_stepper.move_at_speed(0, force=True):
+                        raise RuntimeError("C3 pause stop was not acknowledged")
+                except Exception as exc:
+                    self.classification.faultRetainedPause(f"C3 pause failure: {exc}")
+            # READY's handoff UUID and SENDING's exactly-once commit state must
+            # survive Pause. No C1 command, distribution teardown or owner reset.
+            return
         self.feeder.cleanup()
         self.classification.cleanup()
         self.distribution.cleanup()
+
+    def _pauseIntakeReady(self) -> bool:
+        from subsystems.feeder.go_to_angle.flow import CLASSIFICATION_PENDING_ADMISSION_MS
+
+        barrier = self._retained_pause
+        now = time.monotonic()
+        if barrier["started"] is None:
+            barrier["started"] = now
+        try:
+            if now - barrier["started"] > 15:
+                raise RuntimeError("C3 intake could not be verified clear after pause")
+            motor = self.irl.c_channel_3_rotor_stepper
+            if motor.stalled:
+                raise RuntimeError("C3 is stalled during pause reconciliation")
+            if not motor.stationary_verified():
+                if barrier["settled"] is not None or now - barrier["started"] > 6:
+                    raise RuntimeError("C3 pause stop did not remain settled")
+                return False
+            position = int(motor.position)
+            if barrier["settled"] is None:
+                barrier["settled"] = time.time()
+                barrier["position"] = position
+                return False
+            if position != barrier["position"]:
+                raise RuntimeError("C3 moved during pause reconciliation")
+            floor = barrier["settled"] + CLASSIFICATION_PENDING_ADMISSION_MS / 1000
+            c3 = self.gc.perception_service.read_state(3)
+            c4 = self.gc.perception_service.read_state(4)
+            if any(not math.isfinite(s.ts) or not 0 <= time.time() - s.ts <= 1 or s.ts <= floor
+                   for s in (c3, c4)):
+                return False
+            if c3.n_pieces != len(c3.pieces) or any(
+                po.clearance_to_exit_deg is None or not math.isfinite(po.clearance_to_exit_deg)
+                or po.clearance_to_exit_deg <= 0 for po in c3.pieces
+            ):
+                return False
+            self.feeder.reconcile_verified_c3_pause(barrier["position"])
+            return True
+        except Exception as exc:
+            self.classification.faultRetainedPause(f"C3 pause reconciliation failure: {exc}")
+            return False
 
     def pause(self) -> None:
         """Pause without destroying indexed C4/distribution ownership."""
@@ -552,3 +653,6 @@ class Coordinator:
             self._distribution_resume_pending = self.distribution.resume()
             if not self._distribution_resume_pending:
                 self.classification.resume()
+
+
+

@@ -87,6 +87,7 @@ class _ReadyC3Run:
     crops: tuple = ()
 
 
+
 class ChannelCropCollector:
     def __init__(self, *, perception_service: Any, logger: Any = None,
                  config: Optional[ChannelCropCaptureConfig] = None) -> None:
@@ -100,8 +101,6 @@ class ChannelCropCollector:
         self._last_frame_ts: dict[int, float] = {}
         self._last_prune = 0.0
         self._captured_total = 0
-        # Recognition can reuse already-created crops without waiting for disk
-        # or the collector. This optional cache never changes capture cadence.
         self._clearReadyC3()
 
     def _clearReadyC3(self) -> None:
@@ -111,18 +110,25 @@ class ChannelCropCollector:
         self._ready_observations: tuple = ()
         self._ready_published: tuple = (None, frozenset(), ())
 
+
     def _c3Incarnation(self):
         try:
             worker = self._service.workers().get(3)
-            tracker = worker._tracker._tracker
-            return (worker, tracker) if tracker is not None else None
+            manager = worker._tracker
+            tracker = manager._tracker
+            capture = getattr(worker, "_capture", None)
+            camera = getattr(getattr(capture, "capture_thread", None), "_cap", None)
+            return (worker, tracker, getattr(manager, "generation", None), camera) if tracker is not None else None
         except Exception:
             return None
+
 
     @staticmethod
     def _sameIncarnation(left, right) -> bool:
         return (left is not None and right is not None
-                and left[0] is right[0] and left[1] is right[1])
+                and left[0] is right[0] and left[1] is right[1]
+                and left[2] == right[2] and left[3] is right[3])
+
 
     def _observeReadyC3(self, pieces, frame, incarnation) -> bool:
         """Record only continuous, isolated observations; never track a piece."""
@@ -197,6 +203,7 @@ class ChannelCropCollector:
         self._ready_published = (incarnation, active, self._ready_observations)
         return True
 
+
     def _publishReadyC3(self, incarnation) -> None:
         if (self._stop.is_set()
                 or not self._sameIncarnation(incarnation, self._c3Incarnation())):
@@ -210,6 +217,7 @@ class ChannelCropCollector:
         self._ready_observations = observations[-32:]
         # One immutable publication: readers neither lock nor wait for a tick.
         self._ready_published = (incarnation, active, self._ready_observations)
+
 
     def ready_c3_views(self, frame_ts, leader_id, bbox) -> list[dict]:
         """Return up to four ready crops bound to this exact release observation.
@@ -234,6 +242,7 @@ class ChannelCropCollector:
             return [{"frame_ts": stamp, "bgr": bgr, "source": "c3_history"}
                     for stamp, bgr in eligible]
         return []
+
 
     # --- lifecycle ------------------------------------------------------
 
@@ -311,7 +320,7 @@ class ChannelCropCollector:
         h, w = bgr.shape[:2]
         now = time.time()
         for piece in pieces:
-            crop = self._considerPiece(channel_id, piece, bgr, w, h, ts, now, cfg)
+            crop = self._considerPiece(channel_id, piece, bgr, w, h, ts, now, cfg, getattr(frame, "correct_pixels", None))
             if ready_frame and crop is not None:
                 tid = getattr(piece, "sv_bt_track_id", None)
                 run = self._ready_runs.get(tid)
@@ -332,7 +341,7 @@ class ChannelCropCollector:
 
     def _considerPiece(self, channel_id: int, piece: Any, bgr: np.ndarray,
                        w: int, h: int, ts: float, now: float,
-                       cfg: ChannelCropCaptureConfig) -> Optional[dict]:
+                       cfg: ChannelCropCaptureConfig, color_correct=None) -> None:
         zone_code = int(getattr(piece, "zone_code", 0) or 0)
         deg = getattr(piece, "com_forward_to_exit_deg", None)
         deg_f = float(deg) if isinstance(deg, (int, float)) else None
@@ -366,6 +375,8 @@ class ChannelCropCollector:
         crop = _cropBbox(bgr, bbox, cfg.crop_pad_px, w, h)
         if crop is None or crop.size == 0:
             return
+        if color_correct is not None:
+            crop = color_correct(crop, "archive_crop_color_ms")
         ok, buf = cv2.imencode(
             ".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), int(cfg.jpeg_quality)]
         )
@@ -394,6 +405,7 @@ class ChannelCropCollector:
             state.last_capture_ts = now
             state.last_capture_deg = deg_f
             state.count += 1
+
         return {"bgr": crop, "frame_ts": ts}
 
     def _maybePrune(self) -> None:

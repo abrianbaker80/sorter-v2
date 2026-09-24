@@ -35,7 +35,11 @@ class PerceptionFrame:
 
     source_id: str
     timestamp: float
-    bgr: np.ndarray   # HxWx3 uint8, BGR, original resolution
+    bgr: np.ndarray   # HxWx3 uint8, native BGR, original resolution
+    color_correct: object = None  # bound to the exact CameraFrame/profile
+
+    def correct_pixels(self, pixels, stage="crop_color_ms"):
+        return self.color_correct(pixels, stage) if self.color_correct is not None else pixels
 
 
 class CaptureLike(Protocol):
@@ -85,7 +89,7 @@ class CaptureWorker:
         frame = getattr(self._capture, "latest_frame", None)
         if frame is None:
             return None
-        raw = getattr(frame, "raw", None)
+        raw = frame.source_bgr if hasattr(frame, "source_bgr") else getattr(frame, "raw", None)
         ts = getattr(frame, "timestamp", None)
         if raw is None or ts is None:
             return None
@@ -93,4 +97,5 @@ class CaptureWorker:
             source_id=self._source_id,
             timestamp=float(ts),
             bgr=raw,
+            color_correct=getattr(frame, "correct_pixels", None) if getattr(frame, "color_profile", None) is not None else None,
         )

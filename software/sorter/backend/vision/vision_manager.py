@@ -307,7 +307,6 @@ class VisionManager:
             not in (
                 ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01,
                 ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
-                ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01,
             )
         )
         # Experimental override: keep the dedicated inference thread running
@@ -2348,8 +2347,6 @@ class VisionManager:
                 time.sleep(wait_s)
             detection = detector.detect(crop, force=request.force or background_request)
             error_detail = detector._last_error if isinstance(detector._last_error, str) and detector._last_error else None
-            if error_detail or detection is not None:
-                self.gc.runtime_stats.observeProviderAvailability("openrouter_detector", not bool(error_detail))
             if error_detail:
                 with self._openrouter_request_lock:
                     self._openrouter_next_allowed_at = max(
@@ -3755,15 +3752,12 @@ class VisionManager:
                 if now - float(last_ts) < _hive_inference_min_interval_s_for_role("carousel"):
                     self.gc.profiler.hit("hive.carousel.throttled")
                     return last_det
-            detection = self._filterFeederDetectionResultToChannel(
-                "carousel",
-                self._runHiveDetection(
-                    algorithm,
-                    frame.raw,
-                    scope="carousel",
-                    role="carousel",
-                    conf_threshold=HIVE_CAROUSEL_CONF_THRESHOLD,
-                ),
+            detection = self._runHiveDetection(
+                algorithm,
+                frame.raw,
+                scope="carousel",
+                role="carousel",
+                conf_threshold=HIVE_CAROUSEL_CONF_THRESHOLD,
             )
             self._carousel_dynamic_detection_cache = (now, detection)
             return detection
@@ -3775,10 +3769,7 @@ class VisionManager:
                 return cached[1]
         if not force:
             return None
-        detection = self._filterFeederDetectionResultToChannel(
-            "carousel",
-            self._computeCarouselGeminiDetection(frame, force_call=True),
-        )
+        detection = self._computeCarouselGeminiDetection(frame, force_call=True)
         self._carousel_dynamic_detection_cache = (frame.timestamp, detection)
         return detection
 
@@ -4232,7 +4223,7 @@ class VisionManager:
         with prof.timer("vision.record_frames.total_ms"):
             if self._camera_layout == "split_feeder":
                 # In split_feeder mode, push carousel camera frames for heatmap
-                if self._carousel_capture:
+                if self._carousel_capture and self.usesCarouselBaseline():
                     frame = self._carousel_capture.latest_frame
                     if frame is not None:
                         gray = cv2.cvtColor(frame.raw, cv2.COLOR_BGR2GRAY)
@@ -4487,9 +4478,12 @@ class VisionManager:
             return result
 
         if self._isLocalModelDetectionAlgorithm(algorithm):
-            detection = self._getCarouselDynamicDetection(
-                force=force,
-                frame=frame,
+            detection: ClassificationDetectionResult | None = self._runHiveDetection(
+                algorithm,
+                frame.raw,
+                scope="carousel",
+                role="carousel",
+                conf_threshold=HIVE_CAROUSEL_CONF_THRESHOLD,
             )
             if detection is None:
                 result.update(
@@ -5114,7 +5108,7 @@ class VisionManager:
         frame = capture.latest_frame if capture is not None else None
         if frame is None:
             return None
-        return self._resolveZonePolygon("carousel", "carousel", frame.raw.shape)
+        return self._resolveZonePolygon("carousel", "carousel", frame.source_bgr.shape)
 
     def getClassificationChannelCombinedBbox(
         self,

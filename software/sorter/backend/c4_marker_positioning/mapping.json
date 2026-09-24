@@ -1,0 +1,13 @@
+{
+  "mapping": {
+    "zero_phase_deg": 195.772024,
+    "motor_sign": 1,
+    "geometry": "f28ecb1df8dc3890da4070d74bcc0ef8800f84b7bc05e40c5a775ee1c39c49c7",
+    "motor_coordinates": "425501656bce6f33b53ae67eac5b8f6b71d5d9a452dd69a72730afe103127e3b",
+    "reference": "Operator-confirmed C3 centered between fins; receiving pocket 0 at P6.",
+    "version": 1,
+    "pocket_count": 10,
+    "pocket_zero_station": 6
+  },
+  "sha256": "a9bc70d5b10e0b4ef593a22c2e0edeec942e13217a3781803fea55e47910a02b"
+}

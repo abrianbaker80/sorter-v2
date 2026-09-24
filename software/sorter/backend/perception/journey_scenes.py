@@ -6,10 +6,15 @@ numeric label gets a new observation generation on reappearance.
 """
 
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from uuid import uuid4
 
 from recognition_journey import Detection, Scene, TrackAlias
+
+
+@dataclass(frozen=True)
+class _FrameScene(Scene):
+    correct_pixels: object = field(default=None, repr=False, compare=False)
 
 
 class JourneyScenes:
@@ -160,13 +165,14 @@ class JourneyScenes:
         if self.channel == 4:
             self.rolling_buffer.push(raw, frame.timestamp)
             raw = self.rolling_buffer.snapshot()[-1].raw
-        scene = Scene(
+        scene = _FrameScene(
             self.channel,
             self._epoch,
             self._sequence,
             frame.timestamp,
             raw,
             tuple(detections),
+            correct_pixels=getattr(frame, "correct_pixels", None),
         )
         self._history.append(scene)
         while self._history and scene.timestamp - self._history[0].timestamp > 1.5:

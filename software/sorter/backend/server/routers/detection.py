@@ -40,6 +40,7 @@ from perception.overlay import drawChannelZones
 from server import shared_state
 from server.classification_training import getClassificationTrainingManager
 from server.machine_naming import display_name_from_hostname, random_display_name
+from server.routers.motion_safety import occupied_checkpoint_motion_guard
 from server.routers.tailscale import current_hostname
 from vision.detection_registry import (
     detection_algorithm_definition,
@@ -66,7 +67,21 @@ def _draw_perception_debug(
     JPEG bytes (4K downscaled for transfer). ``frame`` is the PerceptionFrame to
     draw on (the cropped or the full-frame one); ``raw_bboxes`` is every model
     detection for the mode; ``on_bboxes`` the subset drawn green."""
-    img = frame.bgr.copy()
+    source = frame.bgr
+    source_h, source_w = source.shape[:2]
+    scale = min(1.0, 1600.0 / source_w)
+    img = cv2.resize(source, (int(round(source_w * scale)), int(round(source_h * scale))),
+                     interpolation=cv2.INTER_AREA) if scale < 1.0 else source.copy()
+    correct = getattr(frame, "correct_pixels", None)
+    if correct is not None:
+        img = correct(img, "debug_preview_color_ms")
+    raw_bboxes = [tuple(int(round(v * scale)) for v in b) for b in raw_bboxes]
+    on_bboxes = [tuple(int(round(v * scale)) for v in b) for b in on_bboxes]
+    info = dict(info)
+    if info.get("crop_rect") is not None:
+        info["crop_rect"] = tuple(int(round(v * scale)) for v in info["crop_rect"])
+    if info.get("center") is not None:
+        info["center"] = tuple(v * scale for v in info["center"])
     h, w = img.shape[:2]
     s = max(1.0, w / 1280.0)  # scale strokes/text so it reads on 720p and 4K
     thick = max(2, int(round(2 * s)))
@@ -156,6 +171,18 @@ def _perception_debug_info(channel_id: int) -> Dict[str, Any]:
     return info
 
 
+@router.get("/api/perception/debug/timing/{channel_id}")
+def perception_debug_timing(channel_id: int):
+    info = _perception_debug_info(channel_id)
+    worker = info["_ps"]._workers[channel_id]
+    return {
+        "columns": ["retrieved_wall_s", "published_wall_s", "published_monotonic_s", "infer_ms", "stages_ms"],
+        "samples": list(worker.result_timings),
+        "imgsz": info["imgsz"], "crop_rect": info["crop_rect"],
+        "source_shape": list(info["frame"].bgr.shape),
+    }
+
+
 @router.get("/api/perception/debug/annotated/{channel_id}")
 def perception_debug_annotated(channel_id: int):
     """The PRODUCTION view: exactly what perception infers and decides on.
@@ -241,11 +268,7 @@ def perception_debug_fullframe(channel_id: int):
 # Constants
 # ---------------------------------------------------------------------------
 
-API_KEY_ENV_VARS = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "rebrickable": "REBRICKABLE_API_KEY",
-}
-SUPPORTED_API_KEY_PROVIDERS = tuple(API_KEY_ENV_VARS)
+SUPPORTED_API_KEY_PROVIDERS = ("openrouter",)
 FEEDER_DETECTION_ROLES = ("c_channel_2", "c_channel_3", "carousel")
 EXIT_STUCK_INCIDENT_KIND = "exit_stuck"
 CHANNEL_EXIT_STUCK_SOURCE_KIND = "channel_exit_stuck"
@@ -589,12 +612,12 @@ def _write_classification_baseline_frames(
 
 @router.get("/api/settings/api-keys")
 def get_api_keys() -> Dict[str, Any]:
-    saved = getApiKeys() or {}
+    saved = getApiKeys()
     masked: Dict[str, str | None] = {}
     for provider in SUPPORTED_API_KEY_PROVIDERS:
-        key = saved.get(provider) or os.environ.get(API_KEY_ENV_VARS[provider], "")
+        key = saved.get(provider) or os.environ.get("OPENROUTER_API_KEY", "")
         if key:
-            masked[provider] = "Configured"
+            masked[provider] = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
         else:
             masked[provider] = None
     return {"ok": True, "keys": masked}
@@ -604,13 +627,9 @@ def get_api_keys() -> Dict[str, Any]:
 def save_api_key(payload: ApiKeySavePayload) -> Dict[str, Any]:
     if payload.provider not in SUPPORTED_API_KEY_PROVIDERS:
         raise HTTPException(400, f"Unsupported provider '{payload.provider}'.")
-    key = payload.key.strip()
-    if not key:
-        raise HTTPException(400, "API key must not be empty.")
-    saved = dict(getApiKeys() or {})
-    saved[payload.provider] = key
+    saved = {"openrouter": payload.key.strip()}
     setApiKeys(saved)
-    os.environ[API_KEY_ENV_VARS[payload.provider]] = key
+    os.environ["OPENROUTER_API_KEY"] = payload.key.strip()
     return {"ok": True, "message": f"API key for {payload.provider} saved and activated."}
 
 
@@ -1845,6 +1864,7 @@ def classification_channel_exit_incident() -> Dict[str, Any]:
 
 
 @router.post("/api/classification-channel/exit-incident/continue")
+@occupied_checkpoint_motion_guard("continue the C4 exit release")
 def classification_channel_exit_incident_continue(
     payload: ClassificationExitIncidentActionPayload | None = None,
 ) -> Dict[str, Any]:
@@ -1861,6 +1881,7 @@ def classification_channel_exit_incident_continue(
 
 
 @router.post("/api/classification-channel/exit-incident/test-release")
+@occupied_checkpoint_motion_guard("test the C4 exit release")
 def classification_channel_exit_incident_test_release(
     payload: ClassificationExitIncidentTestReleasePayload,
 ) -> Dict[str, Any]:
@@ -1881,6 +1902,7 @@ def classification_channel_exit_incident_test_release(
 
 
 @router.post("/api/classification-channel/exit-incident/auto-resolve")
+@occupied_checkpoint_motion_guard("auto-resolve the C4 exit incident")
 def classification_channel_exit_incident_auto_resolve() -> Dict[str, Any]:
     controller = shared_state.controller_ref
     coordinator = getattr(controller, "coordinator", None) if controller is not None else None
@@ -1950,43 +1972,13 @@ def classification_channel_fallback_incident_clear(
         )
 
     kind = str(active.get("kind"))
-    piece_uuid = (
-        str(active.get("piece_uuid"))
-        if isinstance(active.get("piece_uuid"), str)
-        else None
-    )
-    recovery_requested = False
-    state_owns_fault = False
-    if kind == CLASSIFICATION_TRACK_LOST_INCIDENT_KIND:
-        controller = shared_state.controller_ref
-        coordinator = getattr(controller, "coordinator", None) if controller is not None else None
-        classification = (
-            getattr(coordinator, "classification", None)
-            if coordinator is not None
-            else None
-        )
-        request_recovery = getattr(classification, "requestTrackLostRecovery", None)
-        owns_fault = getattr(classification, "ownsTrackLostFault", None)
-        if callable(owns_fault):
-            state_owns_fault = bool(owns_fault(piece_uuid))
-        if callable(request_recovery):
-            recovery_requested = bool(request_recovery(piece_uuid))
-        if state_owns_fault and not recovery_requested:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active C4 fault could not be reconciled with its tracked "
-                    "piece; the incident was not cleared."
-                ),
-            )
-
-    # Queue state recovery before clearing the incident: while the incident is
-    # active the coordinator cannot advance the validated state out from under
-    # the HTTP request.  Once cleared, the next coordinator tick performs the
-    # actual cleanup and IDLE transition.
     runtime_stats.clearActiveIncident(
         kind=kind,
-        piece_uuid=piece_uuid,
+        piece_uuid=(
+            str(active.get("piece_uuid"))
+            if isinstance(active.get("piece_uuid"), str)
+            else None
+        ),
         resolved_by="operator",
     )
     return {
@@ -1995,29 +1987,7 @@ def classification_channel_fallback_incident_clear(
         "kind": kind,
         "piece_uuid": active.get("piece_uuid"),
         "channel": "c4",
-        "recovery_requested": recovery_requested,
     }
-
-
-class RetainedTransferRecoveryPayload(BaseModel):
-    episode_id: str
-    boundary_index: int
-
-
-@router.post('/api/classification-channel/retained-transfer/recover')
-def recover_retained_transfer(payload: RetainedTransferRecoveryPayload) -> Dict[str, Any]:
-    controller = shared_state.controller_ref
-    coordinator = getattr(controller, 'coordinator', None)
-    delegate = getattr(getattr(coordinator, 'classification', None), '_delegate', None)
-    request = getattr(delegate, 'requestRetainedTransferRecovery', None)
-    if shared_state.hardware_state != 'ready' or not callable(request):
-        raise HTTPException(status_code=409, detail='Retained indexed runtime is not ready')
-    try:
-        request(payload.episode_id, payload.boundary_index)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {'ok': True, 'queued': True, 'episode_id': payload.episode_id,
-            'boundary_index': payload.boundary_index}
 
 
 def _runtime_stats_or_503() -> Any:
@@ -2309,6 +2279,7 @@ def _run_channel_exit_release_motion(
 
 
 @router.post("/api/feeder/channel-exit-incident/test-release")
+@occupied_checkpoint_motion_guard("test a feeder exit release")
 def feeder_channel_exit_incident_test_release(
     payload: ChannelExitIncidentTestReleasePayload,
 ) -> Dict[str, Any]:
@@ -2525,10 +2496,8 @@ def classification_channel_wall_phase(
     frame = _classification_channel_live_frame()
 
     from vision.c4_wall_phase import detect_c4_wall_phase
-    from subsystems.classification_channel.five_sector_platter import C4FiveSectorPlatter
 
-    platter = C4FiveSectorPlatter.from_irl_config(_active_irl_config())
-    result = detect_c4_wall_phase(frame.raw, sector_count=platter.sector_count)
+    result = detect_c4_wall_phase(frame.raw)
     return {
         "ok": True,
         "frame_luma": _frame_luma_payload(frame.raw),
@@ -2590,9 +2559,9 @@ def classification_channel_sector_occupancy(
         C4SectorDetection,
     )
 
+    phase = detect_c4_wall_phase(frame.raw)
     irl_config = _active_irl_config()
     platter = C4FiveSectorPlatter.from_irl_config(irl_config)
-    phase = detect_c4_wall_phase(frame.raw, sector_count=platter.sector_count)
     phase_offset = phase.sector_offset_deg if phase.sector_offset_deg is not None else 0.0
 
     if phase.center_x is None or phase.center_y is None:
@@ -2680,12 +2649,7 @@ def _active_irl_config() -> Any:
         config = getattr(coordinator, "irl_config", None)
         if config is not None:
             return config
-    config = getattr(shared_state.vision_manager, "_irl_config", None)
-    if config is not None:
-        return config
-    from irl.config import mkIRLConfig
-
-    return mkIRLConfig()
+    return None
 
 
 def _classification_channel_role_sectors(

@@ -29,19 +29,6 @@ class SharedVariables:
         self._gc = gc
         self._bus = bus
         self._classification_ready: bool = False
-        # Accepted C3 movement is owned by the feeder until fresh completion.
-        # This is transfer-in-flight information, not a claim of delivery.
-        self.c4_runtime_owner = None
-        self.reserve_c4_transfer = None
-        self.c4_reset_distribution = None
-        self.c3_motion_pending: bool = False
-        # Purpose of the owned move: only bounded staging behind a closed
-        # transfer boundary may overlap C4 indexing. Ownership stays pending.
-        self.c3_safe_staging_pending: bool = False
-        self.c3_release_leader_id: int | None = None
-        self.c3_transfer_episode = None
-        self.c3_release_evidence: dict = {}
-        self.request_c3_recovery = None
         self._distribution_ready: bool = True
         self.transport: Optional["PieceTransport"] = None
         self.carousel: Optional["Carousel"] = None
@@ -54,6 +41,12 @@ class SharedVariables:
         # via the /api/sample-collection-mode endpoint.
         self._sample_collection_mode: bool = False
         self._ignored_classification_dropzone_track_ids: set[int] = set()
+        self.c4_runtime_owner = None
+        self.reserve_c4_transfer = None
+        self.request_c3_recovery = None
+        self.c3_transfer_episode = None
+        self.c3_motion_pending = False
+        self.c3_safe_staging_pending = False
 
     @property
     def classification_ready(self) -> bool:
@@ -189,50 +182,6 @@ class SharedVariables:
             )
         )
 
-    def publish_piece_release_attempt(
-        self,
-        *,
-        source: StationId,
-        target: StationId,
-        started_at_mono: float | None = None,
-    ) -> None:
-        if not self._bus_enabled():
-            return
-        self._bus.publish(
-            PieceReleaseAttempt(
-                source=source,
-                target=target,
-                started_at_mono=(
-                    time.monotonic()
-                    if started_at_mono is None
-                    else float(started_at_mono)
-                ),
-            )
-        )
-
-    def latest_piece_release_attempt_mono(
-        self,
-        *,
-        source: StationId,
-        target: StationId,
-    ) -> float | None:
-        if not self._bus_enabled() or self._bus is None:
-            return None
-        attempt = self._bus.piece_release_attempt(source, target)
-        return None if attempt is None else float(attempt.started_at_mono)
-
-    def latest_piece_delivery_mono(
-        self,
-        *,
-        source: StationId,
-        target: StationId,
-    ) -> float | None:
-        """Return the durable timestamp of the latest completed handoff."""
-        if not self._bus_enabled() or self._bus is None:
-            return None
-        delivery = self._bus.piece_delivered(source, target)
-        return None if delivery is None else float(delivery.delivered_at_mono)
-
     def has_pending_piece_request(
         self,
         *,
@@ -347,3 +296,50 @@ class SharedVariables:
             and getattr(self._gc, "use_channel_bus", False)
             and self._bus is not None
         )
+
+    def publish_piece_release_attempt(
+        self,
+        *,
+        source: StationId,
+        target: StationId,
+        started_at_mono: float | None = None,
+    ) -> None:
+        if not self._bus_enabled():
+            return
+        self._bus.publish(
+            PieceReleaseAttempt(
+                source=source,
+                target=target,
+                started_at_mono=(
+                    time.monotonic()
+                    if started_at_mono is None
+                    else float(started_at_mono)
+                ),
+            )
+        )
+
+    def latest_piece_release_attempt_mono(
+        self,
+        *,
+        source: StationId,
+        target: StationId,
+    ) -> float | None:
+        if not self._bus_enabled() or self._bus is None:
+            return None
+        attempt = self._bus.piece_release_attempt(source, target)
+        return None if attempt is None else float(attempt.started_at_mono)
+
+    def latest_piece_delivery_mono(
+        self,
+        *,
+        source: StationId,
+        target: StationId,
+    ) -> float | None:
+        """Return the durable timestamp of the latest completed handoff."""
+        if not self._bus_enabled() or self._bus is None:
+            return None
+        delivery = self._bus.piece_delivered(source, target)
+        return None if delivery is None else float(delivery.delivered_at_mono)
+
+
+

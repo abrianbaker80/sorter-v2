@@ -106,7 +106,6 @@ class ClassificationAttempt(BaseModel):
     confidence: Optional[float] = None
     color_id: Optional[str] = None
     color_name: Optional[str] = None
-    color_confidence: Optional[float] = None
     error: Optional[str] = None
     duration_s: Optional[float] = None
     image_ts: List[float] = Field(default_factory=list)
@@ -154,18 +153,6 @@ class KnownObjectData(BaseModel):
     too_big_for_layer: bool = False
     intended_layer_index: Optional[int] = None
     destination_bin: Optional[Tuple[int, int, int]] = None
-    harvest_project_id: Optional[str] = None
-    harvest_activation_id: Optional[str] = None
-    harvest_allocation_id: Optional[str] = None
-    harvest_group_id: Optional[str] = None
-    harvest_group_label: Optional[str] = None
-    harvest_exception: bool = False
-    transfer_episode_id: Optional[str] = None
-    transfer_first_pass: bool = False
-    transport_failure_reason: Optional[str] = None
-    forced_reject_reason: Optional[str] = None
-    reject_category: Optional[str] = None
-    physical_group_size_unknown: bool = False
     tracked_global_id: Optional[int] = None
     classification_channel_zone_state: Optional[str] = None
     classification_channel_zone_center_deg: Optional[float] = None

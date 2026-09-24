@@ -1,15 +1,10 @@
 import time
 from typing import Optional
 
-from subsystems.classification_channel.five_sector_platter import C4FiveSectorPlatter
 from subsystems.classification_channel.states import ClassificationChannelState
 
 from .base import Rev01BaseState
 from .constants import LOG_TAG
-
-
-_C4_ALIGNMENT_POSITION_TOLERANCE_STEPS = 1
-_C4_ALIGNMENT_MAX_ATTEMPTS = 2
 
 
 class Idle(Rev01BaseState):
@@ -24,12 +19,6 @@ class Idle(Rev01BaseState):
         super().__init__(*args, **kwargs)
         self._presence_streak = 0
         self._clear_streak = 0
-        self._last_frame_ts = 0.0
-        self._alignment_move_pending = False
-        self._alignment_post_move_frame_not_before = 0.0
-        self._alignment_attempts = 0
-        self._alignment_confirmed = False
-        self._last_alignment_error: str | None = None
         self.logger.info(f"{LOG_TAG} IDLE state constructed")
 
     def step(self) -> Optional[ClassificationChannelState]:
@@ -46,8 +35,9 @@ class Idle(Rev01BaseState):
         Cascade rule for C4 (from the rev04 doc):
         - Channel empty (``n_pieces == 0``)        → classification_ready=True, stay Idle.
         - Anything on the channel                  → classification_ready=False.
-        - After ``presence_streak_to_start`` consecutive frames with a
-          piece in the C3 ingress/drop zone, transition to CAPTURING.
+        - After ``presence_streak_to_start`` consecutive ticks with a
+          piece somewhere on the channel BUT NOT confined to the exit
+          zone, transition to ROTATING_AND_CAPTURING.
 
         No stuck-piece timeout. No exit-zone-only branch escalation —
         if a piece is parked in the exit zone, perception reports
@@ -72,36 +62,9 @@ class Idle(Rev01BaseState):
             "classification.rev01.idle.n_pieces", float(state.n_pieces)
         )
 
-        frame_ts = float(state.ts)
-        if frame_ts <= 0.0:
-            self._presence_streak = 0
-            self._clear_streak = 0
-            self.setClassificationReady(False, "waiting for C4 perception")
-            return None
-        new_frame = frame_ts > self._last_frame_ts
-        if new_frame:
-            self._last_frame_ts = frame_ts
-
-        # A position correction is allowed only while the C3 gate is closed.
-        # Do not interpret detections made during that motion; first require the
-        # motor to stop and perception to publish a genuinely post-motion frame.
-        if self._alignment_move_pending and not self._alignmentMoveSettled(
-            frame_ts, new_frame
-        ):
-            self._presence_streak = 0
-            self._clear_streak = 0
-            self.setClassificationReady(False, "aligning C4 pocket")
-            return None
-
         if state.n_pieces == 0:
             self._presence_streak = 0
-            aligned, alignment_reason = self._ensurePocketAligned()
-            if not aligned:
-                self._clear_streak = 0
-                self.setClassificationReady(False, alignment_reason)
-                return None
-            if new_frame:
-                self._clear_streak += 1
+            self._clear_streak += 1
             # Asymmetry guard: we require presence_streak_to_start confirmed
             # reads to BELIEVE a piece arrived, but a single zero-read used to
             # flip ready=True instantly. The detector blinks to 0 for a frame or
@@ -122,25 +85,14 @@ class Idle(Rev01BaseState):
         # Channel is occupied. Always not-ready.
         self.setClassificationReady(False, f"{state.n_pieces} piece(s) on channel")
 
-        # A new C4 object has exactly one physical ingress: C3 deposits it in
-        # the calibrated drop zone. Detections elsewhere still close the C3
-        # gate above, but cannot establish provenance for a new cycle. This is
-        # especially important while the rotor settles after discharge, when
-        # moving hardware can otherwise appear as a mid-channel detection.
-        raw_actionable = bool(state.in_drop)
-        confirmed_actionable = raw_actionable
-        if state.n_confirmed_pieces is not None:
-            # Raw/tentative detections close the C3 gate immediately, but the C4
-            # tracker deliberately withholds an id until a bbox survives min_hits
-            # distinct frames. Only that confirmed object may start a cycle.
-            confirmed_actionable = any(
-                piece.sv_bt_track_id is not None and int(piece.zone_code) == 1
-                for piece in state.pieces
-            )
-
-        if raw_actionable:
-            if new_frame:
-                self._presence_streak += 1
+        # Only an "actionable" piece (outside the exit zone) advances the
+        # presence streak that triggers the capture sweep. A piece parked
+        # in the exit zone holds Idle indefinitely. Jitter unstick (using
+        # ctx.config.jitter_* fields + dwell tracking + carousel_stepper.jitter)
+        # can be wired here symmetrically to GoToAngleFeeding when a C4 exit
+        # piece exceeds jitter_exit_dwell_ms.
+        if state.in_drop or (state.n_pieces > 0 and not state.in_exit):
+            self._presence_streak += 1
         else:
             self._presence_streak = 0
 
@@ -148,129 +100,16 @@ class Idle(Rev01BaseState):
             "classification.rev01.idle.presence_streak",
             float(self._presence_streak),
         )
-        if (
-            confirmed_actionable
-            and self._presence_streak >= self.ctx.config.presence_streak_to_start
-        ):
+        if self._presence_streak >= self.ctx.config.presence_streak_to_start:
             self._presence_streak = 0
             self.abandonInFlightObject("new cycle starting")
             self.ctx.reset()
             self.logger.info(
                 f"{LOG_TAG} IDLE -> ROTATING_AND_CAPTURING "
-                f"(perception confirmed C3 ingress, n_pieces={state.n_pieces})"
+                f"(perception confirmed piece on channel, n_pieces={state.n_pieces})"
             )
             return ClassificationChannelState.REV01_CAPTURING
         return None
-
-    def _classificationStepper(self):
-        return getattr(self.irl, "carousel_stepper", None) or getattr(
-            self.irl,
-            "classification_channel_rotor_stepper",
-            None,
-        ) or getattr(self.irl, "c_channel_4_rotor_stepper", None)
-
-    def _alignmentMoveSettled(self, frame_ts: float, new_frame: bool) -> bool:
-        stepper = self._classificationStepper()
-        if stepper is None:
-            self._reportAlignmentError("C4 classification stepper unavailable")
-            return False
-        try:
-            stopped = bool(stepper.stopped)
-        except Exception as exc:
-            self._reportAlignmentError(f"C4 position status unavailable: {exc}")
-            return False
-        if not stopped:
-            return False
-        if self._alignment_post_move_frame_not_before == 0.0:
-            self._alignment_post_move_frame_not_before = time.time()
-            return False
-        if (
-            not new_frame
-            or frame_ts < self._alignment_post_move_frame_not_before
-        ):
-            return False
-        self._alignment_move_pending = False
-        self._alignment_post_move_frame_not_before = 0.0
-        return True
-
-    def _ensurePocketAligned(self) -> tuple[bool, str]:
-        if self._alignment_confirmed:
-            return True, "C4 pocket aligned"
-        stepper = self._classificationStepper()
-        if stepper is None:
-            reason = "C4 classification stepper unavailable"
-            self._reportAlignmentError(reason)
-            return False, reason
-        try:
-            if not bool(stepper.stopped):
-                return False, "waiting for C4 motion to stop"
-            position = int(stepper.position)
-        except Exception as exc:
-            reason = f"C4 absolute position unavailable: {exc}"
-            self._reportAlignmentError(reason)
-            return False, reason
-
-        platter = C4FiveSectorPlatter.from_irl_config(self.irl_config)
-        correction_steps = platter.nearest_sector_delta_microsteps(position)
-        if abs(correction_steps) <= _C4_ALIGNMENT_POSITION_TOLERANCE_STEPS:
-            self._alignment_attempts = 0
-            self._alignment_confirmed = True
-            self._last_alignment_error = None
-            return True, "C4 pocket aligned"
-
-        half_pocket_steps = abs(
-            platter.output_degrees_to_motor_microsteps(
-                platter.sector_size_deg / 2.0
-            )
-        ) + 1
-        if abs(correction_steps) > half_pocket_steps:
-            reason = (
-                "C4 absolute-position correction exceeded half a pocket "
-                f"({correction_steps} microsteps)"
-            )
-            self._reportAlignmentError(reason)
-            return False, reason
-        if self._alignment_attempts >= _C4_ALIGNMENT_MAX_ATTEMPTS:
-            reason = (
-                "C4 did not reach its absolute pocket boundary after "
-                f"{_C4_ALIGNMENT_MAX_ATTEMPTS} attempts"
-            )
-            self._reportAlignmentError(reason)
-            return False, reason
-
-        try:
-            stepper.set_speed_limits(
-                16,
-                max(16, int(self.ctx.config.precise_converge_speed_usteps_per_s)),
-            )
-            acknowledged = bool(stepper.move_steps(int(correction_steps)))
-        except Exception as exc:
-            reason = f"C4 pocket-alignment command failed: {exc}"
-            self._reportAlignmentError(reason)
-            return False, reason
-        if not acknowledged:
-            reason = "C4 pocket-alignment command was not acknowledged"
-            self._reportAlignmentError(reason)
-            return False, reason
-
-        self._alignment_attempts += 1
-        self._alignment_move_pending = True
-        self._alignment_post_move_frame_not_before = 0.0
-        correction_output_deg = platter.motor_microsteps_to_output_degrees(
-            correction_steps
-        )
-        self.logger.info(
-            f"{LOG_TAG} IDLE: correcting C4 from absolute position {position} "
-            f"by {correction_steps} microsteps ({correction_output_deg:.2f} output deg) "
-            "before reopening C3"
-        )
-        return False, "aligning C4 pocket"
-
-    def _reportAlignmentError(self, reason: str) -> None:
-        if self._last_alignment_error == reason:
-            return
-        self._last_alignment_error = reason
-        self.logger.error(f"{LOG_TAG} IDLE: {reason}; C3 gate remains closed")
 
     # ---- Legacy (non-perception) path, unchanged ----
 
@@ -337,9 +176,3 @@ class Idle(Rev01BaseState):
         super().cleanup()
         self._presence_streak = 0
         self._clear_streak = 0
-        self._last_frame_ts = 0.0
-        self._alignment_move_pending = False
-        self._alignment_post_move_frame_not_before = 0.0
-        self._alignment_attempts = 0
-        self._alignment_confirmed = False
-        self._last_alignment_error = None

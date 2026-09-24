@@ -111,12 +111,8 @@ app.add_middleware(RequestLoggingMiddleware)
 
 def _load_saved_api_keys_into_environment() -> None:
     saved_api_keys = getApiKeys()
-    for provider, env_var in {
-        "openrouter": "OPENROUTER_API_KEY",
-        "rebrickable": "REBRICKABLE_API_KEY",
-    }.items():
-        if saved_api_keys.get(provider):
-            os.environ[env_var] = saved_api_keys[provider]
+    if saved_api_keys.get("openrouter"):
+        os.environ["OPENROUTER_API_KEY"] = saved_api_keys["openrouter"]
 
 # ---------------------------------------------------------------------------
 # Include routers
@@ -128,7 +124,6 @@ from server.routers.cameras import router as cameras_router
 from server.routers.detection import router as detection_router
 from server.routers.sorting_profiles import router as sorting_profiles_router
 from server.routers.bsx import router as bsx_router
-from server.routers.project_harvest import router as project_harvest_router
 from server.routers.bin_layouts import router as bin_layouts_router
 from server.routers.system import router as system_router
 from server.routers.setup import router as setup_router
@@ -138,6 +133,7 @@ from server.routers.pieces import router as pieces_router
 from server.routers.incidents import router as incidents_router
 from server.routers.runtimes import router as runtimes_router
 from server.routers.chute_stress import router as chute_stress_router
+from server.routers.power_stress import router as power_stress_router
 from server.routers.tuning import router as tuning_router
 from server.routers.telemetry import router as telemetry_router
 from server.routers.tailscale import router as tailscale_router
@@ -153,7 +149,6 @@ app.include_router(cameras_router)
 app.include_router(detection_router)
 app.include_router(sorting_profiles_router)
 app.include_router(bsx_router)
-app.include_router(project_harvest_router)
 app.include_router(bin_layouts_router)
 app.include_router(system_router)
 app.include_router(setup_router)
@@ -163,6 +158,7 @@ app.include_router(pieces_router)
 app.include_router(incidents_router)
 app.include_router(runtimes_router)
 app.include_router(chute_stress_router)
+app.include_router(power_stress_router)
 app.include_router(tuning_router)
 app.include_router(telemetry_router)
 app.include_router(tailscale_router)

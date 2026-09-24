@@ -366,47 +366,14 @@ class C4FiveSectorPlatter:
         return float(output_degrees) * float(self.gear_ratio)
 
     def sector_position_microsteps(self, unwrapped_sector_index: int) -> int:
-        return int(
-            round(
-                float(int(unwrapped_sector_index))
-                * self.motor_microsteps_per_output_revolution
-                / float(self.sector_count)
+        sector_index = int(unwrapped_sector_index)
+        turns, sector = divmod(sector_index, self.sector_count)
+        return (
+            int(turns) * self.rounded_motor_microsteps_per_output_revolution
+            + self.output_degrees_to_motor_microsteps(
+                float(sector) * self.sector_size_deg
             )
         )
-
-    def nearest_sector_position_microsteps(self, motor_microsteps: int) -> int:
-        """Return the closest absolute pocket-boundary position.
-
-        Sector positions are calculated from the absolute revolution origin,
-        rather than by repeatedly adding a rounded sector distance.  That keeps
-        the sum of all sector moves equal to one full output revolution and
-        prevents phase drift over long runs.
-        """
-        return self.sector_position_microsteps(
-            self.nearest_sector_index(motor_microsteps)
-        )
-
-    def nearest_sector_index(self, motor_microsteps: int) -> int:
-        """Return the unwrapped index of the closest pocket boundary."""
-        position = int(motor_microsteps)
-        nominal_sector_steps = (
-            self.motor_microsteps_per_output_revolution
-            / float(self.sector_count)
-        )
-        approximate_index = math.floor(float(position) / nominal_sector_steps)
-        candidates = range(approximate_index - 1, approximate_index + 3)
-        return min(
-            candidates,
-            key=lambda index: (
-                abs(self.sector_position_microsteps(index) - position),
-                index,
-            ),
-        )
-
-    def nearest_sector_delta_microsteps(self, motor_microsteps: int) -> int:
-        """Shortest exact correction from ``motor_microsteps`` to a pocket boundary."""
-        position = int(motor_microsteps)
-        return self.nearest_sector_position_microsteps(position) - position
 
     def sector_delta_count(
         self,

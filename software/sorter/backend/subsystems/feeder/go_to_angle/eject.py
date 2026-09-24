@@ -11,25 +11,24 @@ pulsing at the exit:
   downstream piece count, → ADVANCING. (The trigger is measured against the
   exit-only zone, NOT the precise zone — a piece sitting in the precise zone
   must never start an eject.)
-- ADVANCING (slippage-robust core): the controller owns the leading piece's
-  perception track for the whole handoff. Each iteration re-reads THAT piece's
-  actual COM gap and commands a normal move of the remaining gap (floored at
-  ``fast_eject_min_step_deg``, never touching acceleration). If it leaves C3,
-  the next piece cannot be mistaken for it. When the gap reaches ``<= 0`` the
-  piece is >= 50% into the exit (COM = centroid past the edge) → AWAITING_FALL.
-  A safety cap (``fast_eject_max_advance_iterations``) kicks a hopelessly
-  stuck/slipping piece to RECOVERING.
+- ADVANCING (slippage-robust core): each iteration re-reads the ACTUAL COM gap
+  to the exit-zone entry edge and commands a normal move of that remaining gap
+  (floored at ``fast_eject_min_step_deg``, never touching acceleration). The
+  piece may slip and move fewer degrees than commanded — that's fine, we just
+  re-measure and command the new remaining gap next iteration. When the gap
+  reaches ``<= 0`` the piece is >= 50% into the exit (COM = centroid past the
+  edge) → AWAITING_FALL. A safety cap (``fast_eject_max_advance_iterations``)
+  kicks a hopelessly stuck/slipping piece to RECOVERING.
 - AWAITING_FALL: success ONLY when a NEW detection appears in the DOWNSTREAM
   channel's region (its ``n_pieces`` rose above the snapshot — the piece fell
   and arrived). The piece vanishing from THIS channel's over-exposed exit view
   is NOT success — we keep assuming it's there. After ``fall_confirm_timeout_ms``
   with no downstream rise → RECOVERING.
 - RECOVERING: jitter-and-pause up to N attempts (shared ``JitterSequence``). A
-  downstream rise → success. If the SAME tracked piece reappears out of the
-  exit zone (``gap > 0``) → back to ADVANCING to re-approach. If that track has
-  left C3, wait for downstream confirmation without moving the following piece.
-  Exhausted with nothing ever downstream → assume the detection was a vision
-  glitch, give up, resume normal flow.
+  downstream rise → success. If the piece reappears out of the exit zone
+  (``gap > 0``) → back to ADVANCING to re-approach. Exhausted with nothing ever
+  downstream → assume the detection was a vision glitch, give up, resume normal
+  flow.
 
 The controller is driven one ``tick`` per coordinator loop and returns whether
 it consumed the channel this tick (True ⇒ caller skips normal advance/idle). It
@@ -49,7 +48,7 @@ from typing import Callable, Optional, TYPE_CHECKING
 from subsystems.common.jitter_recovery import JitterParams, JitterPhase, JitterSequence
 
 if TYPE_CHECKING:
-    from perception.state import ChannelState, PieceObservation
+    from perception.state import ChannelState
     from .config import GoToAngleConfig
 
 
@@ -115,6 +114,27 @@ class EjectController:
             None,
         )
 
+    def _followers_clear_of_precise_after_release(self, state: "ChannelState") -> bool:
+        """Prove the head can fall without bringing a nearby follower to the lip."""
+        pieces = tuple(state.pieces or ())
+        if state.n_pieces > len(pieces):
+            return False
+        if len(pieces) < 2:
+            return True
+
+        leader_gap = state.exit_com_forward_deg
+        precise_gap = state.exit_com_forward_to_precise_deg
+        if leader_gap is None or precise_gap is None:
+            return False
+
+        leader_gap = float(leader_gap)
+        precise_band_width = leader_gap - float(precise_gap)
+        release_travel = max(0.0, leader_gap)
+        return all(
+            float(piece.com_forward_to_exit_deg) - release_travel > precise_band_width
+            for piece in pieces[1:]
+        )
+
     def _succeed(self, reason: str) -> bool:
         self._logger.info(
             f"[eject ch{self.channel_id}] success ({reason}) — resuming normal flow"
@@ -137,11 +157,6 @@ class EjectController:
     ) -> bool:
         """Returns True when the controller has taken charge of this channel for
         the tick (caller must NOT also run normal advance/idle)."""
-        # Once a handoff is committed, the downstream arrival is its definitive
-        # acknowledgement in every active phase.  Check it before interpreting
-        # local C3 detections: after the transferred piece leaves, the next piece
-        # can become C3's leading detection and must not be mistaken for the one
-        # being recovered/re-approached.
         if self._phase != EjectPhase.IDLE and self._downstream_new(downstream):
             return self._succeed(f"appeared downstream during {self._phase.value}")
         if self._phase == EjectPhase.IDLE:
@@ -151,7 +166,7 @@ class EjectController:
         if self._phase == EjectPhase.AWAITING_FALL:
             return self._tick_awaiting(state, cfg, now)
         if self._phase == EjectPhase.RECOVERING:
-            return self._tick_recovering(state, now)
+            return self._tick_recovering(state, downstream, now)
         return False
 
     # --- phases ---------------------------------------------------------
@@ -176,6 +191,8 @@ class EjectController:
         # A piece is staged at the exit. From here this is our channel.
         if not downstream_ready:
             return True  # hold (freeze) until the downstream channel can accept
+        if not self._followers_clear_of_precise_after_release(state):
+            return True
         # Commit: snapshot what downstream looks like now so a later rise = our drop.
         self._downstream_baseline = int(downstream.n_pieces)
         leading = state.pieces[0] if state.pieces else None
@@ -186,7 +203,7 @@ class EjectController:
         self._logger.info(
             f"[eject ch{self.channel_id}] start ADVANCING (gap={gap:.1f}° "
             f"in_precise={bool(state.exit_com_in_precise)} downstream_baseline="
-            f"{self._downstream_baseline} source_track={self._source_track_id})"
+            f"{self._downstream_baseline})"
         )
         # Act this tick rather than burning one.
         return self._tick_advancing(state, downstream_ready, cfg, now)
@@ -199,14 +216,11 @@ class EjectController:
         now: float,
     ) -> bool:
         source = self._source_observation(state)
-        if self._source_track_id is not None:
-            gap = (
-                float(source.com_forward_to_exit_deg)
-                if source is not None
-                else None
-            )
-        else:
-            gap = state.exit_com_forward_deg
+        gap = (
+            float(source.com_forward_to_exit_deg)
+            if source is not None
+            else state.exit_com_forward_deg
+        )
         if (self._source_track_id is not None and source is None) or (
             self._source_track_id is None and (state.n_pieces <= 0 or gap is None)
         ):
@@ -235,9 +249,10 @@ class EjectController:
         if not self._is_stopped():
             return True  # previous advance move still running
 
-        if self._advance_iters >= int(cfg.fast_eject_max_advance_iterations):
+        self._advance_iters += 1
+        if self._advance_iters > int(cfg.fast_eject_max_advance_iterations):
             self._logger.warning(
-                f"[eject ch{self.channel_id}] {self._advance_iters} advance "
+                f"[eject ch{self.channel_id}] {self._advance_iters - 1} advance "
                 f"moves without reaching the exit zone (gap still {gap:.1f}°) — "
                 f"piece stuck/slipping, kicking to jitter recovery"
             )
@@ -246,11 +261,6 @@ class EjectController:
 
         step = max(float(cfg.fast_eject_min_step_deg), float(gap))
         ok = self._advance_move(step)
-        if ok:
-            # Rejected requests mean the previous move/cooldown still owns the
-            # stepper; they are not physical attempts and cannot consume the
-            # stuck/slippage budget.
-            self._advance_iters += 1
         self._logger.info(
             f"[eject ch{self.channel_id}] ADVANCE gap={gap:.1f}° step={step:.1f}° "
             f"iter={self._advance_iters} ok={ok}"
@@ -268,18 +278,17 @@ class EjectController:
         # is the expected state, not a stuck signal.
         elapsed_ms = (now - self._awaiting_since) * 1000.0
         if elapsed_ms >= float(cfg.fall_confirm_timeout_ms):
-            # A confirmed source track that has left C3 cannot be helped by
-            # moving C3. Keep waiting for C4; any current C3 leader is the next
-            # piece and must remain untouched until this handoff is acknowledged.
-            if (
-                self._source_track_id is not None
-                and self._source_observation(state) is None
-            ):
+            if self._source_track_id is not None and self._source_observation(state) is None:
                 return True
             self._begin_recovery(cfg, reason=f"no downstream within {int(cfg.fall_confirm_timeout_ms)}ms")
         return True
 
     def _begin_recovery(self, cfg: "GoToAngleConfig", reason: str) -> None:
+        # An observed COM crossing can precede finite motor completion. The
+        # C3 feeder's verified owner must release that target before jitter
+        # can take the same motor. Keep the installed recovery policy/profile.
+        if self.channel_id == 3 and not self._is_stopped():
+            return
         seq = self._get_seq(cfg)
         if seq is None:
             self._logger.warning(
@@ -298,13 +307,12 @@ class EjectController:
     def _tick_recovering(
         self,
         state: "ChannelState",
+        downstream: "ChannelState",
         now: float,
     ) -> bool:
         # If the jitter knocked the piece back out of the exit zone, re-approach.
         source = self._source_observation(state)
         if self._source_track_id is not None and source is None:
-            # The owned piece left C3 during recovery. Stop shaking C3 and wait
-            # for C4 rather than adopting the following piece as the handoff.
             self._phase = EjectPhase.AWAITING_FALL
             if self._seq is not None:
                 self._seq.reset()

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 import stepper_telemetry
 from local_state import getChuteStressRun, listChuteStressRuns
 from server import shared_state
+from server.routers.motion_safety import occupied_checkpoint_motion_guard
 from subsystems.distribution.chute_stress import (
     CHUTE_MAX_ANGLE_LIMIT_DEG,
     ChuteStressTestRunner,
@@ -56,6 +57,14 @@ def _hardwareWorkerAlive() -> bool:
 
 
 def _ensureManualMotionAllowed() -> None:
+    from subsystems.power_stress import getActivePowerStressRunner
+
+    power_runner = getActivePowerStressRunner()
+    if power_runner is not None and power_runner.isActive():
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot run a separate chute stress test while power stress is active.",
+        )
     state = shared_state.hardware_state
     if _hardwareWorkerAlive() or state in {"homing", "initializing"}:
         raise HTTPException(
@@ -72,6 +81,7 @@ def _activeRunner() -> ChuteStressTestRunner:
 
 
 @router.post("/api/chute/stress-test/start", response_model=StressTestStateResponse)
+@occupied_checkpoint_motion_guard("start a chute stress test")
 def startStressTest(payload: StartStressTestRequest) -> StressTestStateResponse:
     _ensureManualMotionAllowed()
     chute = _resolveChute()
@@ -110,6 +120,7 @@ def pauseStressTest() -> StressTestStateResponse:
 
 
 @router.post("/api/chute/stress-test/resume", response_model=StressTestStateResponse)
+@occupied_checkpoint_motion_guard("resume a chute stress test")
 def resumeStressTest() -> StressTestStateResponse:
     runner = _activeRunner()
     try:

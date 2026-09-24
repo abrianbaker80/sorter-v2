@@ -78,9 +78,13 @@ def retain_ready_history(journeys, journey, service, evidence, scene, paired_sce
                 min(proof.bgr.shape[1], x2 + pad),
                 min(proof.bgr.shape[0], y2 + pad),
             )
+            expected = proof.bgr[box[1] : box[3], box[0] : box[2]].copy()
+            correct = getattr(proof, "correct_pixels", None)
+            if correct is not None:
+                expected = correct(expected, "recognition_crop_color_ms")
             if any(
                 d is not labels[0] and _overlap(d.bbox, box) for d in proof.detections
-            ) or not np.array_equal(bgr, proof.bgr[box[1] : box[3], box[0] : box[2]]):
+            ) or not np.array_equal(bgr, expected):
                 continue
             count += journeys._retain(
                 journey,

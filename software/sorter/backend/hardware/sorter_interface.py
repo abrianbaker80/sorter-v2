@@ -1,6 +1,3 @@
-from dataclasses import dataclass
-from functools import wraps
-from threading import RLock
 """Implementation of the Sorter Interface hardware drivers"""
 
 # Copyright (c) 2026 Jose I. Romero
@@ -8,17 +5,16 @@ from threading import RLock
 # Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 
-import json
-import math
 import os
-import struct
-import threading
 import time
+import json
+from dataclasses import dataclass
+from functools import wraps
+from threading import RLock
 from typing import Protocol
-
+from .bus import MCUDevice, BaseCommandCode
+import struct
 from global_config import GlobalConfig
-
-from .bus import BaseCommandCode, MCUBusError, MCUDevice
 
 # Kill switch for the firmware StallGuard/DIAG path. When set, the backend never
 # sends ENABLE_STALL_DETECTION / GET_STALL_STATUS / CLEAR_STALL (0x1A/0x1B/0x1C)
@@ -62,6 +58,7 @@ class InterfaceCommandCode(BaseCommandCode):
     SERVO_STOP = 0x45
     SERVO_SET_ENABLED = 0x46
     SERVO_SET_DUTY_LIMITS = 0x47
+    SERVO_DIAGNOSTICS = 0x49
     SERVO_MOVE_TO_AND_RELEASE = 0x48  # payload: uint16 pos (0.1°), uint16 max_duration_ms (0 = firmware default)
 
 
@@ -469,16 +466,12 @@ class StepperMotor:
         if self.software_disabled:
             return True
         res = self._dev.send_command(InterfaceCommandCode.STEPPER_IS_STOPPED, self._channel, b'')
-        if res.payload not in (b'\x00', b'\x01'):
-            raise MCUBusError("Invalid stepper stopped response payload")
         return bool(res.payload[0])
 
     def stopped_force(self) -> bool:
         if self.software_disabled:
             return True
         res = self._dev.send_command(InterfaceCommandCode.STEPPER_IS_STOPPED, self._channel, b'')
-        if res.payload not in (b'\x00', b'\x01'):
-            raise MCUBusError("Invalid stepper stopped response payload")
         return bool(res.payload[0])
     
     @property
@@ -491,22 +484,9 @@ class StepperMotor:
     @_motion_change
     def position(self, position: int):
         """Set the current position of the stepper in microsteps."""
-        logical_position = int(position)
-        self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: set_position={logical_position} microsteps ({self.degrees_for_microsteps(logical_position):.2f}°)")
-        payload = struct.pack("<i", self._logical_to_physical_steps(logical_position))
+        self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: set_position={position} microsteps ({self.degrees_for_microsteps(position):.2f}°)")
+        payload = struct.pack("<i", self._logical_to_physical_steps(position))
         self._dev.send_command(InterfaceCommandCode.STEPPER_SET_POSITION, self._channel, payload)
-        # Keep the host-side command position coherent with the firmware's
-        # absolute counter.  Optical C4 homing establishes a new origin through
-        # this setter; leaving the old host value behind makes subsequent
-        # position-based planning disagree with the MCU immediately.
-        self._current_position_steps = logical_position
-        _controlDataRecordCommand(
-            {
-                "cmd": "set_position",
-                "stepper": self._name,
-                "steps": logical_position,
-            }
-        )
     
     @property
     def position_degrees(self) -> float:
@@ -709,8 +689,7 @@ class StepperMotor:
         """Move the stepper by a given number of microsteps and wait for completion."""
         if steps == 0:
             return True
-        if not self.move_steps(steps):
-            return False
+        self.move_steps(steps)
         start_time = time.time()
         timeout_sec = timeout_ms / 1000.0
         while time.time() - start_time < timeout_sec:
@@ -725,36 +704,12 @@ class StepperMotor:
         return self.move_steps_blocking(steps, timeout_ms=timeout_ms)
 
     def estimateMoveStepsMs(self, steps: int, max_speed: int = 5000) -> int:
-        """Estimate firmware distance-move time, including acceleration/braking."""
+        """Estimate the time (in milliseconds) it will take to move a given number of steps."""
         if steps == 0:
             return 0
-        distance = float(abs(steps))
-        speed = max(1.0, float(abs(max_speed)))
-        acceleration = float(
-            self._applied_acceleration
-            or self._default_acceleration
-            or 10000
-        )
-        if acceleration <= 0:
-            return max(1, math.ceil(distance / speed * 1000.0))
-
-        # The firmware starts each distance move at its 16-ustep/s floor, then
-        # runs a symmetric triangular or trapezoidal profile.  The old
-        # distance/max-speed estimate ignored both ramps, so short feeder pulses
-        # were re-issued while the firmware was still moving and were rejected.
-        start_speed = min(16.0, speed)
-        accel_distance = max(
-            0.0,
-            (speed * speed - start_speed * start_speed) / (2.0 * acceleration),
-        )
-        if 2.0 * accel_distance >= distance:
-            peak_speed = math.sqrt(start_speed * start_speed + acceleration * distance)
-            estimated_seconds = 2.0 * (peak_speed - start_speed) / acceleration
-        else:
-            ramp_seconds = 2.0 * (speed - start_speed) / acceleration
-            cruise_seconds = (distance - 2.0 * accel_distance) / speed
-            estimated_seconds = ramp_seconds + cruise_seconds
-        return max(1, math.ceil(estimated_seconds * 1000.0))
+        steps = abs(steps)
+        estimated_seconds = steps / max_speed
+        return max(1, int(estimated_seconds * 1000))
 
     def estimateMoveDegreesMs(self, degrees: float, max_speed: int = 5000) -> int:
         """Estimate movement time for a move specified in degrees."""
@@ -777,16 +732,15 @@ class ServoMotor:
         self._dev = device
         self._channel = channel
         self._name = f"servo_{channel}"
-        # Settled firmware profile estimate, never independent flap feedback.
+        # What we think the servo's angle is. None means "unknown" — we have
+        # not commanded a move since boot, so we cannot claim to know where it
+        # is. Set on every move_to / move_to_and_release (so it tracks open,
+        # close, jog, and homing) and surfaced anywhere the servo is reported.
         self._current_angle: int | None = None
-        self._pending_angle: int | None = None
-        self._pending_release = False
-        self._motion_error: str | None = None
-        self._motion_lock = threading.RLock()
         # No factory defaults: a PWM servo must be calibrated (its open and
         # closed angles locked in via the UI) before it is allowed to move.
-        # None means "uncalibrated" — a request without its calibrated target
-        # raises an error, so a fresh machine never drives a door to a guessed
+        # None means "uncalibrated" — open()/close()/toggle() no-op until both
+        # angles are set, so a fresh machine never drives a door to a guessed
         # angle that might be mechanically unsafe.
         self._open_angle: int | None = None
         self._closed_angle: int | None = None
@@ -813,76 +767,67 @@ class ServoMotor:
         self._dev.send_command(InterfaceCommandCode.SERVO_SET_ENABLED, self._channel, payload)
         self._enabled = bool_value
 
-    def _refresh_motion(self) -> bool:
-        """Read completion of an accepted command; stopped alone is not reached."""
-        res = self._dev.send_command(InterfaceCommandCode.SERVO_IS_STOPPED, self._channel, b'')
-        stopped = bool(res.payload[0])
-        if not stopped:
-            self._current_angle = None
-            return False
-        if self._pending_angle is not None:
-            target = self._pending_angle
-            if self.position == target * 10:
-                self._current_angle = target
-            else:
-                self._current_angle = None
-                self._motion_error = f"Servo '{self._name}' stopped before reaching {target} degrees"
-            self._pending_angle = None
-        elif self._current_angle is not None and self.position != self._current_angle * 10:
-            self._current_angle = None
-        return True
-
-    def _command_angle(self, angle: int, max_duration_ms: int | None) -> bool:
+    def move_to(self, angle: int) -> bool:
+        """Move the servo to a given angle in degrees (0-180)."""
         if not 0 <= angle <= 180:
             raise ValueError(f"Servo angle must be 0-180, got {angle}")
-        with self._motion_lock:
-            try:
-                stopped = self._refresh_motion()
-                if not stopped:
-                    # A repeated target is already in flight. An opposing target
-                    # must wait for the current move, never replace or overlap it.
-                    return self._pending_angle == angle and (
-                        max_duration_ms is None or self._pending_release
-                    )
-                if max_duration_ms is not None and self._current_angle == angle and not self._motion_error:
-                    # A prior jog may still be holding torque at this angle.
-                    # Coalescing a release request must preserve the release.
-                    if self._enabled:
-                        self.enabled = False
-                    return True
-                if not self._enabled:
-                    self.enabled = True
-                command = InterfaceCommandCode.SERVO_MOVE_TO
-                payload = struct.pack('<H', angle * 10)
-                if max_duration_ms is not None:
-                    command = InterfaceCommandCode.SERVO_MOVE_TO_AND_RELEASE
-                    payload = struct.pack('<HH', angle * 10, max_duration_ms)
-                res = self._dev.send_command(command, self._channel, payload)
-                if not bool(res.payload[0]):
-                    self._motion_error = f"Servo '{self._name}' command rejected (busy or disabled)"
-                    self._gc.logger.warning(self._motion_error)
-                    return False
-                self._pending_angle = angle
-                self._pending_release = max_duration_ms is not None
-                self._current_angle = None
-                self._motion_error = None
-                if max_duration_ms is not None:
-                    self._enabled = False  # Firmware releases after completion/deadline.
-                return True
-            except Exception as exc:
-                # A lost response may mean the command was accepted. Do not retry
-                # automatically or retain a position claim after uncertain I/O.
-                self._current_angle = None
-                self._pending_angle = None
-                self._motion_error = str(exc)
-                raise
-
-    def move_to(self, angle: int) -> bool:
-        return self._command_angle(angle, None)
+        if not self._enabled:
+            self.enabled = True
+        self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: move_to {angle}° (from {self._current_angle}°)")
+        payload = struct.pack("<H", angle * 10)  # Convert degrees to 0.1° units, 2 bytes uint16
+        res = self._dev.send_command(InterfaceCommandCode.SERVO_MOVE_TO, self._channel, payload)
+        accepted = bool(res.payload[0])
+        if not accepted:
+            # Firmware rejected the move (servo not idle or disabled). The flap
+            # physically stays put, which otherwise leaves no trace — a piece
+            # can land in the wrong layer with an apparently clean log.
+            self._gc.logger.warning(
+                f"Servo '{self._name}' ch{self._channel}: move_to {angle}° REJECTED by firmware "
+                f"(servo busy or disabled) — flap did not move"
+            )
+        self._current_angle = angle
+        return accepted
 
     def move_to_and_release(self, angle: int, max_duration_ms: int = 3500) -> bool:
-        """Keep the firmware's hard PWM-release deadline on every new move."""
-        return self._command_angle(angle, max_duration_ms if max_duration_ms > 0 else 3500)
+        """Move the servo to a given angle and *guarantee* that PWM will stop.
+
+        Two mechanisms ensure the servo will not be left driving indefinitely:
+
+        - If the firmware's motion profile reaches the target, it releases immediately.
+        - Hard safety deadline: after `max_duration_ms` the firmware will unconditionally
+          cut the PWM signal (duty=0), even if the servo is stalled, blocked, or the
+          simulated position never arrived. This is the key protection against the servo
+          pulling stall current and overheating.
+
+        A default of 3500 ms is used if not specified. This is long enough for a full
+        0-180° move under normal conditions but short enough that a problem cannot cook
+        the servo for a long time.
+        """
+        if not 0 <= angle <= 180:
+            raise ValueError(f"Servo angle must be 0-180, got {angle}")
+        if max_duration_ms <= 0:
+            max_duration_ms = 3500
+        if not self._enabled:
+            self.enabled = True
+        self._gc.logger.info(
+            f"Servo '{self._name}' ch{self._channel}: move_to_and_release {angle}° "
+            f"(from {self._current_angle}°), max_duration_ms={max_duration_ms}"
+        )
+        # Wire format: position (0.1°) + max duration in milliseconds
+        payload = struct.pack("<HH", angle * 10, max_duration_ms)
+        res = self._dev.send_command(InterfaceCommandCode.SERVO_MOVE_TO_AND_RELEASE, self._channel, payload)
+        accepted = bool(res.payload[0])
+        if not accepted:
+            # Firmware rejected the move (servo not idle or disabled). The flap
+            # physically stays put, which otherwise leaves no trace — a piece
+            # can land in the wrong layer with an apparently clean log.
+            self._gc.logger.warning(
+                f"Servo '{self._name}' ch{self._channel}: move_to_and_release {angle}° REJECTED by firmware "
+                f"(servo busy or disabled) — flap did not move"
+            )
+        self._current_angle = angle
+        self._enabled = False  # Will be disabled once the move completes (or deadline hits)
+        return accepted
 
     @property
     def position(self) -> int:
@@ -891,69 +836,63 @@ class ServoMotor:
         return struct.unpack("<H", res.payload)[0] # 2 bytes, little-endian unsigned integer
 
     def stop(self):
-        with self._motion_lock:
-            self._current_angle = None
-            self._pending_angle = None
-            self._motion_error = "Servo stopped; position is unknown"
-            self._dev.send_command(InterfaceCommandCode.SERVO_STOP, self._channel, b'')
+        """Stop the servo immediately"""
+        self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: stop (was at {self._current_angle}°)")
+        self._dev.send_command(InterfaceCommandCode.SERVO_STOP, self._channel, b'')
 
     @property
     def stopped(self) -> bool:
-        with self._motion_lock:
-            stopped = self._refresh_motion()
-            if self._motion_error:
-                raise RuntimeError(self._motion_error)
-            return stopped
+        """Check if the servo is stopped."""
+        res = self._dev.send_command(InterfaceCommandCode.SERVO_IS_STOPPED, self._channel, b'')
+        return bool(res.payload[0])
 
     @property
     def available(self) -> bool:
         return True
 
     def open(self, open_angle: int | None = None, max_duration_ms: int = 3500) -> None:
+        """Move servo to open position (with hard release deadline guarantee)."""
         target = open_angle if open_angle is not None else self._open_angle
-        self._move_door(target, max_duration_ms)
+        if target is None:
+            self._gc.logger.warning(
+                f"Servo '{self._name}' ch{self._channel}: open() ignored — servo is not calibrated"
+            )
+            return
+        self.move_to_and_release(target, max_duration_ms=max_duration_ms)
 
     def close(self, closed_angle: int | None = None, max_duration_ms: int = 3500) -> None:
+        """Move servo to closed position (with hard release deadline guarantee)."""
         target = closed_angle if closed_angle is not None else self._closed_angle
-        self._move_door(target, max_duration_ms)
-
-    def _move_door(self, target: int | None, max_duration_ms: int) -> None:
         if target is None:
-            raise RuntimeError(f"Servo '{self._name}' is not calibrated")
-        if not self.move_to_and_release(target, max_duration_ms=max_duration_ms):
-            raise RuntimeError(self._motion_error or f"Servo '{self._name}' is busy")
-
-    def command_door(self, opened: bool) -> None:
-        """Checked calibrated door command for opt-in physical bindings."""
-        target = self._open_angle if opened else self._closed_angle
-        if target is None:
-            raise RuntimeError("door is not calibrated")
-        if opened:
-            self.apply_open_speed()
-        else:
-            self.apply_close_speed()
-        self._move_door(target, 3500)
-
-    def door_at_target(self, opened: bool) -> bool:
-        # Firmware position is profile feedback, not an independent flap sensor.
-        target = self._open_angle if opened else self._closed_angle
-        return target is not None and self.stopped and self.position == target * 10
+            self._gc.logger.warning(
+                f"Servo '{self._name}' ch{self._channel}: close() ignored — servo is not calibrated"
+            )
+            return
+        self.move_to_and_release(target, max_duration_ms=max_duration_ms)
 
     def toggle(self) -> None:
+        """Toggle between open and closed."""
         if not self.is_calibrated:
-            raise RuntimeError(f"Servo '{self._name}' is not calibrated")
-        if self.isOpen():
+            self._gc.logger.warning(
+                f"Servo '{self._name}' ch{self._channel}: toggle() ignored — servo is not calibrated"
+            )
+            return
+        if self._current_angle == self._open_angle:
             self.close()
         else:
             self.open()
 
-    def isOpen(self) -> bool | None:
-        angle = self.angle
-        return angle == self._open_angle if angle is not None and self._open_angle is not None else None
+    def isOpen(self) -> bool:
+        """Check if servo is in open position."""
+        if self._open_angle is None:
+            return False
+        return self._current_angle == self._open_angle
 
-    def isClosed(self) -> bool | None:
-        angle = self.angle
-        return angle == self._closed_angle if angle is not None and self._closed_angle is not None else None
+    def isClosed(self) -> bool:
+        """Check if servo is in closed position."""
+        if self._closed_angle is None:
+            return False
+        return self._current_angle == self._closed_angle
 
     def set_speed_limits(self, min_speed: int, max_speed: int) -> None:
         """Set the minimum and maximum speed for the servo in tenths of degrees per second."""
@@ -998,6 +937,36 @@ class ServoMotor:
         self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: set_acceleration={acceleration} 0.1°/s²")
         payload = struct.pack("<H", acceleration)  # 2 bytes, little-endian unsigned integer
         self._dev.send_command(InterfaceCommandCode.SERVO_SET_ACCELERATION, self._channel, payload)
+
+    def diagnostics(self) -> dict:
+        """Read firmware state and PCA registers; never command motion."""
+        payload = self._dev.send_command(InterfaceCommandCode.SERVO_DIAGNOSTICS, self._channel, b'').payload
+        if len(payload) != 23:
+            raise RuntimeError("Servo diagnostics unavailable or unsupported by firmware")
+        version, state, release, reg_ok, position, target, duty, cached, remaining, *regs = struct.unpack("<BBBBHHHHI7B", payload)
+        states = {0: "idle", 1: "accelerating", 2: "cruising", 3: "braking", 4: "disabled"}
+        if version != 1 or state not in states or reg_ok not in (0, 1) or release not in (0, 1):
+            raise RuntimeError("Invalid servo diagnostics payload")
+        registers = None
+        if reg_ok:
+            mode1, mode2, prescale, on_lo, on_hi, off_lo, off_hi = regs
+            registers = {
+                "mode1": mode1, "mode2": mode2, "prescale": prescale,
+                "on_count": on_lo | ((on_hi & 15) << 8),
+                "off_count": off_lo | ((off_hi & 15) << 8),
+                "full_on": bool(on_hi & 16), "full_off": bool(off_hi & 16),
+                "sleep": bool(mode1 & 16), "auto_increment": bool(mode1 & 32),
+                "raw_channel_bytes": regs[3:],
+            }
+        return {
+            "channel": self._channel, "firmware_state": states[state],
+            "firmware_enabled": state != 4, "backend_enabled_cache": self._enabled,
+            "release_pending": bool(release), "release_remaining_ms": remaining,
+            "profile_position_tenths": position, "profile_target_tenths": target,
+            "requested_duty_counts": duty, "driver_cached_duty_counts": cached,
+            "register_read_ok": bool(reg_ok), "pca9685_registers": registers,
+            "physical_position_measured": False,
+        }
 
     def set_duty_limits(self, min_duty_us: int, max_duty_us: int) -> None:
         """Set the minimum and maximum duty cycle for the servo in microseconds.
@@ -1054,36 +1023,9 @@ class ServoMotor:
 
     @property
     def angle(self) -> int | None:
-        """Settled firmware estimate, or None while moving/unknown/failed."""
-        with self._motion_lock:
-            self._refresh_motion()
-            return None if self._motion_error else self._current_angle
-
-    def feedback(self) -> dict:
-        with self._motion_lock:
-            available = True
-            try:
-                stopped = self._refresh_motion()
-            except Exception as exc:
-                self._current_angle = None
-                self._motion_error = str(exc)
-                stopped = False
-                available = False
-            angle = None if self._motion_error else self._current_angle
-            return {
-                "available": available, "channel": self._channel,
-                "angle": angle, "position": angle * 10 if angle is not None else None,
-                "is_open": angle == self._open_angle if angle is not None else None,
-                "is_closed": angle == self._closed_angle if angle is not None else None,
-                "target_angle": self._pending_angle,
-                "stopped": stopped,
-                "state": "failed" if self._motion_error else (
-                    "moving" if not stopped else "settled" if angle is not None else "unknown"
-                ),
-                "error": self._motion_error, "position_source": "firmware_profile",
-                "calibrated": self.is_calibrated,
-                "open_angle": self._open_angle, "closed_angle": self._closed_angle,
-            }
+        """What we think the current servo angle is, or None if unknown
+        (no move commanded since boot)."""
+        return self._current_angle
 
     @property
     def channel(self):

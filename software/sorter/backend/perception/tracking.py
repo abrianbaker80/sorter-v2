@@ -19,6 +19,7 @@ scores + the frame + the channel) each cycle and returns ``{bbox: track_id}``.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -54,6 +55,7 @@ class TrackUpdate:
     frame_bgr: Any
     channel: Any
     timestamp: float
+    color_correct: Any = None
 
 
 class SvByteTrackTracker:
@@ -143,6 +145,7 @@ class TrackerManager:
 
     def __init__(self) -> None:
         self._key: tuple = ()
+        self.generation = uuid.uuid4().hex
         self._type: str = TrackerType.BYTETRACK.value
         self._tracker: Optional[Any] = None
         self._loaded_at: float = 0.0
@@ -153,6 +156,7 @@ class TrackerManager:
         key = (tracker_type, tuple(sorted(cfg.items())))
         if key != self._key:
             self._tracker = build_tracker(tracker_type, cfg)
+            self.generation = uuid.uuid4().hex
             self._type = tracker_type
             self._key = key
         self._loaded_at = time.monotonic()
@@ -160,6 +164,15 @@ class TrackerManager:
     def _maybe_reload(self) -> None:
         if time.monotonic() - self._loaded_at >= _CONFIG_TTL_S:
             self._reload()
+
+    def reset(self) -> str:
+        """Retire every identity from the current tracker lifetime."""
+        self._maybe_reload()
+        if self._tracker is not None:
+            self._tracker.reset()
+        self.generation = uuid.uuid4().hex
+        self._loaded_at = time.monotonic()
+        return self.generation
 
     @property
     def active_type(self) -> str:
@@ -177,6 +190,7 @@ class TrackerManager:
         frame_bgr: Any = None,
         channel: Any = None,
         timestamp: float = 0.0,
+        color_correct: Any = None,
     ) -> dict[Bbox, int]:
         self._maybe_reload()
         if self._tracker is None:
@@ -188,5 +202,6 @@ class TrackerManager:
                 frame_bgr=frame_bgr,
                 channel=channel,
                 timestamp=timestamp,
+                color_correct=color_correct,
             )
         )

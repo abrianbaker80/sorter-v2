@@ -142,18 +142,16 @@ def _linearize_rgb(
     lut_b = response_curve.get("lut_b")
     if not lut_r or not lut_g or not lut_b:
         return rgb_01
-    lut = np.stack(
-        [
-            np.array(lut_r, dtype=np.float32),
-            np.array(lut_g, dtype=np.float32),
-            np.array(lut_b, dtype=np.float32),
-        ],
-        axis=1,
-    )
+    lut = np.stack([
+        np.array(lut_r, dtype=np.float32),
+        np.array(lut_g, dtype=np.float32),
+        np.array(lut_b, dtype=np.float32),
+    ], axis=1)  # (256, 3)
+    # Convert [0,1] → uint8 indices, look up linear values
     indices = np.clip((rgb_01 * 255.0).astype(np.int32), 0, 255)
     result = np.empty_like(rgb_01)
-    for channel in range(3):
-        result[:, channel] = lut[indices[:, channel], channel]
+    for c in range(3):
+        result[:, c] = lut[indices[:, c], c]
     return result
 
 
@@ -368,10 +366,6 @@ def analyze_calibration_target(frame: np.ndarray) -> CalibrationAnalysis | None:
     fixed_target = _analyze_fixed_color_target(frame)
     if fixed_target is not None:
         return fixed_target
-
-    colorchecker_target = _analyze_colorchecker24(frame)
-    if colorchecker_target is not None:
-        return colorchecker_target
 
     detection = _detect_checkerboard(frame)
     if detection is not None:
@@ -1151,14 +1145,6 @@ def _fixed_target_matches_are_plausible(tile_match_percentages: dict[str, float]
     if best_black_match < 15.0:
         return False
     return True
-
-
-def _encoded_rgb_reference_match_percent(rgb: np.ndarray, label: str) -> float:
-    rgb_u8 = np.clip(np.rint(rgb * 255.0), 0.0, 255.0).astype(np.uint8)
-    bgr_patch = rgb_u8[::-1].reshape((1, 1, 3))
-    lab = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
-    distance = float(np.linalg.norm(lab - np.asarray(_REFERENCE_TILE_LAB[label], dtype=np.float32)))
-    return _reference_match_percent(distance)
 
 
 def _expected_region_score(sample: CellSample, label: str) -> float:

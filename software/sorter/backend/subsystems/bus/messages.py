@@ -49,6 +49,7 @@ class PieceReleaseAttempt:
     started_at_mono: float
 
 
+
 @dataclass(frozen=True)
 class PieceDelivered:
     source: StationId
@@ -56,13 +57,7 @@ class PieceDelivered:
     delivered_at_mono: float
 
 
-Message = (
-    StationGate
-    | ChuteMotion
-    | PieceRequest
-    | PieceReleaseAttempt
-    | PieceDelivered
-)
+Message = StationGate | ChuteMotion | PieceRequest | PieceReleaseAttempt | PieceDelivered
 
 
 __all__ = [

@@ -43,15 +43,12 @@ CHANNEL_REGISTRY: dict[int, tuple[str, str, str]] = {
 }
 
 
-# Zone-type vocabulary for auxiliary polygons. ``drop`` / ``exit`` / ``precise``
-# describe a foreign channel visible in this camera. ``occlusion`` describes
-# fixed hardware in front of this channel (for example the C3/C4 divider): its
-# pixels are neutralized before inference so hardware cannot become or merge
-# into a piece detection. None of these polygons changes the primary channel
-# mask or its arc section sets.
-SECONDARY_ZONE_TYPES: frozenset[str] = frozenset(
-    {"drop", "exit", "precise", "occlusion"}
-)
+# Zone-type vocabulary for secondary zones. A secondary zone is a labeled
+# polygon a camera sees that belongs to ANOTHER channel (e.g. the carousel
+# camera can see C3's exit). It is display-/tag-only: it never feeds into the
+# primary ``mask`` or the arc section sets the cascade reads, so the subsystem
+# keeps acting on its own channel exactly as before.
+SECONDARY_ZONE_TYPES: frozenset[str] = frozenset({"drop", "exit", "precise"})
 
 
 # Channels whose piece travel runs REVERSE (decreasing relative angle / negative
@@ -69,13 +66,13 @@ REVERSE_TRAVEL_CHANNELS: frozenset[int] = (
 
 @dataclass(frozen=True)
 class SecondaryZone:
-    """An auxiliary polygon annotated in THIS camera's frame.
+    """A foreign channel's zone, annotated in THIS camera's frame.
 
     ``mask`` is the filled polygon at the live capture resolution (already
     rescaled from the editor resolution, same transform as the primary
-    polygon). Foreign-zone membership is a single center-in-mask index — no
-    arc/section math. An ``occlusion`` mask is instead consumed by the inference
-    worker before the image reaches the detector."""
+    polygon). Membership is a single center-in-mask index — no arc/section
+    math, since a foreign zone projected into this camera does not share this
+    channel's rotation center."""
 
     id: str
     source_channel: int
@@ -98,13 +95,8 @@ class ChannelDef:
     # tell the two apart.
     exit_sections: frozenset[int]
     precise_sections: frozenset[int] = frozenset()
-    # Auxiliary zones this camera observes. Foreign zones are display/tag only;
-    # occlusion zones are neutralized before detector inference.
+    # Foreign zones this camera observes — display/tag only, never acted on.
     secondary_zones: tuple[SecondaryZone, ...] = ()
-    # Union of all ``occlusion`` secondary-zone masks, or None when the camera
-    # has no fixed obstruction to remove. Kept separate for the hot path so the
-    # inference worker never rebuilds this union per frame.
-    occlusion_mask: np.ndarray | None = None
     # When True the piece travels REVERSE (decreasing relative angle) toward the
     # exit, so the forward-distance arc math measures the gap to the FAR edge of
     # the exit-only arc instead of the near edge (see ``arcs._leadingExitApproach``).
@@ -239,8 +231,7 @@ def _build_secondary_zones(
         if zone_type not in SECONDARY_ZONE_TYPES:
             zone_type = "exit"
         try:
-            raw_source_channel = entry.get("source_channel")
-            source_channel = int(raw_source_channel) if raw_source_channel is not None else 0
+            source_channel = int(entry.get("source_channel"))
         except (TypeError, ValueError):
             source_channel = 0
         zone_id = str(entry.get("id") or f"sz_{source_channel}_{zone_type}_{idx}")
@@ -345,12 +336,6 @@ def buildChannelDef(
         scale_x=scale_x,
         scale_y=scale_y,
     )
-    occlusion_masks = [z.mask for z in secondary_zones if z.zone_type == "occlusion"]
-    occlusion_mask: np.ndarray | None = None
-    if occlusion_masks:
-        occlusion_mask = occlusion_masks[0].copy()
-        for extra in occlusion_masks[1:]:
-            occlusion_mask = cv2.bitwise_or(occlusion_mask, extra)
 
     return ChannelDef(
         channel_id=channel_id,
@@ -362,7 +347,6 @@ def buildChannelDef(
         exit_sections=exit_sections | precise_sections,
         precise_sections=precise_sections,
         secondary_zones=secondary_zones,
-        occlusion_mask=occlusion_mask,
         reverse=channel_id in REVERSE_TRAVEL_CHANNELS,
     )
 

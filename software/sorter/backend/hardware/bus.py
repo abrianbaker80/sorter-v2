@@ -43,8 +43,8 @@ from dataclasses import dataclass
 from threading import Lock
 
 # Set SORTER_PROFILE_BUS=1 to log how long each bus round-trip blocks the
-# caller. Every send_command takes the bus lock, writes, then blocks on
-# read_until waiting for the MCU reply — there is no queue or worker thread, so
+# caller. Every send_command takes the bus lock, writes, then waits for one
+# complete framed MCU reply — there is no queue or worker thread, so
 # the time spent here is time the calling thread (e.g. the coordinator loop) is
 # stalled. SORTER_PROFILE_BUS_MIN_MS suppresses noise from fast commands.
 _PROFILE_BUS = os.environ.get("SORTER_PROFILE_BUS") == "1"
@@ -86,6 +86,18 @@ class MCUBusError(Exception):
     pass
 
 
+class _IncompleteResponseError(MCUBusError):
+    """A response started arriving but has not reached its COBS delimiter yet."""
+
+    pass
+
+
+class _MCUNackError(MCUBusError):
+    """An application-level error response from the MCU, which is not retryable."""
+
+    pass
+
+
 class MCUBus:
     """Class for communicating with the MCU over a serial bus using a custom protocol."""
 
@@ -101,7 +113,8 @@ class MCUBus:
         self._serial = serial.Serial(port, baudrate=baudrate, timeout=timeout)
         self._lock = Lock()
         self._port = port
-        self._unresolved_addresses: set[int] = set()
+        self._timeout = timeout
+        self._rx_buffer = bytearray()
 
     @property
     def port(self) -> str:
@@ -121,26 +134,6 @@ class MCUBus:
             except Exception:
                 pass
 
-    def _read_response_frame(self, max_size: int = 254) -> bytearray:
-        """Read one COBS frame without discarding a split USB response.
-
-        ``pyserial.read_until`` applies the port timeout to the whole call. On a
-        busy host, a CDC response can therefore arrive in two scheduler-sized
-        chunks and the first call returns valid partial bytes just before the
-        terminator arrives. Give an already-started frame three additional read
-        windows; an entirely silent device still times out after the first one.
-        """
-        response = bytearray()
-        for _ in range(4):
-            chunk = self._serial.read_until(b"\x00", max_size - len(response))
-            if chunk:
-                response.extend(chunk)
-                if response[-1] == 0 or len(response) >= max_size:
-                    break
-            elif not response:
-                break
-        return response
-
     def send_command_no_response(
         self, address: int, command: int, channel: int, payload: bytes = b""
     ) -> None:
@@ -158,6 +151,105 @@ class MCUBus:
             self._serial.write(encoded_message)
             self._serial.flush()
 
+    def _read_response_frame(self) -> bytearray:
+        """Read one complete COBS frame without discarding an in-progress reply.
+
+        PySerial's ``read_until`` requests one byte per read.  On a busy process,
+        that makes a short USB CDC response vulnerable to the transaction timeout
+        between bytes.  Read the bytes that are already queued as a chunk instead,
+        and retain an incomplete frame so the same command can continue waiting for
+        its reply instead of retransmitting and flushing its tail.
+        """
+        deadline = time.monotonic() + self._timeout
+        while True:
+            delimiter = self._rx_buffer.find(b"\x00")
+            if delimiter >= 0:
+                frame = self._rx_buffer[: delimiter + 1]
+                del self._rx_buffer[: delimiter + 1]
+                # Consecutive delimiters are framing noise, not a response.
+                if len(frame) > 1:
+                    return frame
+                continue
+
+            if len(self._rx_buffer) >= 254:
+                self._rx_buffer.clear()
+                raise MCUBusError("Response exceeded max frame size before terminator")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if self._rx_buffer:
+                    raise _IncompleteResponseError(
+                        f"Partial response (missing terminator), got {len(self._rx_buffer)} bytes"
+                    )
+                raise MCUBusError("Timeout waiting for response terminator (0x00)")
+
+            # The first byte may require a blocking wait.  Once the CDC driver has
+            # queued data, consume all currently available bytes in one read.
+            read_size = min(
+                254 - len(self._rx_buffer),
+                max(1, int(self._serial.in_waiting)),
+            )
+            previous_timeout = self._serial.timeout
+            try:
+                self._serial.timeout = remaining
+                chunk = self._serial.read(read_size)
+            finally:
+                self._serial.timeout = previous_timeout
+
+            if not chunk:
+                if self._rx_buffer:
+                    raise _IncompleteResponseError(
+                        f"Partial response (missing terminator), got {len(self._rx_buffer)} bytes"
+                    )
+                raise MCUBusError("Timeout waiting for response terminator (0x00)")
+            self._rx_buffer.extend(chunk)
+
+    @staticmethod
+    def _decode_response(
+        resp_buf: bytearray,
+        expected_address: int,
+        expected_command: int,
+    ) -> Message:
+        logging.debug(f"Received: {resp_buf.hex(b' ', 1)}")
+        decoded_resp = cobs.decode(resp_buf[:-1])  # Exclude terminator
+
+        if crc32(decoded_resp[:-4]) != struct.unpack("<I", decoded_resp[-4:])[0]:
+            raise MCUBusError("CRC check failed")
+
+        response_header = MessageHeader(*struct.unpack("<BBBB", decoded_resp[:4]))
+        message = Message(
+            dev_address=response_header.address,
+            command=response_header.command,
+            channel=response_header.channel,
+            payload=bytes(decoded_resp[4:-4][: response_header.payload_length]),
+        )
+
+        if response_header.payload_length != len(message.payload):
+            raise MCUBusError(
+                f"Payload length mismatch: expected {response_header.payload_length}, got {len(message.payload)}"
+            )
+
+        if message.dev_address != expected_address:
+            raise MCUBusError(
+                f"Response address mismatch: expected {expected_address}, got {message.dev_address}"
+            )
+
+        if message.command & 0x80:
+            raise _MCUNackError(
+                f"Error response received, command: {message.command:#04x}, payload: {message.payload}"
+            )
+
+        if message.command != expected_command:
+            raise MCUBusError(
+                f"Response command mismatch: expected {expected_command:#04x}, got {message.command:#04x}"
+            )
+
+        # The firmware response header carries the device address and command,
+        # but handlers do not populate its channel field. It is therefore not a
+        # transaction-correlating value and is commonly zero for motor commands.
+
+        return message
+
     def send_command(
         self,
         address: int,
@@ -174,8 +266,9 @@ class MCUBus:
             command: The command code (0-255)
             channel: The channel number (0-255)
             payload: The command payload (0-246 bytes)
-            retries: Retained for caller compatibility. Ambiguous exchanges
-                are not resent: this protocol has no transaction identifier.
+            retries: Extra attempts on transient framing/CRC errors before
+                giving up (default 2 → 3 attempts total). Pass 0 for paths
+                where a missing device is expected (e.g. bus discovery).
 
         Returns:
             A Message object containing the response from the MCU.
@@ -209,82 +302,46 @@ class MCUBus:
         encoded_message = cobs.encode(message) + b"\x00"
         logging.debug(f"Sending: {encoded_message.hex(b' ', 1)}")
 
-        # Firmware emits one reply per request, in order. Its response channel
-        # byte is not populated, so it cannot identify the requested motor.
-        # Association comes from the sole outstanding serialized transaction,
-        # validated address/command/frame, and an unbroken response history.
-        # Keep validation AND failure bookkeeping inside the same bus lock.
+        # Keep the complete transaction under one lock.  In particular, a caller
+        # must never insert another command between a timed-out partial response
+        # and the rest of that same response.
+        attempts = max(1, retries + 1)
+        last_exc: MCUBusError | None = None
+        # A prior caller may have timed out after receiving only part of its
+        # response.  Finish that frame before putting another command on the
+        # wire; otherwise its tail can be mistaken for this transaction.
+        resend = not bool(self._rx_buffer)
         with self._lock:
-            if address in self._unresolved_addresses:
-                raise MCUBusError(
-                    f"Unresolved prior transaction for address {address}; "
-                    "completion feedback unavailable on this bus connection"
-                )
-            try:
-                # Discard already buffered input. This does not prove that a
-                # delayed reply cannot arrive, hence the unresolved guard above.
-                self._serial.reset_input_buffer()
-                written = self._serial.write(encoded_message)
-                if written != len(encoded_message):
-                    raise MCUBusError("Incomplete command write")
-                resp_buf = self._read_response_frame()
-                if not resp_buf:
-                    raise MCUBusError("Timeout waiting for response terminator (0x00)")
-                if resp_buf[-1] != 0:
-                    if len(resp_buf) >= 254:
-                        raise MCUBusError("Response exceeded max frame size before terminator")
-                    raise MCUBusError(
-                        f"Partial response (missing terminator), got {len(resp_buf)} bytes"
-                    )
-
-                logging.debug(f"Received: {resp_buf.hex(b' ', 1)}")
-                decoded_resp = cobs.decode(resp_buf[:-1])  # Exclude terminator
-
-                if not 8 <= len(decoded_resp) <= 254:
-                    raise MCUBusError("Invalid response frame length")
-
-                if crc32(decoded_resp[:-4]) != struct.unpack("<I", decoded_resp[-4:])[0]:
-                    raise MCUBusError("CRC check failed")
-
-                response_header = MessageHeader(*struct.unpack("<BBBB", decoded_resp[:4]))
-                message = Message(
-                    dev_address=response_header.address,
-                    command=response_header.command,
-                    channel=response_header.channel,
-                    payload=bytes(decoded_resp[4:-4]),
-                )
-
-                if response_header.payload_length != len(message.payload):
-                    raise MCUBusError(
-                        f"Payload length mismatch: expected {response_header.payload_length}, got {len(message.payload)}"
-                    )
-
-                if message.dev_address != address:
-                    raise MCUBusError(
-                        f"Response address mismatch: expected {address}, got {message.dev_address}"
-                    )
-
-                if message.command not in (command, command | 0x80):
-                    raise MCUBusError(
-                        f"Unexpected response command: expected {command:#x}, "
-                        f"got {message.command:#x}"
-                    )
-            except Exception as exc:
-                # A timed-out/malformed/unrelated reply may leave another reply
-                # in flight. Never issue another request to this address and
-                # mistake that reply for a newer move's status. No automatic
-                # retry, timed unlock, or input-buffer reset can prove freshness.
-                self._unresolved_addresses.add(address)
-                if isinstance(exc, MCUBusError):
+            for attempt in range(attempts):
+                try:
+                    if resend:
+                        self._serial.write(encoded_message)
+                    resp_buf = self._read_response_frame()
+                    return self._decode_response(resp_buf, address, command)
+                except _MCUNackError:
                     raise
-                raise MCUBusError(f"MCU transaction failed: {exc}") from exc
-            if message.command & 0x80:
-                # A fully validated NACK completes the exchange, but fails the
-                # operation. It leaves no outstanding reply and is not retried.
-                raise MCUBusError(
-                    f"Error response received, command: {message.command:#04x}, payload: {message.payload}"
-                )
-            return message
+                except MCUBusError as exc:
+                    last_exc = exc
+                    # Once any response byte arrives, it belongs to the command
+                    # already on the wire.  Preserve it and continue reading
+                    # rather than retransmitting a potentially non-idempotent
+                    # command or flushing its terminator.
+                    resend = not bool(self._rx_buffer)
+                    if attempt + 1 < attempts:
+                        logging.warning(
+                            "MCU bus transient error (attempt %d/%d) addr=%d cmd=%#04x ch=%d: %s",
+                            attempt + 1,
+                            attempts,
+                            address,
+                            command,
+                            channel,
+                            exc,
+                        )
+                        time.sleep(0.005 * (attempt + 1))
+                        continue
+                    raise
+        # Loop must exit via return or raise — defensive fallthrough
+        raise last_exc if last_exc is not None else MCUBusError("send_command exhausted retries with no error")
 
     @classmethod
     def enumerate_buses(cls, vid=0x2E8A, pid=0x000A) -> list[str]:

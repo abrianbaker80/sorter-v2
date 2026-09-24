@@ -47,9 +47,18 @@ class SorterController:
 
     def resume(self) -> None:
         from server import shared_state
+        from subsystems.classification_channel.occupied_checkpoint import pending_checkpoint
 
         with shared_state.hardware_lifecycle_lock, self._operation_lock:
             if shared_state.hardware_state in {"homing", "initializing", "error", "standby"}:
+                return
+            try:
+                pending = pending_checkpoint()
+            except Exception as exc:
+                self.gc.logger.error(f"Cannot resume: occupied checkpoint is unreadable: {exc}")
+                return
+            if pending is not None:
+                self.gc.logger.warning("Cannot resume normal sorting with an unresolved occupied C4 checkpoint")
                 return
             delegate = getattr(self.coordinator.classification, "_delegate", None)
             if getattr(delegate, "physical_c4_authority", False):

@@ -15,11 +15,11 @@ catches that anyway.
 from __future__ import annotations
 
 import os
+from collections import deque
 import threading
 import time
 from typing import Any, Callable, Optional
 
-import cv2
 import numpy as np
 
 from .arcs import (
@@ -34,14 +34,15 @@ from .arcs import (
     exitComForwardDeg,
     exitComForwardToCenterDeg,
     forwardClearanceToExitDeg,
-    mergeC4BboxesPreservingIntake,
+    mergeNearbyBboxes,
     orderedPieceObservations,
+    pieceClearanceToExitDeg,
 )
 from .capture import CaptureWorker, PerceptionFrame
 from .channel import ChannelDef
 from .detection import Detection
 from .runtime import InferenceRuntime
-from .state import ChannelState, LatestStateSlot, PieceObservation
+from .state import EMPTY_STATE, ChannelState, LatestStateSlot, PieceObservation
 from .tracking import TrackerManager
 
 
@@ -58,11 +59,10 @@ _IDLE_SLEEP_S = 0.005
 _NO_FRAME_SLEEP_S = 0.010
 
 
-# Gray-fill (value 230) the pixels outside the calibrated inference scope, so
-# the model sees only the primary channel plus any explicitly annotated foreign
-# zones. This is on by default: an unmasked full frame exposes rotor fins,
-# camera mounts, and other hardware that can be boxed or merged with a part.
-_POLYGON_CROP_MASK = os.environ.get("SORTER_POLYGON_CROP_MASK", "1") == "1"
+# Gray-fill (value 230) the pixels outside the channel polygon before inference,
+# so the model only sees pixels inside the channel region (matching
+# VisionManager's crop-mask path). Gated on SORTER_POLYGON_CROP_MASK.
+_POLYGON_CROP_MASK = os.environ.get("SORTER_POLYGON_CROP_MASK", "0") == "1"
 
 
 # Drop detections whose bbox covers more than this fraction of the channel mask
@@ -84,90 +84,10 @@ _BBOX_SIZE_LOG_THROTTLE_S = 5.0
 # colour region of a multi-coloured brick, or a momentary split — which the C4
 # flow otherwise reads as several pieces / a false multi-drop. Merge on-channel
 # boxes that overlap or sit within this many pixels of each other into one piece
-# BEFORE tracking, preserving raw COM intake attribution. C4 ONLY: the C2/C3 feeder logic counts raw
+# BEFORE tracking + zone attribution. C4 ONLY: the C2/C3 feeder logic counts raw
 # boxes per zone and would break if merged. Override via env for tuning.
 _CLASSIFICATION_CHANNEL_ID = 4
 _C4_BBOX_MERGE_GAP_PX = float(os.environ.get("SORTER_C4_BBOX_MERGE_GAP_PX", "14"))
-
-
-def _build_occlusion_ring(
-    occlusion_mask: np.ndarray | None,
-    channel_mask: np.ndarray,
-) -> np.ndarray | None:
-    """Precompute nearby visible pixels used to fill a fixed obstruction.
-
-    The median of this ring follows lighting/color drift while remaining robust
-    to an occasional LEGO part touching one side of the obstruction. The mask
-    itself comes from calibration and already includes the desired clearance.
-    """
-    if occlusion_mask is None or not np.any(occlusion_mask):
-        return None
-    short_side = min(int(occlusion_mask.shape[0]), int(occlusion_mask.shape[1]))
-    kernel_size = max(5, int(round(short_side * 0.015))) | 1
-    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
-    dilated = cv2.dilate(occlusion_mask, kernel, iterations=1)
-    return (dilated > 0) & (occlusion_mask == 0) & (channel_mask > 0)
-
-
-def _apply_occlusion_mask(
-    image: np.ndarray,
-    occlusion_mask: np.ndarray | None,
-    sample_ring: np.ndarray | None,
-) -> np.ndarray:
-    """Return an inference image with calibrated fixed hardware neutralized.
-
-    The camera frame is never mutated. Pixels inside the obstruction polygon are
-    replaced by the median nearby channel color, removing both the hardware and
-    the artificial high-contrast edge a constant black/white fill would create.
-    """
-    if occlusion_mask is None:
-        return image
-    active = occlusion_mask > 0
-    samples = image[sample_ring] if sample_ring is not None else image[~active]
-    if samples.size == 0:
-        samples = image[~active]
-    if samples.size == 0:
-        return image
-    fill = np.median(samples, axis=0).astype(image.dtype)
-    masked = image.copy()
-    masked[active] = fill
-    return masked
-
-
-def _build_inference_scope_mask(channel: ChannelDef) -> np.ndarray:
-    """Return the pixels the detector is allowed to inspect.
-
-    The primary channel drives the state machine. Non-occlusion secondary zones
-    remain visible so the C4 camera can observe the C3 throat. Occlusions are
-    hardware inside that scope and are neutralized separately.
-    """
-    scope = channel.mask.copy()
-    for zone in channel.secondary_zones:
-        if zone.zone_type != "occlusion":
-            scope = cv2.bitwise_or(scope, zone.mask)
-    return scope
-
-
-def _apply_inference_scope_mask(image: np.ndarray, scope_mask: np.ndarray) -> np.ndarray:
-    """Gray-fill pixels outside ``scope_mask`` using OpenCV's native copy."""
-    masked = np.full_like(image, 230)
-    cv2.copyTo(image, scope_mask, masked)
-    return masked
-
-
-def _bbox_admitted_by_channel_masks(bbox: tuple, channel: ChannelDef) -> bool:
-    """Return whether a detector box represents observable channel contents.
-
-    Occlusion polygons are calibrated fixed hardware, not observable piece area.
-    Pixel neutralization reduces detections there; this admission check enforces
-    the same geometry if the detector still boxes a mask boundary.
-    """
-    if not bboxInsideChannelMask(bbox, channel):
-        return False
-    occlusion_mask = channel.occlusion_mask
-    return not (
-        occlusion_mask is not None and bboxInsideMask(bbox, occlusion_mask)
-    )
 
 
 def _now_ms() -> float:
@@ -239,27 +159,17 @@ class InferenceWorker:
         # junk and report n_pieces=0. Computed once here (mask is immutable); the
         # hot path does a zero-copy slice, and the model resizes a smaller region
         # so inference preprocessing is cheaper, not more expensive.
-        # Crop to the union of the primary channel and observable foreign zones.
-        # A secondary zone must widen the production crop only as far as that
-        # zone extends; it must not silently switch inference back to the entire
-        # camera frame.
-        full_scope = _build_inference_scope_mask(channel_def)
-        self._crop_rect = self._compute_crop_rect(full_scope)
-        full_occlusion = channel_def.occlusion_mask
-        full_ring = _build_occlusion_ring(full_occlusion, channel_def.mask)
-        if self._crop_rect is None:
-            self._inference_scope_mask = full_scope
-            self._inference_occlusion_mask = full_occlusion
-            self._inference_occlusion_ring = full_ring
-        else:
-            cx1, cy1, cx2, cy2 = self._crop_rect
-            self._inference_scope_mask = full_scope[cy1:cy2, cx1:cx2]
-            self._inference_occlusion_mask = (
-                full_occlusion[cy1:cy2, cx1:cx2] if full_occlusion is not None else None
-            )
-            self._inference_occlusion_ring = (
-                full_ring[cy1:cy2, cx1:cx2] if full_ring is not None else None
-            )
+        self._crop_rect = self._compute_crop_rect(channel_def.mask)
+        # When this channel has secondary (foreign) zones defined, infer on the
+        # FULL frame instead of the primary-polygon crop, so pieces sitting in
+        # those zones (outside the primary crop) are actually detected and we can
+        # verify the secondary-zone filtering/tagging end to end. This is a
+        # verification aid, not the production crop: on the 4K carousel a
+        # full-frame → model-input resize shrinks small on-channel pieces toward
+        # the detectability floor (see the crop rationale above), so primary
+        # detection may degrade while foreign zones are present.
+        if channel_def.secondary_zones:
+            self._crop_rect = None
         self._conf_threshold = conf_threshold
         self._on_exit_edge = on_exit_edge
         self._runtime_stats = runtime_stats
@@ -273,6 +183,7 @@ class InferenceWorker:
             daemon=True,
             name=f"perception-{channel_def.camera_source_id}",
         )
+        self.result_timings = deque(maxlen=4096)
         self._last_frame_ts: float = -1.0
         self._was_in_exit: bool = False
         self._last_summary_log_ts: float = 0.0
@@ -320,6 +231,11 @@ class InferenceWorker:
         self._tracker = TrackerManager()
         from .journey_scenes import JourneyScenes
         self.journey_scenes = JourneyScenes(self._channel_def.channel_id)
+        # A C4 drain starts a new occupancy lifetime without replacing the
+        # camera or inference worker. Fence buffered captures and in-flight work.
+        self._generation_lock = threading.Lock()
+        self._reset_generation = 0
+        self._minimum_frame_timestamp = 0.0
 
         # On-demand full-frame debug inference. When a request bumps this
         # timestamp, the loop ALSO runs the model on the WHOLE frame (no crop)
@@ -383,6 +299,87 @@ class InferenceWorker:
         """Latest in-crop detections tagged with primary/secondary zone
         membership. GIL-atomic read — display/tag only."""
         return self._latest_detections
+
+    def reset_tracker_generation(
+        self, *, minimum_frame_timestamp: Optional[float] = None
+    ) -> str:
+        """Retire current identities and published results for a drained channel.
+
+        The capture thread keeps running. Pre-boundary frames and inference from
+        the previous worker epoch cannot publish into the drained generation.
+        """
+        with self._generation_lock:
+            self._reset_generation += 1
+            self._minimum_frame_timestamp = (
+                time.time()
+                if minimum_frame_timestamp is None
+                else float(minimum_frame_timestamp)
+            )
+            self._last_frame_ts = -1.0
+            self._was_in_exit = False
+            generation = self._tracker.reset()
+            from .journey_scenes import JourneyScenes
+            self.journey_scenes = JourneyScenes(self._channel_def.channel_id)
+            self._slot.write(EMPTY_STATE)
+            self._latest_raw = None
+            self._latest_pieces_frame = None
+            self._latest_debug = None
+            self._latest_detections = None
+            self._latest_full_frame = None
+            self.result_timings.clear()
+            return generation
+
+    def _frame_is_current_locked(self, worker_generation: int, frame_ts: float) -> bool:
+        return (
+            worker_generation == self._reset_generation
+            and frame_ts > self._minimum_frame_timestamp
+        )
+
+    def _mark_stale_frame_seen(self, frame_ts: float) -> None:
+        with self._generation_lock:
+            self._last_frame_ts = max(self._last_frame_ts, frame_ts)
+
+    def _publish_current_result(
+        self,
+        *,
+        worker_generation: int,
+        frame_ts: float,
+        state: ChannelState,
+        frame: PerceptionFrame,
+        bboxes: list,
+        pieces: tuple,
+        detections: list[Detection],
+        debug_record: dict,
+        infer_ms: float,
+        stage_timings: dict,
+    ) -> bool:
+        """Atomically publish only results from the current capture lifetime."""
+        with self._generation_lock:
+            if not self._frame_is_current_locked(worker_generation, frame_ts):
+                self._last_frame_ts = max(self._last_frame_ts, frame_ts)
+                return False
+            self._slot.write(state)
+            if self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID:
+                self.result_timings.append(
+                    (frame_ts, time.time(), time.perf_counter(), infer_ms, dict(stage_timings))
+                )
+            self._latest_raw = (list(bboxes), frame)
+            self._latest_pieces_frame = (pieces, frame)
+            self._latest_detections = detections
+            # Journal publication shares the installed generation fence. An old
+            # in-flight frame cannot repopulate a drained recognition epoch.
+            journal = self.journey_scenes
+            camera = getattr(self._capture.capture_thread, "_cap", self._capture.capture_thread)
+            raw_boxes = debug_record["raw_bboxes"]
+            if self._channel_def.channel_id == 4:
+                journal.publish_c4(frame, raw_boxes, debug_record["journey_scores"],
+                                   camera=camera, channel=self._channel_def)
+            else:
+                journal.publish(frame, raw_boxes, debug_record["journey_track_ids"],
+                                camera=camera, tracker=self._tracker._tracker)
+            self._latest_debug = debug_record
+            self._last_frame_ts = frame_ts
+            return True
 
     def _tag_detections(
         self, all_bboxes: list, track_id_by_bbox: Optional[dict] = None
@@ -610,8 +607,7 @@ class InferenceWorker:
             pass
 
     def _loop(self) -> None:
-        # Monotonic elapsed time spent waiting for the next distinct capture
-        # timestamp, separate from model execution and wall-clock frame age.
+        # Monotonic wait between distinct captured frames; separate from inference.
         input_wait_started = time.perf_counter()
         while not self._stop.is_set():
             self.iterations += 1
@@ -621,7 +617,16 @@ class InferenceWorker:
                 if frame is None:
                     self._stop.wait(_NO_FRAME_SLEEP_S)
                     continue
-                if frame.timestamp == self._last_frame_ts:
+                with self._generation_lock:
+                    worker_generation = self._reset_generation
+                    frame_is_current = self._frame_is_current_locked(
+                        worker_generation, frame.timestamp
+                    )
+                    if not frame_is_current:
+                        self._last_frame_ts = max(self._last_frame_ts, frame.timestamp)
+                    elif frame.timestamp == self._last_frame_ts:
+                        frame_is_current = False
+                if not frame_is_current:
                     self._stop.wait(_IDLE_SLEEP_S)
                     continue
                 consumed_wall_s = time.time()
@@ -633,11 +638,32 @@ class InferenceWorker:
                         f"perception.{self.source_id}.wait_for_input_ms",
                         (time.perf_counter() - input_wait_started) * 1000.0,
                     )
-                    # CameraFrame.timestamp is POSIX wall-clock seconds from
-                    # capture publication; keep that timestamp unchanged.
+                    # Frame timestamp is POSIX wall seconds at successful
+                    # VideoCapture.retrieve; consumption uses the same clock.
                     self._profiler.observeDuration(
                         f"perception.{self.source_id}.frame_age_at_consume_ms",
                         (consumed_wall_s - frame.timestamp) * 1000.0,
+                    )
+                    self._profiler.observeValue(
+                        f"perception.{self.source_id}.frame_width_px",
+                        float(frame.bgr.shape[1]),
+                    )
+                    self._profiler.observeValue(
+                        f"perception.{self.source_id}.frame_height_px",
+                        float(frame.bgr.shape[0]),
+                    )
+                    if self._crop_rect is not None:
+                        cx1, cy1, cx2, cy2 = self._crop_rect
+                        input_width, input_height = cx2 - cx1, cy2 - cy1
+                    else:
+                        input_height, input_width = frame.bgr.shape[:2]
+                    self._profiler.observeValue(
+                        f"perception.{self.source_id}.inference_input_width_px",
+                        float(input_width),
+                    )
+                    self._profiler.observeValue(
+                        f"perception.{self.source_id}.inference_input_height_px",
+                        float(input_height),
                     )
                 if not self._check_source_id(frame):
                     # Hard fail to a safe state — write a neutral slot and
@@ -645,32 +671,38 @@ class InferenceWorker:
                     # source_id will land us here loudly; correct system
                     # state stays "nothing detected" rather than "wrong
                     # detections."
-                    self._slot.write(
-                        ChannelState(
-                            ts=frame.timestamp, in_drop=False, in_exit=False, n_pieces=0
-                        )
-                    )
-                    self._last_frame_ts = frame.timestamp
+                    with self._generation_lock:
+                        if self._frame_is_current_locked(worker_generation, frame.timestamp):
+                            self._slot.write(
+                                ChannelState(
+                                    ts=frame.timestamp, in_drop=False, in_exit=False, n_pieces=0
+                                )
+                            )
+                            self._last_frame_ts = frame.timestamp
+                        else:
+                            self._last_frame_ts = max(self._last_frame_ts, frame.timestamp)
                     input_wait_started = time.perf_counter()
                     self._stop.wait(_IDLE_SLEEP_S)
                     continue
 
+                stage_timings = {}
+                color_kwargs = ({"color_correct": frame.correct_pixels, "timings": stage_timings}
+                                if frame.color_correct is not None else {})
                 cycle_t0 = _now_ms()
                 infer_t0 = cycle_t0
                 if self._crop_rect is not None:
                     cx1, cy1, cx2, cy2 = self._crop_rect
                     crop = frame.bgr[cy1:cy2, cx1:cx2]
+                    infer_kwargs = color_kwargs
                     if _POLYGON_CROP_MASK:
-                        crop = _apply_inference_scope_mask(
-                            crop, self._inference_scope_mask
+                        crop = frame.correct_pixels(crop, "detector_color_ms")
+                        infer_kwargs = {}
+                        mask_crop = self._channel_def.mask[cy1:cy2, cx1:cx2]
+                        crop = np.where(
+                            mask_crop[:, :, None] > 0, crop, np.uint8(230)
                         )
-                    crop = _apply_occlusion_mask(
-                        crop,
-                        self._inference_occlusion_mask,
-                        self._inference_occlusion_ring,
-                    )
                     scored = self._runtime.inferWithScores(
-                        crop, conf_threshold=self._conf_threshold
+                        crop, conf_threshold=self._conf_threshold, **infer_kwargs
                     )
                     bboxes = []
                     score_by_bbox: dict = {}
@@ -683,24 +715,24 @@ class InferenceWorker:
                         score_by_bbox[bb] = s
                 else:
                     full = frame.bgr
+                    infer_kwargs = color_kwargs
                     if _POLYGON_CROP_MASK:
-                        full = _apply_inference_scope_mask(
-                            full, self._inference_scope_mask
-                        )
-                    full = _apply_occlusion_mask(
-                        full,
-                        self._inference_occlusion_mask,
-                        self._inference_occlusion_ring,
-                    )
+                        full = frame.correct_pixels(full, "detector_color_ms")
+                        infer_kwargs = {}
+                        m = self._channel_def.mask
+                        full = np.where(m[:, :, None] > 0, full, np.uint8(230))
                     bboxes = []
                     score_by_bbox = {}
                     for b, s in self._runtime.inferWithScores(
-                        full, conf_threshold=self._conf_threshold
+                        full, conf_threshold=self._conf_threshold, **infer_kwargs
                     ):
                         bb = (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
                         bboxes.append(bb)
                         score_by_bbox[bb] = s
                 infer_ms = _now_ms() - infer_t0
+                if self._profiler is not None:
+                    for stage, duration in stage_timings.items():
+                        self._profiler.observeDuration(f"perception.{self.source_id}.{stage}", duration)
 
                 # Every model detection in full-frame coords, BEFORE the
                 # on-channel mask filter. Kept only for the perception-debug
@@ -710,14 +742,12 @@ class InferenceWorker:
 
                 # The crop is the polygon's bounding RECT, so its corners can
                 # still admit detections that fall OUTSIDE the polygon (e.g. the
-                # chute/exit area beside the carousel). A detector can also return
-                # a box around the boundary of a neutralized hardware occlusion.
-                # Enforce both calibrated masks here so neither kind of invalid
-                # detection can enter tracking, piece counts, or the state machine.
+                # chute/exit area beside the carousel). Drop them here using the
+                # same mask membership test attributeBboxes applies, so nothing
+                # downstream — n_pieces, the classification crop, latest_raw, the
+                # debug overlay — ever sees an off-channel detection.
                 on_mask = [
-                    b
-                    for b in bboxes
-                    if _bbox_admitted_by_channel_masks(b, self._channel_def)
+                    b for b in bboxes if bboxInsideChannelMask(b, self._channel_def)
                 ]
                 # Then drop implausibly massive detections: anything covering more
                 # than _MAX_BBOX_MASK_AREA_FRACTION of the channel mask area, OR
@@ -743,17 +773,13 @@ class InferenceWorker:
                 # over-segmentation (one piece drawn as several overlapping /
                 # adjacent boxes) into one box per physical piece, so tracking,
                 # the piece count and multi-drop detection all see one piece.
-                # Preserve the calibrated intake edge: adjacent occupied pockets
-                # may have overlapping rectangles across a diagonal divider.
                 # ``pre_merge_bboxes`` keeps the originals for the overlay;
                 # ``merged_multi`` is the boxes that were actually fused (>1
                 # source), drawn distinctly. C2/C3 are left untouched.
                 pre_merge_bboxes = list(bboxes)
                 merged_multi: list = []
                 if self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID:
-                    clusters = mergeC4BboxesPreservingIntake(
-                        bboxes, _C4_BBOX_MERGE_GAP_PX, self._channel_def
-                    )
+                    clusters = mergeNearbyBboxes(bboxes, _C4_BBOX_MERGE_GAP_PX)
                     bboxes = [merged for merged, _members in clusters]
                     merged_multi = [
                         merged for merged, members in clusters if len(members) > 1
@@ -764,13 +790,23 @@ class InferenceWorker:
                 # coasting tracks on the right cadence. Cheap for 1–2 boxes. Real
                 # detection scores drive ByteTrack's confidence-based association.
                 scores = [score_by_bbox.get(b, 1.0) for b in bboxes]
-                track_id_by_bbox = self._tracker.update(
-                    bboxes,
-                    scores,
-                    frame_bgr=frame.bgr,
-                    channel=self._channel_def,
-                    timestamp=frame.timestamp,
-                )
+                with self._generation_lock:
+                    if not self._frame_is_current_locked(worker_generation, frame.timestamp):
+                        track_id_by_bbox = None
+                        tracker_generation = None
+                    else:
+                        track_id_by_bbox = self._tracker.update(
+                            bboxes,
+                            scores,
+                            frame_bgr=frame.bgr,
+                            channel=self._channel_def,
+                            timestamp=frame.timestamp,
+                            color_correct=frame.color_correct,
+                        )
+                        tracker_generation = self._tracker.generation
+                if track_id_by_bbox is None:
+                    self._mark_stale_frame_seen(frame.timestamp)
+                    continue
 
                 attribute_t0 = _now_ms()
                 in_drop, in_exit, in_precise, in_exit_majority, n_pieces, per_bbox_counts = attributeBboxes(
@@ -794,6 +830,7 @@ class InferenceWorker:
                         zone_code=zone_code,
                         bbox=bbox,
                         sv_bt_track_id=track_id_by_bbox.get(bbox),
+                        clearance_to_exit_deg=pieceClearanceToExitDeg(bbox, self._channel_def),
                     )
                     for gap, sec, zone_code, bbox in orderedPieceObservations(
                         bboxes, self._channel_def
@@ -803,12 +840,11 @@ class InferenceWorker:
 
                 state = ChannelState(
                     ts=frame.timestamp,
+                    tracker_generation=tracker_generation,
+                    channel_center=self._channel_def.center,
                     in_drop=in_drop,
                     in_exit=in_exit,
                     n_pieces=n_pieces,
-                    n_confirmed_pieces=(
-                        len(track_id_by_bbox) if self._tracker.enabled else None
-                    ),
                     in_precise=in_precise,
                     in_exit_majority=in_exit_majority,
                     advance_clearance_deg=advance_clearance_deg,
@@ -818,37 +854,14 @@ class InferenceWorker:
                     exit_com_in_precise=exit_com_in_precise,
                     pieces=pieces,
                 )
-                result_publish_started = time.perf_counter()
-                self._slot.write(state)
-                if (
-                    self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID
-                    and self._profiler is not None
-                ):
-                    self._profiler.observeDuration(
-                        f"perception.{self.source_id}.result_publish_ms",
-                        (time.perf_counter() - result_publish_started) * 1000.0,
-                    )
-                self._latest_raw = (list(bboxes), frame)
-                self._latest_pieces_frame = (pieces, frame)
-                # Complete original inference scene, including foreign detections.
-                camera = getattr(self._capture.capture_thread, "_cap", self._capture.capture_thread)
-                if self._channel_def.channel_id == 4:
-                    self.journey_scenes.publish_c4(
-                        frame, raw_bboxes_full,
-                        [score_by_bbox.get(b, 1.0) for b in raw_bboxes_full],
-                        camera=camera, channel=self._channel_def)
-                else:
-                    self.journey_scenes.publish(
-                        frame, raw_bboxes_full, track_id_by_bbox,
-                        camera=camera, tracker=self._tracker._tracker)
-
                 # Tag ALL in-crop detections (not just on-channel) with zone
                 # provenance so the overlay can show foreign-zone hits and future
                 # consumers can ask which zone a piece is in. Off the hot read
                 # path — the slot above stays primary-only.
                 detections = self._tag_detections(raw_bboxes_full, track_id_by_bbox)
-                self._latest_detections = detections
-                self._latest_debug = {
+                debug_record = {
+                    "journey_scores": [score_by_bbox.get(b, 1.0) for b in raw_bboxes_full],
+                    "journey_track_ids": track_id_by_bbox,
                     "raw_bboxes": raw_bboxes_full,
                     "on_channel_bboxes": list(bboxes),
                     # sv_bt_track_id per on-channel bbox, index-aligned to
@@ -868,13 +881,36 @@ class InferenceWorker:
                     "infer_ms": infer_ms,
                     "conf_threshold": self._conf_threshold,
                 }
+                result_publish_started = time.perf_counter()
+                if not self._publish_current_result(
+                    worker_generation=worker_generation,
+                    frame_ts=frame.timestamp,
+                    state=state,
+                    frame=frame,
+                    bboxes=list(bboxes),
+                    pieces=pieces,
+                    detections=detections,
+                    debug_record=debug_record,
+                    infer_ms=infer_ms,
+                    stage_timings=stage_timings,
+                ):
+                    continue
+                if (
+                    self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID
+                    and self._profiler is not None
+                ):
+                    self._profiler.observeDuration(
+                        f"perception.{self.source_id}.result_publish_ms",
+                        (time.perf_counter() - result_publish_started) * 1000.0,
+                    )
                 # On-demand: also infer on the WHOLE frame so the debug page can
                 # show what the model produces without the polygon crop. Persist
                 # the result (don't null it on cycles that skip it) so the debug
                 # endpoint stays available instead of flapping. If there's no
                 # crop, production already used the full frame — reuse it.
+                full_frame_result = None
                 if self._crop_rect is None:
-                    self._latest_full_frame = {
+                    full_frame_result = {
                         "bboxes": list(raw_bboxes_full),
                         "infer_ms": infer_ms,
                         "frame": frame,
@@ -884,9 +920,9 @@ class InferenceWorker:
                     try:
                         ff_t0 = _now_ms()
                         ff = self._runtime.infer(
-                            frame.bgr, conf_threshold=self._conf_threshold
+                            frame.bgr, conf_threshold=self._conf_threshold, **color_kwargs
                         )
-                        self._latest_full_frame = {
+                        full_frame_result = {
                             "bboxes": [
                                 (int(b[0]), int(b[1]), int(b[2]), int(b[3])) for b in ff
                             ],
@@ -903,13 +939,16 @@ class InferenceWorker:
                                 )
                             except Exception:
                                 pass
-                self._maybe_emit_exit_edge(frame.timestamp, in_exit)
+                with self._generation_lock:
+                    if self._frame_is_current_locked(worker_generation, frame.timestamp):
+                        if full_frame_result is not None:
+                            self._latest_full_frame = full_frame_result
+                        self._maybe_emit_exit_edge(frame.timestamp, in_exit)
                 self._maybe_log_attribution(
                     in_exit, in_precise, in_exit_majority, per_bbox_counts
                 )
                 self._maybe_log_summary(bboxes, in_drop, in_exit, n_pieces, time.time())
                 self._maybe_log_bbox_sizes(on_mask, time.time())
-                self._last_frame_ts = frame.timestamp
                 self.inferences += 1
 
                 cycle_ms = _now_ms() - cycle_t0

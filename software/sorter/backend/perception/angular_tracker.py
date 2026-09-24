@@ -46,7 +46,7 @@ def _signed_ang_delta(frm: float, to: float) -> float:
     return ((to - frm + 180.0) % 360.0) - 180.0
 
 
-def _mean_color(frame_bgr: "np.ndarray | None", b: Bbox) -> Optional[tuple[float, float, float]]:
+def _mean_color(frame_bgr: "np.ndarray | None", b: Bbox, color_correct=None) -> Optional[tuple[float, float, float]]:
     if frame_bgr is None:
         return None
     h, w = frame_bgr.shape[:2]
@@ -57,6 +57,8 @@ def _mean_color(frame_bgr: "np.ndarray | None", b: Bbox) -> Optional[tuple[float
     crop = frame_bgr[y1:y2, x1:x2]
     if crop.size == 0:
         return None
+    if color_correct is not None:
+        crop = color_correct(crop, "tracker_color_ms")
     m = crop.reshape(-1, crop.shape[-1]).mean(axis=0) / 255.0
     return (float(m[0]), float(m[1]), float(m[2]))
 
@@ -114,7 +116,7 @@ class AngularColorTracker:
                     "score": float(s),
                     "angle": _angle_deg(cx, cy, mx, my),
                     "radius": math.hypot(mx - cx, my - cy),
-                    "color": _mean_color(upd.frame_bgr, b),
+                    "color": _mean_color(upd.frame_bgr, b, getattr(upd, "color_correct", None)),
                 }
             )
 

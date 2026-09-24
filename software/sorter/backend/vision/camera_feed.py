@@ -109,6 +109,7 @@ class CameraFeed:
         annotated: bool = True,
         exclude_categories: Optional[frozenset[str]] = None,
         color_correct: bool = True,
+        max_width: int = 0,
     ) -> Optional[CameraFrame]:
         latest = self._device.latest_frame
         if latest is None:
@@ -128,10 +129,21 @@ class CameraFeed:
                 if pinned_frame is not None:
                     frame = pinned_frame
 
+        if max_width and not annotated and getattr(frame, "color_profile", None) is not None:
+            import cv2
+            source = frame.source_bgr
+            h, w = source.shape[:2]
+            small = cv2.resize(source, (max_width, int(round(h * max_width / w))),
+                               interpolation=cv2.INTER_AREA) if w > max_width else source
+            if color_correct:
+                small = frame.correct_pixels(small, "preview_color_ms")
+            return CameraFrame(raw=small, annotated=None, results=frame.results,
+                               timestamp=frame.timestamp)
+
         with self._lock:
             raw = frame.raw if color_correct or frame.uncorrected_raw is None else frame.uncorrected_raw
             if not annotated or not self._overlays:
-                if raw is frame.raw:
+                if color_correct or frame.uncorrected_raw is None:
                     return frame
                 return CameraFrame(
                     raw=raw,
@@ -147,7 +159,7 @@ class CameraFeed:
                 if not exclude_categories or getattr(ov, "category", "") not in exclude_categories
             ]
             if not active_overlays:
-                if raw is frame.raw:
+                if color_correct or frame.uncorrected_raw is None:
                     return frame
                 return CameraFrame(
                     raw=raw,

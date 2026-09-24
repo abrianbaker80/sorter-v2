@@ -56,7 +56,9 @@ def capture_release_view(service, evidence, leader_id, *, now=None):
            max(box[0], p['bbox'][0]) < min(box[2], p['bbox'][2]) and
            max(box[1], p['bbox'][1]) < min(box[3], p['bbox'][3]) for p in material):
         return None
-    envelope['bgr'] = bgr[box[1]:box[3], box[0]:box[2]].copy()
+    crop = bgr[box[1]:box[3], box[0]:box[2]].copy()
+    correct = getattr(frame, "correct_pixels", None)
+    envelope['bgr'] = correct(crop, "recognition_crop_color_ms") if correct is not None else crop
     return envelope
 
 

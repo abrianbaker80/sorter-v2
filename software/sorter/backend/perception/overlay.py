@@ -34,7 +34,6 @@ SECONDARY_ZONE_COLORS = {
     "drop": (200, 160, 120),
     "exit": (120, 140, 220),
     "precise": (200, 120, 200),
-    "occlusion": (0, 0, 255),
 }
 SECONDARY_ZONE_DEFAULT_COLOR = (180, 180, 180)
 SECONDARY_DETECTION_COLOR = (255, 255, 0)
@@ -278,6 +277,7 @@ def renderFeedOverlay(
     max_width: int = 0,
     merged_bboxes: list | None = None,
     merged_track_ids: list | None = None,
+    color_correct=None,
 ) -> np.ndarray:
     """The clean operating-feed look: zone outlines plus the green on-channel
     boxes the machine acts on. No spec panel, no rejected (orange) boxes — that
@@ -303,6 +303,8 @@ def renderFeedOverlay(
     else:
         scale = 1.0
         img = frame_bgr.copy()
+    if color_correct is not None:
+        img = color_correct(img, "preview_color_ms")
     # Thin lines. The overlay is composited at preview width, so a 1px AA line
     # reads like the old full-res overlay did once downscaled. Zone outlines,
     # the channel outline, and the detection boxes all share this thinness.

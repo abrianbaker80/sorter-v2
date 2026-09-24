@@ -1,0 +1,4883 @@
+{
+  "base": "Exact active Slice 3 diagnostic candidate, healthy standby PID 199004",
+  "candidate_backend_files": 335,
+  "changed_production_files": 1,
+  "unchanged_installed_backend_files": 334,
+  "parent_manifest_sha256": "81a1e6ecbd1046f7c6380b8e7ff6a3add77a28f5a140b138f35ed77ea5ddba18",
+  "files": [
+    {
+      "candidate_sha256": "8a8eb041945e5cd5953d4176ba32b786c4614ff2fa33e3b1992ae215f48163fb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8a8eb041945e5cd5953d4176ba32b786c4614ff2fa33e3b1992ae215f48163fb",
+      "path": "software/sorter/backend/api_only.py",
+      "size": 558
+    },
+    {
+      "candidate_sha256": "5e722a6d9915de6d39b56762b885a5776cd4b5470bd04faaed11574739cb46b7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5e722a6d9915de6d39b56762b885a5776cd4b5470bd04faaed11574739cb46b7",
+      "path": "software/sorter/backend/basically_services.py",
+      "size": 6798
+    },
+    {
+      "candidate_sha256": "934eab247a22184a1c5039aee05a2e5a8555b0044c799356a26c4abeea1b9e02",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "934eab247a22184a1c5039aee05a2e5a8555b0044c799356a26c4abeea1b9e02",
+      "path": "software/sorter/backend/blob_manager.py",
+      "size": 12816
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/bricklink/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "0a3decff575a483b720ac659cfde03893299d9e96ed2ef9ba837b15801742a9c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0a3decff575a483b720ac659cfde03893299d9e96ed2ef9ba837b15801742a9c",
+      "path": "software/sorter/backend/bricklink/api.py",
+      "size": 797
+    },
+    {
+      "candidate_sha256": "51e07d6fdb5c159a401947e7dc9d4a09476380777386726f2cb8ab845b89684b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "51e07d6fdb5c159a401947e7dc9d4a09476380777386726f2cb8ab845b89684b",
+      "path": "software/sorter/backend/bricklink/auth.py",
+      "size": 391
+    },
+    {
+      "candidate_sha256": "4b8a8730ceab1b27750a29113bb54863adde04f2712c1dd395d37e49e2aa324f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4b8a8730ceab1b27750a29113bb54863adde04f2712c1dd395d37e49e2aa324f",
+      "path": "software/sorter/backend/bricklink/types.py",
+      "size": 417
+    },
+    {
+      "candidate_sha256": "44790f6267247c42d2d17933febaf6a0d28f9956c714a287b8cf7813d51e2066",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "44790f6267247c42d2d17933febaf6a0d28f9956c714a287b8cf7813d51e2066",
+      "path": "software/sorter/backend/bsx_inventory.py",
+      "size": 9357
+    },
+    {
+      "candidate_sha256": "7d9594f335d62a499daebf3dc592d02348e883153fabf77ca326d81b1a46c5ac",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7d9594f335d62a499daebf3dc592d02348e883153fabf77ca326d81b1a46c5ac",
+      "path": "software/sorter/backend/bundled_models/c-chamber-combined-yolo11s-320/exports/A5-yolo11s-320-ncnn/model_ncnn.py",
+      "size": 747
+    },
+    {
+      "candidate_sha256": "155f63e47fc1a4e71dc805f49f2286f93807053c2821ad9eb64a741c5e6caa75",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 384
+      },
+      "installed_sha256": "155f63e47fc1a4e71dc805f49f2286f93807053c2821ad9eb64a741c5e6caa75",
+      "path": "software/sorter/backend/c4_marker_positioning/mapping.json",
+      "size": 496
+    },
+    {
+      "candidate_sha256": "3504771b2bdd41f75901128549dd11a529f0c11cd6274ec6b339d426d3266538",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 384
+      },
+      "installed_sha256": "3504771b2bdd41f75901128549dd11a529f0c11cd6274ec6b339d426d3266538",
+      "path": "software/sorter/backend/c4_marker_positioning/reference.json",
+      "size": 401
+    },
+    {
+      "candidate_sha256": "3ea8c1227fb12900accbaa0266a7fbe7342ccb99d9a4d5095db867d794e11a3f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3ea8c1227fb12900accbaa0266a7fbe7342ccb99d9a4d5095db867d794e11a3f",
+      "path": "software/sorter/backend/c4_marker_qualification.py",
+      "size": 12173
+    },
+    {
+      "candidate_sha256": "6a0262943965af79dc66f93dc872005204baa45489a6cebcd956269582854406",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6a0262943965af79dc66f93dc872005204baa45489a6cebcd956269582854406",
+      "path": "software/sorter/backend/c4_marker_telemetry.py",
+      "size": 11564
+    },
+    {
+      "candidate_sha256": "83a6d9ab96b387c36e8f1ee283d5ff555eaab5ec4211818535f2f0e43a531602",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "83a6d9ab96b387c36e8f1ee283d5ff555eaab5ec4211818535f2f0e43a531602",
+      "path": "software/sorter/backend/channel_crop_lookup.py",
+      "size": 3506
+    },
+    {
+      "candidate_sha256": "6e38f0a86b16dd6db60fbae6e359f0437321a12fb69518eccfa57bcc4d59aa11",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6e38f0a86b16dd6db60fbae6e359f0437321a12fb69518eccfa57bcc4d59aa11",
+      "path": "software/sorter/backend/channel_crop_lookup_params.py",
+      "size": 5108
+    },
+    {
+      "candidate_sha256": "64ff8000a81b09ad1b9f56b8e096fe101ce618c10377cfa66961acc807838208",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "64ff8000a81b09ad1b9f56b8e096fe101ce618c10377cfa66961acc807838208",
+      "path": "software/sorter/backend/channel_crop_store.py",
+      "size": 14315
+    },
+    {
+      "candidate_sha256": "a279dfb356b34fb2d6ee88477801d2f9f21f973ec64ce82eedf4de5b0379d6cb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a279dfb356b34fb2d6ee88477801d2f9f21f973ec64ce82eedf4de5b0379d6cb",
+      "path": "software/sorter/backend/channel_geometry_payload.py",
+      "size": 4205
+    },
+    {
+      "candidate_sha256": "712f53d221e51f5182a3af2278944630a3f2d4c20277ae2ccba4d33b271e1b0c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "712f53d221e51f5182a3af2278944630a3f2d4c20277ae2ccba4d33b271e1b0c",
+      "path": "software/sorter/backend/classification/__init__.py",
+      "size": 58
+    },
+    {
+      "candidate_sha256": "086b712c8ef9c3e7694a550c5538322baa0fb276f610af6735be6ad90161a481",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "086b712c8ef9c3e7694a550c5538322baa0fb276f610af6735be6ad90161a481",
+      "path": "software/sorter/backend/classification/auto_recognize.py",
+      "size": 9881
+    },
+    {
+      "candidate_sha256": "73da1e0f3954f1de1142c49942fa303f7521542825ceec62abc0aa6d96cd5c57",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "73da1e0f3954f1de1142c49942fa303f7521542825ceec62abc0aa6d96cd5c57",
+      "path": "software/sorter/backend/classification/brickognize.py",
+      "size": 7890
+    },
+    {
+      "candidate_sha256": "dbe5d5fc9307bfe1c51129d9d7c42e601922d519790e585b7ed7ec30d1ebc3f5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "dbe5d5fc9307bfe1c51129d9d7c42e601922d519790e585b7ed7ec30d1ebc3f5",
+      "path": "software/sorter/backend/classification/brickognize_feedback.py",
+      "size": 1796
+    },
+    {
+      "candidate_sha256": "e2cffdc485a9d6e9aa0131e71f3a9b48225b5c9eb665f755c847a4cb0d237fe7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e2cffdc485a9d6e9aa0131e71f3a9b48225b5c9eb665f755c847a4cb0d237fe7",
+      "path": "software/sorter/backend/classification/brickognize_types.py",
+      "size": 1218
+    },
+    {
+      "candidate_sha256": "d83fb9f3446de8a02654b745d0cb0dfbd997fa8beff09f47058e52e1d7cbcdad",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d83fb9f3446de8a02654b745d0cb0dfbd997fa8beff09f47058e52e1d7cbcdad",
+      "path": "software/sorter/backend/classification/providers.py",
+      "size": 2339
+    },
+    {
+      "candidate_sha256": "2b61ad5a2ac2cd3fb5b6f2043d9a225d5352fea0483f97e1579f9090a4b63cef",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2b61ad5a2ac2cd3fb5b6f2043d9a225d5352fea0483f97e1579f9090a4b63cef",
+      "path": "software/sorter/backend/control_data_store.py",
+      "size": 15354
+    },
+    {
+      "candidate_sha256": "1c6fd00844397ca1c015955cc6ccaa5d51c47c45c74bda793597b243cc484a70",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "prerequisite",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "1a685db2f3c95016752e52d3d3472af41b2dc42b344df360e61f6dd97d77e036",
+      "hunks": 6,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1c6fd00844397ca1c015955cc6ccaa5d51c47c45c74bda793597b243cc484a70",
+      "path": "software/sorter/backend/coordinator.py",
+      "prerequisite_sha256": "9c028a144b4c6d4e8abb22fb7be03178e9f5229ab15e7bc0fdb82dd1a1bbeabb",
+      "size": 29413
+    },
+    {
+      "candidate_sha256": "2eb3bb74d45a1ce7cb95889831ec68c4c7db567e2cd44ea3441a369e057da62d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2eb3bb74d45a1ce7cb95889831ec68c4c7db567e2cd44ea3441a369e057da62d",
+      "path": "software/sorter/backend/defs/__init__.py",
+      "size": 110
+    },
+    {
+      "candidate_sha256": "bde899b6fc1aa2ae9fcdcf6b674dd8a0b59067361c2f5c9033a10b94e4050e83",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bde899b6fc1aa2ae9fcdcf6b674dd8a0b59067361c2f5c9033a10b94e4050e83",
+      "path": "software/sorter/backend/defs/channel.py",
+      "size": 752
+    },
+    {
+      "candidate_sha256": "ae194df3dec9c8bead53b5219f43204abc19da8ff546a2a7aebf4c3dfbfee1de",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ae194df3dec9c8bead53b5219f43204abc19da8ff546a2a7aebf4c3dfbfee1de",
+      "path": "software/sorter/backend/defs/consts.py",
+      "size": 2481
+    },
+    {
+      "candidate_sha256": "e7ff3a6fd5ee150345d3bfe48cb9e35e0bf549a44780f609fe4d92fa1472d706",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e7ff3a6fd5ee150345d3bfe48cb9e35e0bf549a44780f609fe4d92fa1472d706",
+      "path": "software/sorter/backend/defs/events.py",
+      "size": 10941
+    },
+    {
+      "candidate_sha256": "3bb0281db756490e66fcfaac859a9e3f67ccd9288b195d566a045809cddda371",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "5c9b68eb5bc707f69fdc112aa5f80489bd16c106402c8ac5d8285954eb47cd36",
+      "hunks": 2,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3bb0281db756490e66fcfaac859a9e3f67ccd9288b195d566a045809cddda371",
+      "path": "software/sorter/backend/defs/known_object.py",
+      "size": 15044
+    },
+    {
+      "candidate_sha256": "2f102dc359263f01dc77b9fa99b7cff09de1690b1b94581c315767ae76067509",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2f102dc359263f01dc77b9fa99b7cff09de1690b1b94581c315767ae76067509",
+      "path": "software/sorter/backend/defs/sorter_controller.py",
+      "size": 231
+    },
+    {
+      "candidate_sha256": "b8d90271d93cb7bb28162abd655c20aeea4e82f2c3ab4f9b1189c08f7c9010cd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b8d90271d93cb7bb28162abd655c20aeea4e82f2c3ab4f9b1189c08f7c9010cd",
+      "path": "software/sorter/backend/diagnostics_store.py",
+      "size": 14790
+    },
+    {
+      "candidate_sha256": "635e23beba68c322584482f2f4ccd7050ae00f72c505b601358cb7527b4ba677",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "635e23beba68c322584482f2f4ccd7050ae00f72c505b601358cb7527b4ba677",
+      "path": "software/sorter/backend/global_config.py",
+      "size": 10069
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/hardware/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "624ad240e558aac3063d1607325bd4579f2a714cd9edb448d750ce44474f4e4d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "624ad240e558aac3063d1607325bd4579f2a714cd9edb448d750ce44474f4e4d",
+      "path": "software/sorter/backend/hardware/bus.py",
+      "size": 18468
+    },
+    {
+      "candidate_sha256": "8edc8ca556612c2db73997b3a6be17c22600449fdc5a4a8265e4388372eda6ca",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8edc8ca556612c2db73997b3a6be17c22600449fdc5a4a8265e4388372eda6ca",
+      "path": "software/sorter/backend/hardware/cobs.py",
+      "size": 1108
+    },
+    {
+      "candidate_sha256": "50dd05adc73ff7d161ad5539188a510ee2b9e61e7e2497eb0352e88d9798ff11",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "50dd05adc73ff7d161ad5539188a510ee2b9e61e7e2497eb0352e88d9798ff11",
+      "path": "software/sorter/backend/hardware/firmware_flash.py",
+      "size": 7702
+    },
+    {
+      "candidate_sha256": "7f36455a0b48b7b21cd57f17889d07a657edb6a9d1f94f44f8d871d0ee3f8e1d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7f36455a0b48b7b21cd57f17889d07a657edb6a9d1f94f44f8d871d0ee3f8e1d",
+      "path": "software/sorter/backend/hardware/macos_camera_modes.py",
+      "size": 6859
+    },
+    {
+      "candidate_sha256": "08f1756198bf0826d5a4199327793a2c06c34e52cc80be7e55b816a07bca7968",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "08f1756198bf0826d5a4199327793a2c06c34e52cc80be7e55b816a07bca7968",
+      "path": "software/sorter/backend/hardware/macos_camera_registry.py",
+      "size": 4899
+    },
+    {
+      "candidate_sha256": "291934997aa4f9ab6e5e59fd2aa2b7967127dd2b9001a3009c0ee6d6d07b217a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "291934997aa4f9ab6e5e59fd2aa2b7967127dd2b9001a3009c0ee6d6d07b217a",
+      "path": "software/sorter/backend/hardware/macos_uvc_controls.py",
+      "size": 38213
+    },
+    {
+      "candidate_sha256": "7e308bc90f22fb73279e472485731d4bdd777d0b251c061d1d74ce4af4a4ec82",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "26b9db36c4a58fc81271671d7abd5e0572ad1f723c7b146df40b72690e391020",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7e308bc90f22fb73279e472485731d4bdd777d0b251c061d1d74ce4af4a4ec82",
+      "path": "software/sorter/backend/hardware/sorter_interface.py",
+      "size": 54169
+    },
+    {
+      "candidate_sha256": "7044f14b42a05157587faffb4f0b9766ed1d70dd681a458326fc560df1b2cec3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7044f14b42a05157587faffb4f0b9766ed1d70dd681a458326fc560df1b2cec3",
+      "path": "software/sorter/backend/hardware/waveshare_bus_service.py",
+      "size": 9177
+    },
+    {
+      "candidate_sha256": "76ecea0be881b7b61d2efd355415488f7451152c21ba6bd92d301faa6aca83e2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "76ecea0be881b7b61d2efd355415488f7451152c21ba6bd92d301faa6aca83e2",
+      "path": "software/sorter/backend/hardware/waveshare_servo.py",
+      "size": 21727
+    },
+    {
+      "candidate_sha256": "2a92a1b39c04df6f0bbf5759f9981736fcfdd2b76dd328e0828061a58fe3848f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2a92a1b39c04df6f0bbf5759f9981736fcfdd2b76dd328e0828061a58fe3848f",
+      "path": "software/sorter/backend/hive_metadata.py",
+      "size": 9863
+    },
+    {
+      "candidate_sha256": "5a2a652b7391e1b9698115a11a097bbd1f691502eb328538cdd7c678d96e8462",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5a2a652b7391e1b9698115a11a097bbd1f691502eb328538cdd7c678d96e8462",
+      "path": "software/sorter/backend/hive_telemetry.py",
+      "size": 13781
+    },
+    {
+      "candidate_sha256": "0b3723891e12ecaf6f04dc9805c9a283a08c658d9c039ff817125c060eb6e536",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0b3723891e12ecaf6f04dc9805c9a283a08c658d9c039ff817125c060eb6e536",
+      "path": "software/sorter/backend/incident_records.py",
+      "size": 11188
+    },
+    {
+      "candidate_sha256": "aac3850ccbbd639f24c6764cd25951d32c74f89efa21b4218ce94e7f67e4eb45",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "aac3850ccbbd639f24c6764cd25951d32c74f89efa21b4218ce94e7f67e4eb45",
+      "path": "software/sorter/backend/irl/__init__.py",
+      "size": 136
+    },
+    {
+      "candidate_sha256": "49f31ad78de10a9997424f5cfb3de6a0e310179f0d947db5a677ff799f8445aa",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "49f31ad78de10a9997424f5cfb3de6a0e310179f0d947db5a677ff799f8445aa",
+      "path": "software/sorter/backend/irl/bin_layout.py",
+      "size": 17271
+    },
+    {
+      "candidate_sha256": "cf4e4b61e4c1a73b13296927ece003ce0120be6eb35fedccddb5b5d9547ac365",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "b1f4a41d93fd7d19013643819c7e3de9c46d02b18c135b4ee2543d087e294d51",
+      "hunks": 3,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cf4e4b61e4c1a73b13296927ece003ce0120be6eb35fedccddb5b5d9547ac365",
+      "path": "software/sorter/backend/irl/config.py",
+      "size": 69930
+    },
+    {
+      "candidate_sha256": "58fd3ac0ec0eeefed98db83640f81ffa96aa812bc4701dded56363ea30ecc889",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "58fd3ac0ec0eeefed98db83640f81ffa96aa812bc4701dded56363ea30ecc889",
+      "path": "software/sorter/backend/irl/leds.py",
+      "size": 3442
+    },
+    {
+      "candidate_sha256": "618cb726e4c08222a1dca5a76faaa0392be9648a49f8a337b6079cff653ca242",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "618cb726e4c08222a1dca5a76faaa0392be9648a49f8a337b6079cff653ca242",
+      "path": "software/sorter/backend/irl/parse_user_toml.py",
+      "size": 39296
+    },
+    {
+      "candidate_sha256": "54f851ebb5604ef453efec48af6a2b48e20d2e57641297dc542965e56c5badfd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "54f851ebb5604ef453efec48af6a2b48e20d2e57641297dc542965e56c5badfd",
+      "path": "software/sorter/backend/irl/toml_migrations.py",
+      "size": 2110
+    },
+    {
+      "candidate_sha256": "b17555317cae911c7a3dc9202438b51824a6a7dc4c7cf12ba4055b789a6bb91f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b17555317cae911c7a3dc9202438b51824a6a7dc4c7cf12ba4055b789a6bb91f",
+      "path": "software/sorter/backend/lifetime_stats.py",
+      "size": 10058
+    },
+    {
+      "candidate_sha256": "e970c9055d6b2c62f24afad60191e4513f078cbf2cff2d797b186df37e244394",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e970c9055d6b2c62f24afad60191e4513f078cbf2cff2d797b186df37e244394",
+      "path": "software/sorter/backend/link_matcher.py",
+      "size": 16159
+    },
+    {
+      "candidate_sha256": "d6856517cf631210e7206ed4322de411f47e9b0aaea66533d9ecbcdae2c8e05e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d6856517cf631210e7206ed4322de411f47e9b0aaea66533d9ecbcdae2c8e05e",
+      "path": "software/sorter/backend/local_metrics.py",
+      "size": 8826
+    },
+    {
+      "candidate_sha256": "e548e72f4af618b83558b4ab4be206a0669073f02f6ca121563eefd7d5e1305b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e548e72f4af618b83558b4ab4be206a0669073f02f6ca121563eefd7d5e1305b",
+      "path": "software/sorter/backend/local_state.py",
+      "size": 115545
+    },
+    {
+      "candidate_sha256": "f2d334176f510cddf0822d57b46e9ff3c031e04fb37d5bbb70ad532e1d19116f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f2d334176f510cddf0822d57b46e9ff3c031e04fb37d5bbb70ad532e1d19116f",
+      "path": "software/sorter/backend/logger.py",
+      "size": 4343
+    },
+    {
+      "candidate_sha256": "14cda3b26d379fe77de61bc8dbb04aab411f1d2a3d90e547bfce0f59863092c9",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "14cda3b26d379fe77de61bc8dbb04aab411f1d2a3d90e547bfce0f59863092c9",
+      "path": "software/sorter/backend/machine_platform/__init__.py",
+      "size": 436
+    },
+    {
+      "candidate_sha256": "a091b17a3a4d676373cc60f87c5fb2ace7202a278145fcca39e80fc364aa2785",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a091b17a3a4d676373cc60f87c5fb2ace7202a278145fcca39e80fc364aa2785",
+      "path": "software/sorter/backend/machine_platform/control_board.py",
+      "size": 13013
+    },
+    {
+      "candidate_sha256": "108acb271e18a6cfffad5f158b8b5727c307f87e8502485b8bef1b03857ce897",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "108acb271e18a6cfffad5f158b8b5727c307f87e8502485b8bef1b03857ce897",
+      "path": "software/sorter/backend/machine_platform/machine_profile.py",
+      "size": 2852
+    },
+    {
+      "candidate_sha256": "ec4504ae0fd2cad1957a3059077618bab816264685a29c853d89d6109006ee52",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ec4504ae0fd2cad1957a3059077618bab816264685a29c853d89d6109006ee52",
+      "path": "software/sorter/backend/machine_platform/servo_controller.py",
+      "size": 12569
+    },
+    {
+      "candidate_sha256": "685387322107e7b5f29423aa7ffc0f7759ce6f9f91e61e805684e1030a6a9ed3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "685387322107e7b5f29423aa7ffc0f7759ce6f9f91e61e805684e1030a6a9ed3",
+      "path": "software/sorter/backend/machine_runtime/__init__.py",
+      "size": 629
+    },
+    {
+      "candidate_sha256": "e3397c7571de5fb08dcf68db7d62f413fc33f89461e6a3b4f88c2039b034884f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3397c7571de5fb08dcf68db7d62f413fc33f89461e6a3b4f88c2039b034884f",
+      "path": "software/sorter/backend/machine_runtime/base.py",
+      "size": 2307
+    },
+    {
+      "candidate_sha256": "9004b70047bf6c09b62c960b490ef40d2c36eb0e7385ff80bf3ca4c320aa1620",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9004b70047bf6c09b62c960b490ef40d2c36eb0e7385ff80bf3ca4c320aa1620",
+      "path": "software/sorter/backend/machine_runtime/classification_channel.py",
+      "size": 1412
+    },
+    {
+      "candidate_sha256": "58244af14679b3458f2d8294491c54fa644cc62541627c50292ec154a5bcd463",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "58244af14679b3458f2d8294491c54fa644cc62541627c50292ec154a5bcd463",
+      "path": "software/sorter/backend/machine_runtime/standard_carousel.py",
+      "size": 1273
+    },
+    {
+      "candidate_sha256": "fd6dd5aaf5596cbb81e379c2c9a8f37d78a01292d45c5df238b72c67c1e33739",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fd6dd5aaf5596cbb81e379c2c9a8f37d78a01292d45c5df238b72c67c1e33739",
+      "path": "software/sorter/backend/machine_setup.py",
+      "size": 4606
+    },
+    {
+      "candidate_sha256": "6b1ba46c5d198924b0d7ac85024a836d0385e6b6e31a2bbe8465801ed1dada5f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6b1ba46c5d198924b0d7ac85024a836d0385e6b6e31a2bbe8465801ed1dada5f",
+      "path": "software/sorter/backend/machine_specs.py",
+      "size": 12389
+    },
+    {
+      "candidate_sha256": "038d193b43555ffa8f96e0c263c6bb0860dfdf94db530496a81d5d7c37434461",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "a7fee5ab2fcdd3f4c2fa6c520becb11ce4f32367633a6bde8b52f56b51f2bfdc",
+      "hunks": 6,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "038d193b43555ffa8f96e0c263c6bb0860dfdf94db530496a81d5d7c37434461",
+      "path": "software/sorter/backend/main.py",
+      "size": 62488
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/message_queue/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "d5ab847c343aca910a4eb962edcecef07ef7dedfc291b7983338ae75b56534e5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d5ab847c343aca910a4eb962edcecef07ef7dedfc291b7983338ae75b56534e5",
+      "path": "software/sorter/backend/message_queue/handler.py",
+      "size": 1773
+    },
+    {
+      "candidate_sha256": "8cebae96a4adda4e9e753423157a96231db10b84e519c6761a00b52b20b141df",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8cebae96a4adda4e9e753423157a96231db10b84e519c6761a00b52b20b141df",
+      "path": "software/sorter/backend/migrate_json_records_to_sqlite.py",
+      "size": 2142
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/perception/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "fa069f6f012bc0fc05b19cccbb3233b40cfab490a12e98fb46f4f5dab9b6b051",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fa069f6f012bc0fc05b19cccbb3233b40cfab490a12e98fb46f4f5dab9b6b051",
+      "path": "software/sorter/backend/perception/angular_tracker.py",
+      "size": 7445
+    },
+    {
+      "candidate_sha256": "0ae4d9c810974673e4afde555e9d82bca0f016e614ac53a61c9add4364a246b7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0ae4d9c810974673e4afde555e9d82bca0f016e614ac53a61c9add4364a246b7",
+      "path": "software/sorter/backend/perception/arcs.py",
+      "size": 26973
+    },
+    {
+      "candidate_sha256": "b8ac3d1d67cae5ddd9c8bd7bf1905cff17b7a91b87947f6064c207d60cefc145",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b8ac3d1d67cae5ddd9c8bd7bf1905cff17b7a91b87947f6064c207d60cefc145",
+      "path": "software/sorter/backend/perception/capture.py",
+      "size": 3839
+    },
+    {
+      "candidate_sha256": "66e1671269737f929b8daf4db49941c2e4f1ddd6340496b98a4c2fc4e1616cac",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "66e1671269737f929b8daf4db49941c2e4f1ddd6340496b98a4c2fc4e1616cac",
+      "path": "software/sorter/backend/perception/cascade.py",
+      "size": 3316
+    },
+    {
+      "candidate_sha256": "0006e78947fda6c2e0b4f4ad3efe06a1a90db01f02f77cd493adad01eea9b80d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0006e78947fda6c2e0b4f4ad3efe06a1a90db01f02f77cd493adad01eea9b80d",
+      "path": "software/sorter/backend/perception/channel.py",
+      "size": 19277
+    },
+    {
+      "candidate_sha256": "8f77e5f897ca99ddccdd975820181473d3bd268ce8321b9773c884744e46ce92",
+      "classification": "unchanged",
+      "components": [
+        "compatibility"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 7,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8f77e5f897ca99ddccdd975820181473d3bd268ce8321b9773c884744e46ce92",
+      "path": "software/sorter/backend/perception/channel_crop_capture.py",
+      "size": 18203
+    },
+    {
+      "candidate_sha256": "3f9d0e253971eb7d0daae0da3715ff38a1024450ed75da743cfd1ae2870c6ee8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3f9d0e253971eb7d0daae0da3715ff38a1024450ed75da743cfd1ae2870c6ee8",
+      "path": "software/sorter/backend/perception/detection.py",
+      "size": 1199
+    },
+    {
+      "candidate_sha256": "9d767349840a1ba2ea2727cda2bc24854a8a940f369628b924678aca4c721fec",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "889ea59406b8efdfe40ee87b950ed1e04251286d954dcc0245cd84e1f64d8964",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9d767349840a1ba2ea2727cda2bc24854a8a940f369628b924678aca4c721fec",
+      "path": "software/sorter/backend/perception/inference.py",
+      "size": 45457
+    },
+    {
+      "candidate_sha256": "1a6c6f5a622072601aed35e6f3d16a23851775c6f1374e2fb383ec0cc0bad912",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "a16f60589c228acfd8f99c95babfeb3a3e8896138c45bcdcb3ae5e79c0eacba0",
+      "hunks": 1,
+      "installed_sha256": "1a6c6f5a622072601aed35e6f3d16a23851775c6f1374e2fb383ec0cc0bad912",
+      "path": "software/sorter/backend/perception/journey_scenes.py",
+      "size": 7801,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "513f6de8090904ab36665c6cf46ccc54db6eb4ca1abb5a7c1505884b838eceff",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "513f6de8090904ab36665c6cf46ccc54db6eb4ca1abb5a7c1505884b838eceff",
+      "path": "software/sorter/backend/perception/ordered_tracker.py",
+      "size": 12769
+    },
+    {
+      "candidate_sha256": "7203164b4e56cd8270f4ef124cb09a4b8b7b4ccf8283dc6394fbe11ef07cfc89",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7203164b4e56cd8270f4ef124cb09a4b8b7b4ccf8283dc6394fbe11ef07cfc89",
+      "path": "software/sorter/backend/perception/overlay.py",
+      "size": 13622
+    },
+    {
+      "candidate_sha256": "707285c86f23d6f01a523b31a71d2fd2be00c4a85b44f63b343fce27d888f27a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "707285c86f23d6f01a523b31a71d2fd2be00c4a85b44f63b343fce27d888f27a",
+      "path": "software/sorter/backend/perception/runtime.py",
+      "size": 5822
+    },
+    {
+      "candidate_sha256": "d753e1e776ecd26f03da2b3e3d6f5b1455142dcd4f2717124f1f3d0eb9f4a170",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "8bc585054fd50d4970f7de2c7a6900c08d935c200f3d864af0227881626c0a24",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d753e1e776ecd26f03da2b3e3d6f5b1455142dcd4f2717124f1f3d0eb9f4a170",
+      "path": "software/sorter/backend/perception/service.py",
+      "size": 43091
+    },
+    {
+      "candidate_sha256": "bb177646c68fef446306f5e4690fd7f8e81e90162011cd9b25bbdf2ac38330f3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bb177646c68fef446306f5e4690fd7f8e81e90162011cd9b25bbdf2ac38330f3",
+      "path": "software/sorter/backend/perception/state.py",
+      "size": 7526
+    },
+    {
+      "candidate_sha256": "af2ca1aa164327b0ad3687f5fe9333f2254ae7e5baf509283680b01b23b10981",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "af2ca1aa164327b0ad3687f5fe9333f2254ae7e5baf509283680b01b23b10981",
+      "path": "software/sorter/backend/perception/tracker_config.py",
+      "size": 19633
+    },
+    {
+      "candidate_sha256": "70b75ee9fc1561401a14fe38bc9311cf288dc31aa0de66e38746d7ffb8759a6f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "70b75ee9fc1561401a14fe38bc9311cf288dc31aa0de66e38746d7ffb8759a6f",
+      "path": "software/sorter/backend/perception/tracking.py",
+      "size": 7055
+    },
+    {
+      "candidate_sha256": "40de50c52ca87bc2b4c3f5c4e326d2131b4b6fbea4b3d428157f15dd029b340b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "40de50c52ca87bc2b4c3f5c4e326d2131b4b6fbea4b3d428157f15dd029b340b",
+      "path": "software/sorter/backend/perception/transition_capture.py",
+      "size": 11439
+    },
+    {
+      "candidate_sha256": "3b703f7d34b7016193a25da43609eebe352a27491614d8426fb01739cdafcccd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3b703f7d34b7016193a25da43609eebe352a27491614d8426fb01739cdafcccd",
+      "path": "software/sorter/backend/piece_image_store.py",
+      "size": 26634
+    },
+    {
+      "candidate_sha256": "fbced7a503c9c53b6fcde3fdcb8d60f53625bd04a0b05207a74c15523224585b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fbced7a503c9c53b6fcde3fdcb8d60f53625bd04a0b05207a74c15523224585b",
+      "path": "software/sorter/backend/piece_records.py",
+      "size": 41052
+    },
+    {
+      "candidate_sha256": "8ac5d86d62d96f86b1d74ba6d165aede303b0a6e0aa66308ced48617177ba886",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "50b1064d4505706ad7feeddb2796b848d145c60fbcaf887bb2475fb59cbf90ba",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8ac5d86d62d96f86b1d74ba6d165aede303b0a6e0aa66308ced48617177ba886",
+      "path": "software/sorter/backend/piece_transport.py",
+      "size": 20908
+    },
+    {
+      "candidate_sha256": "7e3a6057357c842a7a883fbfd538abedca9ff4f34ef1a396f7333ecf48f86157",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7e3a6057357c842a7a883fbfd538abedca9ff4f34ef1a396f7333ecf48f86157",
+      "path": "software/sorter/backend/probe_stepper_currents.py",
+      "size": 2087
+    },
+    {
+      "candidate_sha256": "761262816d1d2fe211d11eacc795860906601d753afe1106ded3e0b7f20d3d96",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "761262816d1d2fe211d11eacc795860906601d753afe1106ded3e0b7f20d3d96",
+      "path": "software/sorter/backend/process_guard.py",
+      "size": 12347
+    },
+    {
+      "candidate_sha256": "9f947a34b1311dcadc8ce134e265d5be61dac5a916d9b5d25151324f38ff37d7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9f947a34b1311dcadc8ce134e265d5be61dac5a916d9b5d25151324f38ff37d7",
+      "path": "software/sorter/backend/profiler.py",
+      "size": 11665
+    },
+    {
+      "candidate_sha256": "1224b79ab475795f78019df4b4096af171d7c2432d2fff0c2d3c7383e1aa1fa5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1224b79ab475795f78019df4b4096af171d7c2432d2fff0c2d3c7383e1aa1fa5",
+      "path": "software/sorter/backend/pruner.py",
+      "size": 5106
+    },
+    {
+      "candidate_sha256": "8c5e7124bc324d103ed6d27f97c1cbac5e8e4cd4353b34435343ef878a932b77",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8c5e7124bc324d103ed6d27f97c1cbac5e8e4cd4353b34435343ef878a932b77",
+      "path": "software/sorter/backend/pyproject.toml",
+      "size": 2647
+    },
+    {
+      "candidate_sha256": "898b223eb5a68d2488fda8111a3baec673057d12759e04ff540305615e19462c",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "75dd7988f48ae905e1fb15dad10d9ea829fca3f33b3e0a6827cd38bb66498ac6",
+      "hunks": 1,
+      "installed_sha256": "898b223eb5a68d2488fda8111a3baec673057d12759e04ff540305615e19462c",
+      "path": "software/sorter/backend/recognition_journey.py",
+      "size": 26696,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "f3a701ca6c6f7b2e5883e4b2c245c532771c3174878fa8be57e3f6c8caf4a051",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_sha256": "f3a701ca6c6f7b2e5883e4b2c245c532771c3174878fa8be57e3f6c8caf4a051",
+      "path": "software/sorter/backend/recognition_journey_capture.py",
+      "size": 7517,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "f130cbacc2e9cb02b19d566f68acbcd762e22ffd361b2dd886a81a014a8d0b03",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_sha256": "f130cbacc2e9cb02b19d566f68acbcd762e22ffd361b2dd886a81a014a8d0b03",
+      "path": "software/sorter/backend/recognition_views.py",
+      "size": 5157,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "c9ae0bc9e4fb7d4f2351befbcbef09ee6ffba640396af963f9fb3f1353d29dcb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c9ae0bc9e4fb7d4f2351befbcbef09ee6ffba640396af963f9fb3f1353d29dcb",
+      "path": "software/sorter/backend/run_recorder.py",
+      "size": 4121
+    },
+    {
+      "candidate_sha256": "e74b78367e3a943a58858094d9256f8c8bfbf8e9a1fd103784fb9917f8d68795",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e74b78367e3a943a58858094d9256f8c8bfbf8e9a1fd103784fb9917f8d68795",
+      "path": "software/sorter/backend/runtime_stat_records.py",
+      "size": 13392
+    },
+    {
+      "candidate_sha256": "c5ca97ffb2c6bdacb661d8b08c059866289ae3145c328d5c37ffdd37abf7d2ae",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c5ca97ffb2c6bdacb661d8b08c059866289ae3145c328d5c37ffdd37abf7d2ae",
+      "path": "software/sorter/backend/runtime_stats.py",
+      "prerequisite_sha256": "2b043ee8a76567a90913b3502809b1eaaf93a674a92afa8e7f9b2cc9ab3b92cd",
+      "size": 66469
+    },
+    {
+      "candidate_sha256": "f1b5c40fccaccc69c3ac0f95cc4c2eba8aae4dd692eede1e9fc88e9b7a459b5e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f1b5c40fccaccc69c3ac0f95cc4c2eba8aae4dd692eede1e9fc88e9b7a459b5e",
+      "path": "software/sorter/backend/runtime_variables.py",
+      "size": 1120
+    },
+    {
+      "candidate_sha256": "47c0a186040f99c55a7f8a31cbd4033457a9d810b18dc4f1a2028047320332f5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "47c0a186040f99c55a7f8a31cbd4033457a9d810b18dc4f1a2028047320332f5",
+      "path": "software/sorter/backend/sample_collector.py",
+      "size": 13167
+    },
+    {
+      "candidate_sha256": "e491fa557440d26da89241460884c2e8b4548df8d97387997ac0cfb8936c29c1",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e491fa557440d26da89241460884c2e8b4548df8d97387997ac0cfb8936c29c1",
+      "path": "software/sorter/backend/sample_ingest.py",
+      "size": 5584
+    },
+    {
+      "candidate_sha256": "cc96c5fe0081983dbf8e25142e218fc5fde08b4c4c48a3df52e4102c87527cca",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cc96c5fe0081983dbf8e25142e218fc5fde08b4c4c48a3df52e4102c87527cca",
+      "path": "software/sorter/backend/scripts/c4_sector_probe.py",
+      "size": 6566
+    },
+    {
+      "candidate_sha256": "0f8b04113f3ada1f506cb0f5dc3d772e39ec6e827fbd2fb00628a5095283418e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0f8b04113f3ada1f506cb0f5dc3d772e39ec6e827fbd2fb00628a5095283418e",
+      "path": "software/sorter/backend/scripts/c4_spoke_orientation/build_site.py",
+      "size": 6545
+    },
+    {
+      "candidate_sha256": "d27b01105065654b184e119ea0740839a3b3d7ef85f96efc9eae673f1dfce1b7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d27b01105065654b184e119ea0740839a3b3d7ef85f96efc9eae673f1dfce1b7",
+      "path": "software/sorter/backend/scripts/c4_spoke_orientation/detector.py",
+      "size": 21139
+    },
+    {
+      "candidate_sha256": "05c83380f82fff06c84aeca1a136b1ae068f9461f170c458ea435da19dac2d46",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "05c83380f82fff06c84aeca1a136b1ae068f9461f170c458ea435da19dac2d46",
+      "path": "software/sorter/backend/scripts/c4_spoke_orientation/download_hive_images.py",
+      "size": 3195
+    },
+    {
+      "candidate_sha256": "67a342583a96fd3deeaa1c4ae722c6fb109cca9602844bc25d086ec782f0b894",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "67a342583a96fd3deeaa1c4ae722c6fb109cca9602844bc25d086ec782f0b894",
+      "path": "software/sorter/backend/scripts/c4_spoke_orientation/optimize_params.py",
+      "size": 7093
+    },
+    {
+      "candidate_sha256": "787c4ea4fbb3e9b1fa45264e7c5f0b5384fb879fe3a8cd739ab8dce8eeb9a79d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "787c4ea4fbb3e9b1fa45264e7c5f0b5384fb879fe3a8cd739ab8dce8eeb9a79d",
+      "path": "software/sorter/backend/scripts/camera_coldstart_probe.py",
+      "size": 7626
+    },
+    {
+      "candidate_sha256": "9496cf9ee68ae721411fce17428e00f322a1be57d9992251c1e80237d042ba83",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9496cf9ee68ae721411fce17428e00f322a1be57d9992251c1e80237d042ba83",
+      "path": "software/sorter/backend/scripts/camera_format_probe.py",
+      "size": 8369
+    },
+    {
+      "candidate_sha256": "24a948f9fcc6e387e27dc5cfb23e59b1582ee46898f59fc5e165fdabaa426eb2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "24a948f9fcc6e387e27dc5cfb23e59b1582ee46898f59fc5e165fdabaa426eb2",
+      "path": "software/sorter/backend/scripts/motor_test.py",
+      "size": 28843
+    },
+    {
+      "candidate_sha256": "a2e905861b3ed817116d23a369ad03e607432c1f4bcbb2c067840adf5680a472",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a2e905861b3ed817116d23a369ad03e607432c1f4bcbb2c067840adf5680a472",
+      "path": "software/sorter/backend/scripts/probe_endstop_channels.py",
+      "size": 991
+    },
+    {
+      "candidate_sha256": "a038b134c41fc373ba7b17529dd3ef6553ed6ed5b41453fca825d9630a7f4494",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a038b134c41fc373ba7b17529dd3ef6553ed6ed5b41453fca825d9630a7f4494",
+      "path": "software/sorter/backend/scripts/rev04_perf_smoketest.py",
+      "size": 11352
+    },
+    {
+      "candidate_sha256": "67046ee1c4d59a73b48433d055929d6ed5b05d1eacd3a39e89486d6f797d242c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "67046ee1c4d59a73b48433d055929d6ed5b05d1eacd3a39e89486d6f797d242c",
+      "path": "software/sorter/backend/scripts/salvage_sqlite.py",
+      "size": 6007
+    },
+    {
+      "candidate_sha256": "1044489144b7a8552c4cd69069c870c4ce5c5fb115ca612bd382146108e969ee",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1044489144b7a8552c4cd69069c870c4ce5c5fb115ca612bd382146108e969ee",
+      "path": "software/sorter/backend/secrets_crypto.py",
+      "size": 4724
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/server/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "4066779afb5591d43681470c0e4507833ed09b47c13ff7747f1373714eb2b257",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4066779afb5591d43681470c0e4507833ed09b47c13ff7747f1373714eb2b257",
+      "path": "software/sorter/backend/server/api.py",
+      "size": 36135
+    },
+    {
+      "candidate_sha256": "7d5510040658740a69f050a23b69650e549829ac58169f726049899898fb841d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7d5510040658740a69f050a23b69650e549829ac58169f726049899898fb841d",
+      "path": "software/sorter/backend/server/calibration_reference.py",
+      "size": 3189
+    },
+    {
+      "candidate_sha256": "0e3d2fd89e6e9ef73961a1089545eaff2f99c939bb713bc78e5a9b54a7abe8c3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0e3d2fd89e6e9ef73961a1089545eaff2f99c939bb713bc78e5a9b54a7abe8c3",
+      "path": "software/sorter/backend/server/camera_calibration.py",
+      "size": 62891
+    },
+    {
+      "candidate_sha256": "52d07720d00d30b8d754b84b6cc534af04bbbd3ceeffa2843ca9843d1b2b12ef",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "52d07720d00d30b8d754b84b6cc534af04bbbd3ceeffa2843ca9843d1b2b12ef",
+      "path": "software/sorter/backend/server/camera_discovery.py",
+      "size": 7679
+    },
+    {
+      "candidate_sha256": "827784735432d9d206dfa0051680a132d0dad636fcee079fe4862783449809e2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "827784735432d9d206dfa0051680a132d0dad636fcee079fe4862783449809e2",
+      "path": "software/sorter/backend/server/classification_training.py",
+      "size": 37593
+    },
+    {
+      "candidate_sha256": "b00c228c3b732fef0eeb71f2b8b6631a3518f955abfe0c68a6db63626113cba9",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b00c228c3b732fef0eeb71f2b8b6631a3518f955abfe0c68a6db63626113cba9",
+      "path": "software/sorter/backend/server/colorchecker24.py",
+      "size": 22079
+    },
+    {
+      "candidate_sha256": "ddefa76e7dbfec643fbf0cddf5eb61b2b5ec88d7c1f8cb76fd0d65f60e30c105",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ddefa76e7dbfec643fbf0cddf5eb61b2b5ec88d7c1f8cb76fd0d65f60e30c105",
+      "path": "software/sorter/backend/server/condition_collector.py",
+      "size": 7033
+    },
+    {
+      "candidate_sha256": "5dc81cfe7bb27e2dd5595a101950d81b40035730d9ff65e79ece44e9c46e2874",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5dc81cfe7bb27e2dd5595a101950d81b40035730d9ff65e79ece44e9c46e2874",
+      "path": "software/sorter/backend/server/config_helpers.py",
+      "size": 5040
+    },
+    {
+      "candidate_sha256": "c327e0053617abdc311eb9130f6f17d9837d0afd9213571443a8a0f8504fa33b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c327e0053617abdc311eb9130f6f17d9837d0afd9213571443a8a0f8504fa33b",
+      "path": "software/sorter/backend/server/hive_models.py",
+      "size": 36648
+    },
+    {
+      "candidate_sha256": "a7c3e612c997e0f2f889ba893c89212ab2ecc472aed0ad84f51f711b51118259",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a7c3e612c997e0f2f889ba893c89212ab2ecc472aed0ad84f51f711b51118259",
+      "path": "software/sorter/backend/server/hive_sync.py",
+      "size": 23773
+    },
+    {
+      "candidate_sha256": "f4d49a58238446249d5eef83e278a43ca9acaa79e365d445606c1e4cd4bfff67",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f4d49a58238446249d5eef83e278a43ca9acaa79e365d445606c1e4cd4bfff67",
+      "path": "software/sorter/backend/server/hive_uploader.py",
+      "size": 30131
+    },
+    {
+      "candidate_sha256": "3c5d29be9a260d122be1298dc111f2a5df3b12fb5c3560c7af94b6daeb45f7fb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3c5d29be9a260d122be1298dc111f2a5df3b12fb5c3560c7af94b6daeb45f7fb",
+      "path": "software/sorter/backend/server/machine_naming.py",
+      "size": 4109
+    },
+    {
+      "candidate_sha256": "135bba706c8a5da4bd79c00f0b36831688eab90c3285a747b25f12d084e68bc8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "135bba706c8a5da4bd79c00f0b36831688eab90c3285a747b25f12d084e68bc8",
+      "path": "software/sorter/backend/server/occupied_exit.py",
+      "size": 3917
+    },
+    {
+      "candidate_sha256": "161ee3cc5b941ae07be9e983270756bc8f4ba0f4f97c06da96d8d7b5d2766f9d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "161ee3cc5b941ae07be9e983270756bc8f4ba0f4f97c06da96d8d7b5d2766f9d",
+      "path": "software/sorter/backend/server/perf_history.py",
+      "size": 8115
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/server/routers/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "0c8f5c955798b0ce3d65dcf5f8bb30af8d6b077f367abc6260f2f9e7dc779d5c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0c8f5c955798b0ce3d65dcf5f8bb30af8d6b077f367abc6260f2f9e7dc779d5c",
+      "path": "software/sorter/backend/server/routers/bin_layouts.py",
+      "size": 7110
+    },
+    {
+      "candidate_sha256": "0f8439ab06beb75ad4ed6aef656f61dadee7cfb7e916ebc1e7ecda499eaa2431",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0f8439ab06beb75ad4ed6aef656f61dadee7cfb7e916ebc1e7ecda499eaa2431",
+      "path": "software/sorter/backend/server/routers/bsx.py",
+      "size": 2916
+    },
+    {
+      "candidate_sha256": "ea64d71bf965b78d3a81f0af531c77eae221dff0501fde53e33c6370af6fbcdf",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ea64d71bf965b78d3a81f0af531c77eae221dff0501fde53e33c6370af6fbcdf",
+      "path": "software/sorter/backend/server/routers/cameras.py",
+      "size": 209936
+    },
+    {
+      "candidate_sha256": "c84c7c1f5dd7809d1014e1a3d7c773925c24e41955378e4b61d43e6136b678ec",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c84c7c1f5dd7809d1014e1a3d7c773925c24e41955378e4b61d43e6136b678ec",
+      "path": "software/sorter/backend/server/routers/chute_stress.py",
+      "size": 6532
+    },
+    {
+      "candidate_sha256": "4590a226e736c872431dda7de85078fc7145ac81d43534fc7d9dbbbe4ab0dfd4",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4590a226e736c872431dda7de85078fc7145ac81d43534fc7d9dbbbe4ab0dfd4",
+      "path": "software/sorter/backend/server/routers/detection.py",
+      "size": 117431
+    },
+    {
+      "candidate_sha256": "b788f78bcc46e46114db2ca890b979584f8adacb0c57c5c7f438a1b4ad0fabf3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b788f78bcc46e46114db2ca890b979584f8adacb0c57c5c7f438a1b4ad0fabf3",
+      "path": "software/sorter/backend/server/routers/firmware.py",
+      "size": 25481
+    },
+    {
+      "candidate_sha256": "4a5347ea761539c83261a8fd5682c4edda56382485594cdb953237d9317ae1ea",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4a5347ea761539c83261a8fd5682c4edda56382485594cdb953237d9317ae1ea",
+      "path": "software/sorter/backend/server/routers/hardware.py",
+      "size": 141677
+    },
+    {
+      "candidate_sha256": "e129d3ab70289497c70782c2458168048b2b46884cc3261d6f23b2675af076e2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e129d3ab70289497c70782c2458168048b2b46884cc3261d6f23b2675af076e2",
+      "path": "software/sorter/backend/server/routers/hive_models.py",
+      "size": 19585
+    },
+    {
+      "candidate_sha256": "735d6565eaf5bd95070b8222b30042bf825eb753cc8625766d54747756134a95",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "735d6565eaf5bd95070b8222b30042bf825eb753cc8625766d54747756134a95",
+      "path": "software/sorter/backend/server/routers/incidents.py",
+      "size": 2749
+    },
+    {
+      "candidate_sha256": "cbd61c9c8619523bf485dfb7049ec5ba111a52aa5b1b73521aac2ac01d7ba23f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cbd61c9c8619523bf485dfb7049ec5ba111a52aa5b1b73521aac2ac01d7ba23f",
+      "path": "software/sorter/backend/server/routers/leds.py",
+      "size": 1927
+    },
+    {
+      "candidate_sha256": "9f1cfb776adbb71b2f780a6b91994cc31c6861dffb0b89acd9988e6694b9c301",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9f1cfb776adbb71b2f780a6b91994cc31c6861dffb0b89acd9988e6694b9c301",
+      "path": "software/sorter/backend/server/routers/logs.py",
+      "size": 5274
+    },
+    {
+      "candidate_sha256": "e09e0ed471584c12169f0c86a50e9b970e185302e7cecfcd84d8b7b1a255611b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e09e0ed471584c12169f0c86a50e9b970e185302e7cecfcd84d8b7b1a255611b",
+      "path": "software/sorter/backend/server/routers/motion_safety.py",
+      "size": 3012
+    },
+    {
+      "candidate_sha256": "2805c7fc407677dbd7b8ec311b8ac1b9efd04cb440f38f6bb30bca196b96e549",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2805c7fc407677dbd7b8ec311b8ac1b9efd04cb440f38f6bb30bca196b96e549",
+      "path": "software/sorter/backend/server/routers/pieces.py",
+      "size": 22662
+    },
+    {
+      "candidate_sha256": "802f42469be48ebfc8f30cde20557b4cbace88ceaf421eba5e87a7b686913142",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "802f42469be48ebfc8f30cde20557b4cbace88ceaf421eba5e87a7b686913142",
+      "path": "software/sorter/backend/server/routers/power_stress.py",
+      "size": 5113
+    },
+    {
+      "candidate_sha256": "98fcd5333686341d70ce154b9be9ef50697ae81b314215415bd333b0200db60d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "98fcd5333686341d70ce154b9be9ef50697ae81b314215415bd333b0200db60d",
+      "path": "software/sorter/backend/server/routers/runtimes.py",
+      "size": 25767
+    },
+    {
+      "candidate_sha256": "c8a36af3c4980a6ecff533b9d3f20e10668741cfa1ba2b446159161e6ad74409",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c8a36af3c4980a6ecff533b9d3f20e10668741cfa1ba2b446159161e6ad74409",
+      "path": "software/sorter/backend/server/routers/setup.py",
+      "size": 30431
+    },
+    {
+      "candidate_sha256": "781b6b639a7145952e265d7ce6cd63e38219f4a67451cc3473baf7d061fda374",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "781b6b639a7145952e265d7ce6cd63e38219f4a67451cc3473baf7d061fda374",
+      "path": "software/sorter/backend/server/routers/sorting_profiles.py",
+      "size": 28781
+    },
+    {
+      "candidate_sha256": "130f1072cb25c9bae3d7ecc46fc2f186870aec2acc7c23852d3a89f6e351b03f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "130f1072cb25c9bae3d7ecc46fc2f186870aec2acc7c23852d3a89f6e351b03f",
+      "path": "software/sorter/backend/server/routers/status_ping.py",
+      "size": 962
+    },
+    {
+      "candidate_sha256": "407f71f5fb6a6752325892721028856610723d23d127773d8dbc90e80f9c0cdf",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "407f71f5fb6a6752325892721028856610723d23d127773d8dbc90e80f9c0cdf",
+      "path": "software/sorter/backend/server/routers/steppers.py",
+      "size": 86632
+    },
+    {
+      "candidate_sha256": "5adc4b235663e2f90d556e4878a211805aca10d58b74932cfe8b5f34c2e25dff",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5adc4b235663e2f90d556e4878a211805aca10d58b74932cfe8b5f34c2e25dff",
+      "path": "software/sorter/backend/server/routers/system.py",
+      "size": 35663
+    },
+    {
+      "candidate_sha256": "eb20498c73fa88ca68f6ee401a5cb7d442d02884f932ebf70e4b04822d12d3e4",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "eb20498c73fa88ca68f6ee401a5cb7d442d02884f932ebf70e4b04822d12d3e4",
+      "path": "software/sorter/backend/server/routers/tailscale.py",
+      "size": 5244
+    },
+    {
+      "candidate_sha256": "64ca8daf8dda52af15d53b61eb733accba7aaf1da50af9d4b485a0e3fcea692d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "64ca8daf8dda52af15d53b61eb733accba7aaf1da50af9d4b485a0e3fcea692d",
+      "path": "software/sorter/backend/server/routers/telemetry.py",
+      "size": 2443
+    },
+    {
+      "candidate_sha256": "63a465317a7871ec44b6b4f1d58261e2ef3c8b81ea37ec889b824c2a305dc22b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "63a465317a7871ec44b6b4f1d58261e2ef3c8b81ea37ec889b824c2a305dc22b",
+      "path": "software/sorter/backend/server/routers/tuning.py",
+      "size": 11120
+    },
+    {
+      "candidate_sha256": "2fd0a3bd7bd17cb0044ef155edad6b3e58cc99b66ec3eac1f3527398fd8356e4",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2fd0a3bd7bd17cb0044ef155edad6b3e58cc99b66ec3eac1f3527398fd8356e4",
+      "path": "software/sorter/backend/server/routers/versions.py",
+      "size": 9810
+    },
+    {
+      "candidate_sha256": "2c2cf1e46dc4a636f441a52c1ac9c739ca4084f20b4dc92021e178de424c38d0",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2c2cf1e46dc4a636f441a52c1ac9c739ca4084f20b4dc92021e178de424c38d0",
+      "path": "software/sorter/backend/server/routers/wifi.py",
+      "size": 6898
+    },
+    {
+      "candidate_sha256": "c2eff64f8e763e8390a6e27b36fb883a5845dd8dccfb30b8f50464d0cf9833a6",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c2eff64f8e763e8390a6e27b36fb883a5845dd8dccfb30b8f50464d0cf9833a6",
+      "path": "software/sorter/backend/server/sample_payloads.py",
+      "size": 12060
+    },
+    {
+      "candidate_sha256": "0ce33f6aa1aaaf299d9b3cc43b9865a13e9200526cb3ca89aac0312c134e98da",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0ce33f6aa1aaaf299d9b3cc43b9865a13e9200526cb3ca89aac0312c134e98da",
+      "path": "software/sorter/backend/server/security.py",
+      "size": 9118
+    },
+    {
+      "candidate_sha256": "e8d442f84680facf094d016c8bc218fe449152d3675f3b1a1b0c89309ddf87fd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e8d442f84680facf094d016c8bc218fe449152d3675f3b1a1b0c89309ddf87fd",
+      "path": "software/sorter/backend/server/set_progress_sync.py",
+      "size": 6310
+    },
+    {
+      "candidate_sha256": "37b7dd272b1b2206e66ff4c2c2590408f51d1c36659685650e1a9bc2f6be4ebd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "37b7dd272b1b2206e66ff4c2c2590408f51d1c36659685650e1a9bc2f6be4ebd",
+      "path": "software/sorter/backend/server/shared_state.py",
+      "size": 17674
+    },
+    {
+      "candidate_sha256": "dd342fb3e3fa8ccfdfb26a8ebab0372812fe94ac683e1e306bce6e417fc4d97e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "dd342fb3e3fa8ccfdfb26a8ebab0372812fe94ac683e1e306bce6e417fc4d97e",
+      "path": "software/sorter/backend/server/waveshare_inventory.py",
+      "size": 16300
+    },
+    {
+      "candidate_sha256": "8431eeef846ca79f96c79045821adb889828519fa80a135b38ba1710c3a01b7b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8431eeef846ca79f96c79045821adb889828519fa80a135b38ba1710c3a01b7b",
+      "path": "software/sorter/backend/set_progress.py",
+      "size": 10381
+    },
+    {
+      "candidate_sha256": "872e983111d22d3c427c6533f105b4839e916ca2f35b2eef064a89b0f05781f6",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "45430637b340c64a12fd2263ddd453fc972cbffef80a6b047137e4b3a6ef10ac",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "872e983111d22d3c427c6533f105b4839e916ca2f35b2eef064a89b0f05781f6",
+      "path": "software/sorter/backend/sorter_controller.py",
+      "size": 4348
+    },
+    {
+      "candidate_sha256": "fbadda913ca5df56368f91a9bda8407e95171df97939ef99bbd9ff4878ef4838",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fbadda913ca5df56368f91a9bda8407e95171df97939ef99bbd9ff4878ef4838",
+      "path": "software/sorter/backend/sorting_profile.py",
+      "size": 6157
+    },
+    {
+      "candidate_sha256": "90211af3fec1fd0a9574756bcd7d2f1a4df842c064a280f762c10ea578924f8f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "90211af3fec1fd0a9574756bcd7d2f1a4df842c064a280f762c10ea578924f8f",
+      "path": "software/sorter/backend/states/__init__.py",
+      "size": 76
+    },
+    {
+      "candidate_sha256": "486d1097831b6f60fcefc008b9633a74e1fc402c61cedcbbf4de5e27e797e9b4",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "486d1097831b6f60fcefc008b9633a74e1fc402c61cedcbbf4de5e27e797e9b4",
+      "path": "software/sorter/backend/states/base_state.py",
+      "size": 1292
+    },
+    {
+      "candidate_sha256": "c20768b45d525a4802e9487faae7e4d4ecbe71002e907cfe0c9420be9faa47cb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c20768b45d525a4802e9487faae7e4d4ecbe71002e907cfe0c9420be9faa47cb",
+      "path": "software/sorter/backend/states/istate_machine.py",
+      "size": 307
+    },
+    {
+      "candidate_sha256": "c1d36cc78ac634a1bf41679c4137d6a553ee2657bf65e0efa27d24aa1abaa188",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c1d36cc78ac634a1bf41679c4137d6a553ee2657bf65e0efa27d24aa1abaa188",
+      "path": "software/sorter/backend/status_ping.py",
+      "size": 11848
+    },
+    {
+      "candidate_sha256": "24338f1368c0fa039419d60762ebd7f56f9e6a45b782d48037aaf4c47771c418",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "24338f1368c0fa039419d60762ebd7f56f9e6a45b782d48037aaf4c47771c418",
+      "path": "software/sorter/backend/stepper_stall_monitor.py",
+      "size": 10075
+    },
+    {
+      "candidate_sha256": "db219b86f767f9e63a78c94c9d1330301a1c86e453ab3bd1ff06a53cb55f08a3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "db219b86f767f9e63a78c94c9d1330301a1c86e453ab3bd1ff06a53cb55f08a3",
+      "path": "software/sorter/backend/stepper_telemetry.py",
+      "size": 13312
+    },
+    {
+      "candidate_sha256": "350312144469a3cd4ed6cbda8f916ac40c0b90b60191970fd052b78969ed88fc",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "350312144469a3cd4ed6cbda8f916ac40c0b90b60191970fd052b78969ed88fc",
+      "path": "software/sorter/backend/subsystems/__init__.py",
+      "size": 448
+    },
+    {
+      "candidate_sha256": "ca08098c2dabc17c5d3dd1af92a034a930d6d038bbab24113c2ab2d568a35244",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ca08098c2dabc17c5d3dd1af92a034a930d6d038bbab24113c2ab2d568a35244",
+      "path": "software/sorter/backend/subsystems/base_subsystem.py",
+      "size": 251
+    },
+    {
+      "candidate_sha256": "5a6e155e38c77bda0ce736e73bb29365697dc48381250693af64463b4eb13369",
+      "classification": "unchanged",
+      "components": [
+        "compatibility"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 2,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5a6e155e38c77bda0ce736e73bb29365697dc48381250693af64463b4eb13369",
+      "path": "software/sorter/backend/subsystems/bus/__init__.py",
+      "size": 378
+    },
+    {
+      "candidate_sha256": "ab265fc7d6c5c17a7e315f27aedfbf3558d6e13a01251506047f90f4ed3dd75c",
+      "classification": "unchanged",
+      "components": [
+        "compatibility"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ab265fc7d6c5c17a7e315f27aedfbf3558d6e13a01251506047f90f4ed3dd75c",
+      "path": "software/sorter/backend/subsystems/bus/messages.py",
+      "size": 1453
+    },
+    {
+      "candidate_sha256": "b11afc55a9575ed5bf9f82c4f869c8b8e7ba8cdd88d7bff1d8f9e42557671ada",
+      "classification": "unchanged",
+      "components": [
+        "compatibility"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b11afc55a9575ed5bf9f82c4f869c8b8e7ba8cdd88d7bff1d8f9e42557671ada",
+      "path": "software/sorter/backend/subsystems/bus/tick_bus.py",
+      "size": 5045
+    },
+    {
+      "candidate_sha256": "2200013d8fb0c309d45ed25efd661583ae73423b85e9708dd4b75db7873c9ac8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2200013d8fb0c309d45ed25efd661583ae73423b85e9708dd4b75db7873c9ac8",
+      "path": "software/sorter/backend/subsystems/channels/__init__.py",
+      "size": 337
+    },
+    {
+      "candidate_sha256": "963a570565483861598771c964c2254a444c7a70e7fda5a27ab9e8d52ebda744",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "963a570565483861598771c964c2254a444c7a70e7fda5a27ab9e8d52ebda744",
+      "path": "software/sorter/backend/subsystems/channels/base.py",
+      "size": 10016
+    },
+    {
+      "candidate_sha256": "df10e46f36ad0698a6bedbaaf3a250217c38d0cec569191ed7262d7db8532a1c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "df10e46f36ad0698a6bedbaaf3a250217c38d0cec569191ed7262d7db8532a1c",
+      "path": "software/sorter/backend/subsystems/channels/c1_bulk.py",
+      "size": 4413
+    },
+    {
+      "candidate_sha256": "d7380adff4797be51e90cdb23d6124adbe94f9870518ed5adb8ec4616cff11ed",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d7380adff4797be51e90cdb23d6124adbe94f9870518ed5adb8ec4616cff11ed",
+      "path": "software/sorter/backend/subsystems/channels/c2_separation.py",
+      "size": 11881
+    },
+    {
+      "candidate_sha256": "7f89b56a132184b883c355c80435cce4e56dbf99aa21c80190af635b012ebaf8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7f89b56a132184b883c355c80435cce4e56dbf99aa21c80190af635b012ebaf8",
+      "path": "software/sorter/backend/subsystems/channels/c3_precise.py",
+      "size": 5596
+    },
+    {
+      "candidate_sha256": "5d3351fb8e0c5b055c78c3cc76f06cdc8797ff0f7ecbe5d779afe366e21c45c6",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5d3351fb8e0c5b055c78c3cc76f06cdc8797ff0f7ecbe5d779afe366e21c45c6",
+      "path": "software/sorter/backend/subsystems/classification/__init__.py",
+      "size": 167
+    },
+    {
+      "candidate_sha256": "c7540c7293a5a1b1ba7f5508d70d82e5958a77e8c267fe268ee31adc11318199",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c7540c7293a5a1b1ba7f5508d70d82e5958a77e8c267fe268ee31adc11318199",
+      "path": "software/sorter/backend/subsystems/classification/bbox_projection.py",
+      "size": 1145
+    },
+    {
+      "candidate_sha256": "a07d7e9ea239fa771a2be5a79a204391a555ceda44cf70b9e80de0613995bfce",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a07d7e9ea239fa771a2be5a79a204391a555ceda44cf70b9e80de0613995bfce",
+      "path": "software/sorter/backend/subsystems/classification/carousel.py",
+      "size": 4441
+    },
+    {
+      "candidate_sha256": "7b7eb853982481b1307265902677bbab100184d5224ca95a2f9f9a0e19942f69",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7b7eb853982481b1307265902677bbab100184d5224ca95a2f9f9a0e19942f69",
+      "path": "software/sorter/backend/subsystems/classification/carousel_hardware.py",
+      "size": 2229
+    },
+    {
+      "candidate_sha256": "bbff37738ebbfa8eefc35f52472dd95aa37185542a0d1ea6b26161e0d0baa3fa",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bbff37738ebbfa8eefc35f52472dd95aa37185542a0d1ea6b26161e0d0baa3fa",
+      "path": "software/sorter/backend/subsystems/classification/detecting.py",
+      "size": 6189
+    },
+    {
+      "candidate_sha256": "fa2079670919b47650d9337caae63f9a40e9f9858d2f2c8eeb97371cd4d48553",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fa2079670919b47650d9337caae63f9a40e9f9858d2f2c8eeb97371cd4d48553",
+      "path": "software/sorter/backend/subsystems/classification/idle.py",
+      "size": 701
+    },
+    {
+      "candidate_sha256": "f657da76a70c80a84261a3161f0b9de7b7cee2958caaab119a323d4d033fcc9b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f657da76a70c80a84261a3161f0b9de7b7cee2958caaab119a323d4d033fcc9b",
+      "path": "software/sorter/backend/subsystems/classification/rotating.py",
+      "size": 6244
+    },
+    {
+      "candidate_sha256": "ed0ddaa92a88703ed5bf36162de31dc549ac1e5b38ca0fd526b39a4bbcd1e4ea",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ed0ddaa92a88703ed5bf36162de31dc549ac1e5b38ca0fd526b39a4bbcd1e4ea",
+      "path": "software/sorter/backend/subsystems/classification/snapping.py",
+      "size": 17209
+    },
+    {
+      "candidate_sha256": "f443bb8c661e170285cb06a66de42051a700bb65d22cfd3bcfcb76d484296cec",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f443bb8c661e170285cb06a66de42051a700bb65d22cfd3bcfcb76d484296cec",
+      "path": "software/sorter/backend/subsystems/classification/state_machine.py",
+      "size": 2952
+    },
+    {
+      "candidate_sha256": "19b768f2a929804b3393ab5b36bca62de5cde65f372f806bd14a0fd01634fda0",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "19b768f2a929804b3393ab5b36bca62de5cde65f372f806bd14a0fd01634fda0",
+      "path": "software/sorter/backend/subsystems/classification/states.py",
+      "size": 155
+    },
+    {
+      "candidate_sha256": "5cdc8fc58db05865fbc734ec21968b3f20c47d4504610ef7ef42b459f331e781",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5cdc8fc58db05865fbc734ec21968b3f20c47d4504610ef7ef42b459f331e781",
+      "path": "software/sorter/backend/subsystems/classification_channel/__init__.py",
+      "size": 805
+    },
+    {
+      "candidate_sha256": "29c9291a15a6e503c7de0d641fdd58bb8e6e0e1494cce1d662d7faaf2d7172ee",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "29c9291a15a6e503c7de0d641fdd58bb8e6e0e1494cce1d662d7faaf2d7172ee",
+      "path": "software/sorter/backend/subsystems/classification_channel/blue_markers.py",
+      "size": 5284
+    },
+    {
+      "candidate_sha256": "4cb6986abfb0419dccbc74670af194dc981bb591fc2d1b69b95bb8c9a5d92c0f",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "011d249f61709bbfd0989bb52face6621d62de7bdbe7ddf3a31295b44b23df04",
+      "hunks": 1,
+      "installed_sha256": "4cb6986abfb0419dccbc74670af194dc981bb591fc2d1b69b95bb8c9a5d92c0f",
+      "path": "software/sorter/backend/subsystems/classification_channel/c3_transfer_recovery.py",
+      "size": 19321,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "0c5efd00868a126e4d6496604ff08865bc56983b4f83b43bd23dcc2ba11e7ae3",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "00361b5b066ff1570d1746c455b0cf5c21876e5be1ad7157923f837aee64ad63",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0c5efd00868a126e4d6496604ff08865bc56983b4f83b43bd23dcc2ba11e7ae3",
+      "path": "software/sorter/backend/subsystems/classification_channel/complete_drain.py",
+      "size": 6521
+    },
+    {
+      "candidate_sha256": "8d7629669107e0ed3619986b5220ec7f06be17dd14c67117a6c57ab39d80db41",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8d7629669107e0ed3619986b5220ec7f06be17dd14c67117a6c57ab39d80db41",
+      "path": "software/sorter/backend/subsystems/classification_channel/crop_quality.py",
+      "size": 8503
+    },
+    {
+      "candidate_sha256": "d3f18711dba8e9a92c5d30c4e5ed67ed845b98d2daadfb66e7014aebeec837cf",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "d3f18711dba8e9a92c5d30c4e5ed67ed845b98d2daadfb66e7014aebeec837cf",
+      "hunks": 1,
+      "installed_sha256": "d3f18711dba8e9a92c5d30c4e5ed67ed845b98d2daadfb66e7014aebeec837cf",
+      "path": "software/sorter/backend/subsystems/classification_channel/demand_planner.py",
+      "size": 9531,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "a71a213a0a179cf7999712fc0cc6e96caf05d1b04a90c5141a5ee86fdb7df5df",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a71a213a0a179cf7999712fc0cc6e96caf05d1b04a90c5141a5ee86fdb7df5df",
+      "path": "software/sorter/backend/subsystems/classification_channel/detecting.py",
+      "size": 6473
+    },
+    {
+      "candidate_sha256": "a3ed7c63d893f45827499f95d0046afb29706e952051b0f13fe8290c912bd6e0",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a3ed7c63d893f45827499f95d0046afb29706e952051b0f13fe8290c912bd6e0",
+      "path": "software/sorter/backend/subsystems/classification_channel/ejecting.py",
+      "size": 15662
+    },
+    {
+      "candidate_sha256": "39e7c43222bedd398b7f609b85136bd69980237533c95654ad02e5bfe70d0679",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "39e7c43222bedd398b7f609b85136bd69980237533c95654ad02e5bfe70d0679",
+      "path": "software/sorter/backend/subsystems/classification_channel/five_sector_platter.py",
+      "size": 21772
+    },
+    {
+      "candidate_sha256": "946ef2160b2ca4dee33e850c1ecdbd8f479f4d7e735bfbec222355879d03f38a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "946ef2160b2ca4dee33e850c1ecdbd8f479f4d7e735bfbec222355879d03f38a",
+      "path": "software/sorter/backend/subsystems/classification_channel/idle.py",
+      "size": 14476
+    },
+    {
+      "candidate_sha256": "42c07b6871e559cf84e0d4ba6fbc1b025dfd6bd5d884f88b200d04e19063bfaf",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "42c07b6871e559cf84e0d4ba6fbc1b025dfd6bd5d884f88b200d04e19063bfaf",
+      "path": "software/sorter/backend/subsystems/classification_channel/incidents.py",
+      "size": 13832
+    },
+    {
+      "candidate_sha256": "b42f1027714d6424ca200991392b4576f686b1ff77841084176df1310b53329d",
+      "classification": "deadline evaluation order",
+      "components": [],
+      "detail": "Confirm a fresh stable target observation retrieved within the existing operation deadline before evaluating post-validation timeout.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "62ad17f81fb52ba59eac9f57d0b8fb1cdae7082ef2809dea82a85c31f45105d1",
+      "path": "software/sorter/backend/subsystems/classification_channel/marker_positioner.py",
+      "size": 33963
+    },
+    {
+      "candidate_sha256": "2b3daeb1226270891d0a150856e34b11951e19d850483301619414399b7d9f34",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2b3daeb1226270891d0a150856e34b11951e19d850483301619414399b7d9f34",
+      "path": "software/sorter/backend/subsystems/classification_channel/marker_source.py",
+      "size": 6560
+    },
+    {
+      "candidate_sha256": "8d5a53a516123d7cd48b9efbd36dcb774ed9170ebee897a89cefbb4471a269b3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8d5a53a516123d7cd48b9efbd36dcb774ed9170ebee897a89cefbb4471a269b3",
+      "path": "software/sorter/backend/subsystems/classification_channel/occupied_checkpoint.py",
+      "size": 15433
+    },
+    {
+      "candidate_sha256": "eff594323c7fcfa316bf60b795d9a0b0e6c1d0d379723e140214860d282c41db",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "eff594323c7fcfa316bf60b795d9a0b0e6c1d0d379723e140214860d282c41db",
+      "path": "software/sorter/backend/subsystems/classification_channel/occupied_recovery.py",
+      "size": 26211
+    },
+    {
+      "candidate_sha256": "b7ea95e33cf1705e6e4dd33321779c2e429ab68ac6ec49acc818006dbe6fd285",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "aeb895539b25c11a35dfad86fb3ea6697443348a585b8c683930f8434977afa2",
+      "hunks": 1,
+      "installed_sha256": "b7ea95e33cf1705e6e4dd33321779c2e429ab68ac6ec49acc818006dbe6fd285",
+      "path": "software/sorter/backend/subsystems/classification_channel/physical_controller.py",
+      "size": 29821,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "040ab07d2a60c7ac58a99aae0d2b923873f6635c7ef6aca45e1d46dce63a1c92",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "4339f8de7bc6f11f45d13a0d094d8226511f40c1f034ff4179e6afc8967e19ef",
+      "hunks": 1,
+      "installed_sha256": "040ab07d2a60c7ac58a99aae0d2b923873f6635c7ef6aca45e1d46dce63a1c92",
+      "path": "software/sorter/backend/subsystems/classification_channel/physical_distribution.py",
+      "size": 6101,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "829ae951faeba6307a3a94d062482c66e508581779f48acdf02619e488a03c2c",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "829ae951faeba6307a3a94d062482c66e508581779f48acdf02619e488a03c2c",
+      "hunks": 1,
+      "installed_sha256": "829ae951faeba6307a3a94d062482c66e508581779f48acdf02619e488a03c2c",
+      "path": "software/sorter/backend/subsystems/classification_channel/physical_fifo.py",
+      "size": 10155,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "470320e54a82492f47e0b71334e51ef3ce8cca670e6eea992102770244f0ca92",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "378d725338cc882359b9552055e8052d14b2ea6a7ea2489e237b226d26b8c569",
+      "hunks": 1,
+      "installed_sha256": "470320e54a82492f47e0b71334e51ef3ce8cca670e6eea992102770244f0ca92",
+      "path": "software/sorter/backend/subsystems/classification_channel/physical_handoff.py",
+      "size": 5201,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "d6e9d3883c1a3f31b7c09f4549c29ba24d81dd6cd22d0e8da31b87f018549eb7",
+      "classification": "unchanged",
+      "components": [
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "6c69cc095b45757ddb67bb7c4e5b6042e34cd6e284951c4369052176be4b09e8",
+      "hunks": 1,
+      "installed_sha256": "d6e9d3883c1a3f31b7c09f4549c29ba24d81dd6cd22d0e8da31b87f018549eb7",
+      "path": "software/sorter/backend/subsystems/classification_channel/physical_runtime.py",
+      "size": 11412,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "6aa3a6bf114b07137f48c7b1b145bfef3df75777a28f60217cc57dc01c4fd792",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6aa3a6bf114b07137f48c7b1b145bfef3df75777a28f60217cc57dc01c4fd792",
+      "path": "software/sorter/backend/subsystems/classification_channel/recognition.py",
+      "size": 28084
+    },
+    {
+      "candidate_sha256": "b8b02fa6001e3515a86ec15fdbd0f48eddddbd5a55e4ff1405a7617ace8a8a4f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b8b02fa6001e3515a86ec15fdbd0f48eddddbd5a55e4ff1405a7617ace8a8a4f",
+      "path": "software/sorter/backend/subsystems/classification_channel/running.py",
+      "size": 90937
+    },
+    {
+      "candidate_sha256": "bebd8fd74c85c7f81b4563ae551d0c0fe3f7bbbae17b1b8252ab0683abff4e11",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bebd8fd74c85c7f81b4563ae551d0c0fe3f7bbbae17b1b8252ab0683abff4e11",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/__init__.py",
+      "size": 1233
+    },
+    {
+      "candidate_sha256": "b671d7d27ceb459c8c0a36685ad3ddfc0c658c0fd4741906809ca933a73b1a26",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b671d7d27ceb459c8c0a36685ad3ddfc0c658c0fd4741906809ca933a73b1a26",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/awaiting_distribution.py",
+      "size": 6318
+    },
+    {
+      "candidate_sha256": "e9471d1ef99cb0af10db350921f4780fbef91e96a186a3b9c481cdf9f36c278b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e9471d1ef99cb0af10db350921f4780fbef91e96a186a3b9c481cdf9f36c278b",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/base.py",
+      "size": 46733
+    },
+    {
+      "candidate_sha256": "f0335520ae1aaa11e059676527d0a7b10e459780c9485f8b4077b064b2145306",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f0335520ae1aaa11e059676527d0a7b10e459780c9485f8b4077b064b2145306",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/capturing.py",
+      "size": 8480
+    },
+    {
+      "candidate_sha256": "716cd0eeac42271de1ec8d0e37151ec4d07f98b507d1ef16d21e9a7468fd6fb5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "716cd0eeac42271de1ec8d0e37151ec4d07f98b507d1ef16d21e9a7468fd6fb5",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/channel_clear.py",
+      "size": 5896
+    },
+    {
+      "candidate_sha256": "d0b33844877757b33e75fdcdf931d7eec3de864a186230dea569024466121ef2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d0b33844877757b33e75fdcdf931d7eec3de864a186230dea569024466121ef2",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/constants.py",
+      "size": 1309
+    },
+    {
+      "candidate_sha256": "225fe83daba0f7e93262f99dd1c8cf30eae0744f5ffa1bf4fcc38f2a83fd6c99",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "225fe83daba0f7e93262f99dd1c8cf30eae0744f5ffa1bf4fcc38f2a83fd6c99",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/context.py",
+      "size": 5971
+    },
+    {
+      "candidate_sha256": "a009f993a7bf403b18de958cf7c2977b42e734eb0353aab0ef5ddf6dbf0dae6f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a009f993a7bf403b18de958cf7c2977b42e734eb0353aab0ef5ddf6dbf0dae6f",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/discharging.py",
+      "size": 13322
+    },
+    {
+      "candidate_sha256": "1ee2e25a1f40b81f2fb78d038b7ad2769993375f6013e8a4dc760bcfdae9770c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1ee2e25a1f40b81f2fb78d038b7ad2769993375f6013e8a4dc760bcfdae9770c",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/idle.py",
+      "size": 7832
+    },
+    {
+      "candidate_sha256": "ef844c2e876ce33438d7a29ab8df248cea8dafea0f49c952c2f8fee69113d7d5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ef844c2e876ce33438d7a29ab8df248cea8dafea0f49c952c2f8fee69113d7d5",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/moving_to_precise.py",
+      "size": 4202
+    },
+    {
+      "candidate_sha256": "d8e10c780af87e86148445fd7733dea2bb38ecbca8ab54649fbbd3afe6f268e2",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d8e10c780af87e86148445fd7733dea2bb38ecbca8ab54649fbbd3afe6f268e2",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/rev01_config.py",
+      "size": 17117
+    },
+    {
+      "candidate_sha256": "7ae294c78723c9e9a277ccba015b0332ad6bbeed42a643d55d0ff22c2316902d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7ae294c78723c9e9a277ccba015b0332ad6bbeed42a643d55d0ff22c2316902d",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/spoke_home.py",
+      "size": 23511
+    },
+    {
+      "candidate_sha256": "ba2b3015ef25131d8203b5c8934ac8259be107e428ca05090c2d2b78f37c15f1",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ba2b3015ef25131d8203b5c8934ac8259be107e428ca05090c2d2b78f37c15f1",
+      "path": "software/sorter/backend/subsystems/classification_channel/simple_state_machine_rev01/vision.py",
+      "size": 6944
+    },
+    {
+      "candidate_sha256": "7767c764f5569d30976c9af11af12a969be27426144d02eca8b3699e1016ccbc",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "7767c764f5569d30976c9af11af12a969be27426144d02eca8b3699e1016ccbc",
+      "path": "software/sorter/backend/subsystems/classification_channel/snapping.py",
+      "size": 3008
+    },
+    {
+      "candidate_sha256": "76574cf966b68f0806209fd784575f75a62fea56747c82cd9ba76a8ea7a89e97",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "96c7e4b95f23130711829a031eff0780269cc325ca2edb045e11ec7b18314322",
+      "hunks": 7,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "76574cf966b68f0806209fd784575f75a62fea56747c82cd9ba76a8ea7a89e97",
+      "path": "software/sorter/backend/subsystems/classification_channel/state_machine.py",
+      "size": 21734
+    },
+    {
+      "candidate_sha256": "69d641b0149f07b04f6d7e62d7b1589dccf6a215d3c9814f9f53a13c2e87a960",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "69d641b0149f07b04f6d7e62d7b1589dccf6a215d3c9814f9f53a13c2e87a960",
+      "path": "software/sorter/backend/subsystems/classification_channel/states.py",
+      "size": 1316
+    },
+    {
+      "candidate_sha256": "62e29807b1f1a3c34b04e2008f3c57ca63f3f2a340b8ca64423c8f2134773ee3",
+      "classification": "unchanged",
+      "components": [
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_sha256": "62e29807b1f1a3c34b04e2008f3c57ca63f3f2a340b8ca64423c8f2134773ee3",
+      "path": "software/sorter/backend/subsystems/classification_channel/transfer_episode.py",
+      "prerequisite_sha256": "62e29807b1f1a3c34b04e2008f3c57ca63f3f2a340b8ca64423c8f2134773ee3",
+      "size": 1984,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "ace8f056eb461db9f39a291a1ed1f62a0135ecd58c13c45dfd1909cb5e8b2158",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ace8f056eb461db9f39a291a1ed1f62a0135ecd58c13c45dfd1909cb5e8b2158",
+      "path": "software/sorter/backend/subsystems/classification_channel/two_piece.py",
+      "size": 65729
+    },
+    {
+      "candidate_sha256": "c68fb09a393e9a60ec51e3251b25625817cd46f0fc6530b626bd511c68edcb53",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c68fb09a393e9a60ec51e3251b25625817cd46f0fc6530b626bd511c68edcb53",
+      "path": "software/sorter/backend/subsystems/classification_channel/zone_manager.py",
+      "size": 15253
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/subsystems/common/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "6271d11fcd6ffbe36af39098a31f4bae19d7c0a021db5f870e0aaeb541f7116e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6271d11fcd6ffbe36af39098a31f4bae19d7c0a021db5f870e0aaeb541f7116e",
+      "path": "software/sorter/backend/subsystems/common/jitter_recovery.py",
+      "size": 4100
+    },
+    {
+      "candidate_sha256": "6286b02c9cbc9e8371237dc41edb2bb6cb1edc25dc79d71c889d568fc24573b7",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6286b02c9cbc9e8371237dc41edb2bb6cb1edc25dc79d71c889d568fc24573b7",
+      "path": "software/sorter/backend/subsystems/distribution/__init__.py",
+      "size": 325
+    },
+    {
+      "candidate_sha256": "f3d681b5b31616961461c3282e6cac82df58a716cd8c72ac74c55cfdfc5f455d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f3d681b5b31616961461c3282e6cac82df58a716cd8c72ac74c55cfdfc5f455d",
+      "path": "software/sorter/backend/subsystems/distribution/chute.py",
+      "size": 13972
+    },
+    {
+      "candidate_sha256": "cf2fa615d9bde793e9310f85ca0b09f767d86fec9b0938d91b3d5a1cb2b734a6",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cf2fa615d9bde793e9310f85ca0b09f767d86fec9b0938d91b3d5a1cb2b734a6",
+      "path": "software/sorter/backend/subsystems/distribution/chute_stress.py",
+      "size": 22504
+    },
+    {
+      "candidate_sha256": "1d23f685d2c73aadf2a7cef09af01488d8c2ed4932306f0e02b3cc1c97a7cce8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1d23f685d2c73aadf2a7cef09af01488d8c2ed4932306f0e02b3cc1c97a7cce8",
+      "path": "software/sorter/backend/subsystems/distribution/flap_path.py",
+      "size": 1420
+    },
+    {
+      "candidate_sha256": "3df694693ffe687d567c96d98faa28f3b08df88d5f812f85419da7a6a542d513",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3df694693ffe687d567c96d98faa28f3b08df88d5f812f85419da7a6a542d513",
+      "path": "software/sorter/backend/subsystems/distribution/idle.py",
+      "size": 2021
+    },
+    {
+      "candidate_sha256": "f7b7f228df5d608d695694575413843f7525ad986b508db5c353835f33f06c71",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "a1a0afa3e90517f1ccc4cf9fa018201ac729b5a7c062413cf91bf167fd273436",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f7b7f228df5d608d695694575413843f7525ad986b508db5c353835f33f06c71",
+      "path": "software/sorter/backend/subsystems/distribution/positioning.py",
+      "size": 46941
+    },
+    {
+      "candidate_sha256": "5f4d91dd52d024a478c59d4792c821de9ca96459aa9f3441b447969d7ad1b907",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 2,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5f4d91dd52d024a478c59d4792c821de9ca96459aa9f3441b447969d7ad1b907",
+      "path": "software/sorter/backend/subsystems/distribution/ready.py",
+      "size": 3246
+    },
+    {
+      "candidate_sha256": "a03827df254e3e32065921ae2a72d219620648f626df1ad107ff98db218f7bac",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "4d722654b6c8e2fee50e568578183a01f54410a5daa8e8ab28389053f3c3fd35",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a03827df254e3e32065921ae2a72d219620648f626df1ad107ff98db218f7bac",
+      "path": "software/sorter/backend/subsystems/distribution/sending.py",
+      "size": 10675
+    },
+    {
+      "candidate_sha256": "1a85e302b13a02d6fa57a5320d8f120e06135d51d3534014ce1676880823bd13",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "185699472030c4df07a4e2be6bce83156934ec8946b8b6f3328defa993f2e6da",
+      "hunks": 2,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1a85e302b13a02d6fa57a5320d8f120e06135d51d3534014ce1676880823bd13",
+      "path": "software/sorter/backend/subsystems/distribution/state_machine.py",
+      "size": 5188
+    },
+    {
+      "candidate_sha256": "745b0c1a7e616bf43d237b4ac30a732486ed862c17de1acf84d13c4b9edf91c4",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "745b0c1a7e616bf43d237b4ac30a732486ed862c17de1acf84d13c4b9edf91c4",
+      "path": "software/sorter/backend/subsystems/distribution/states.py",
+      "size": 149
+    },
+    {
+      "candidate_sha256": "9b23c4338a2e57a980da2031d072ba95e9fdd4895348921f9a84a65a4fd95e8b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9b23c4338a2e57a980da2031d072ba95e9fdd4895348921f9a84a65a4fd95e8b",
+      "path": "software/sorter/backend/subsystems/feeder/__init__.py",
+      "size": 78
+    },
+    {
+      "candidate_sha256": "d726902b3d6ed12e09a824ce6edbe5618212de855f60bad9b5dbc051c82bf8eb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d726902b3d6ed12e09a824ce6edbe5618212de855f60bad9b5dbc051c82bf8eb",
+      "path": "software/sorter/backend/subsystems/feeder/admission.py",
+      "size": 2231
+    },
+    {
+      "candidate_sha256": "573c115bb6d71048fb00ae193162417fa77fa19b6a8555f3d022cd24cf512a56",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "573c115bb6d71048fb00ae193162417fa77fa19b6a8555f3d022cd24cf512a56",
+      "path": "software/sorter/backend/subsystems/feeder/analysis.py",
+      "size": 29558
+    },
+    {
+      "candidate_sha256": "577ed5d9bce35d872c3b3982c9820e42cc31f7d3e02dff6f07a10dcdfc588abb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "577ed5d9bce35d872c3b3982c9820e42cc31f7d3e02dff6f07a10dcdfc588abb",
+      "path": "software/sorter/backend/subsystems/feeder/calibration.py",
+      "size": 1302
+    },
+    {
+      "candidate_sha256": "05006d67f30379a9fd7c97eab59d357f812133592c2aeed957058fe89a7e64c0",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "05006d67f30379a9fd7c97eab59d357f812133592c2aeed957058fe89a7e64c0",
+      "path": "software/sorter/backend/subsystems/feeder/ch2_separation.py",
+      "size": 4472
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/subsystems/feeder/constant_movement/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "0ede8c32be79810c62d1c5a29bf9224f0a495bbcfeed5f20f1c57b4e32065483",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0ede8c32be79810c62d1c5a29bf9224f0a495bbcfeed5f20f1c57b4e32065483",
+      "path": "software/sorter/backend/subsystems/feeder/constant_movement/config.py",
+      "size": 6069
+    },
+    {
+      "candidate_sha256": "a92bdefab804d9c24348666b09dde5742e131ecb6d6c75dbe8142d5b64639e59",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a92bdefab804d9c24348666b09dde5742e131ecb6d6c75dbe8142d5b64639e59",
+      "path": "software/sorter/backend/subsystems/feeder/constant_movement/flow.py",
+      "size": 12814
+    },
+    {
+      "candidate_sha256": "65f4ebbf09de7a34be00f699740a7c40bdf6f1a1d0ad7ee7a5966b248c330278",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "65f4ebbf09de7a34be00f699740a7c40bdf6f1a1d0ad7ee7a5966b248c330278",
+      "path": "software/sorter/backend/subsystems/feeder/dropzone_incidents.py",
+      "size": 13420
+    },
+    {
+      "candidate_sha256": "b60b15161137865575eec2463e13ff0e5e582687f5a09910dca8ddebf06b334a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b60b15161137865575eec2463e13ff0e5e582687f5a09910dca8ddebf06b334a",
+      "path": "software/sorter/backend/subsystems/feeder/feeding.py",
+      "size": 51424
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "2dba335ceaaf114c57d08f911aeba55df695e887d098bf969d631e83073c77fb",
+      "classification": "unchanged",
+      "components": [
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 4,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2dba335ceaaf114c57d08f911aeba55df695e887d098bf969d631e83073c77fb",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/config.py",
+      "prerequisite_sha256": "2dba335ceaaf114c57d08f911aeba55df695e887d098bf969d631e83073c77fb",
+      "size": 15324
+    },
+    {
+      "candidate_sha256": "b72b46e4dd0d048a45f19bd4a5c185ce504cb28529ed68fd0e60b54ef7af24b0",
+      "classification": "unchanged",
+      "components": [
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b72b46e4dd0d048a45f19bd4a5c185ce504cb28529ed68fd0e60b54ef7af24b0",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/eject.py",
+      "prerequisite_sha256": "b72b46e4dd0d048a45f19bd4a5c185ce504cb28529ed68fd0e60b54ef7af24b0",
+      "size": 14962
+    },
+    {
+      "candidate_sha256": "6ef75bda215abefacb6ba56474eab288c22a09eac0814af825655aab022c6061",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "prerequisite",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "f41b8d7ba60ac056e18a19ef26699ff60b6ea3598c60a190c0e1daa8f3db4b6f",
+      "hunks": 11,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6ef75bda215abefacb6ba56474eab288c22a09eac0814af825655aab022c6061",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/flow.py",
+      "prerequisite_sha256": "1b3cf0a934022b6c8f2a1a046c8e5267f42242346502f8899dee9d437ec10988",
+      "size": 61206
+    },
+    {
+      "candidate_sha256": "4dfa2242138e71f2aa1c549ea4fd31dd83df2be634c8013d68dfab2cc49ba11c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4dfa2242138e71f2aa1c549ea4fd31dd83df2be634c8013d68dfab2cc49ba11c",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/geometry.py",
+      "size": 1737
+    },
+    {
+      "candidate_sha256": "446eda76ebc507c38d2b27fee4a53a204ba958b84ac8a5db50646056837d418d",
+      "classification": "unchanged",
+      "components": [
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_sha256": "446eda76ebc507c38d2b27fee4a53a204ba958b84ac8a5db50646056837d418d",
+      "path": "software/sorter/backend/subsystems/feeder/go_to_angle/recovery.py",
+      "prerequisite_sha256": "446eda76ebc507c38d2b27fee4a53a204ba958b84ac8a5db50646056837d418d",
+      "size": 14249,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 420
+      }
+    },
+    {
+      "candidate_sha256": "ccc289546fb2881dbc748a89a69202919eaa9c1f8a90f34152ae2fed6678a831",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "ccc289546fb2881dbc748a89a69202919eaa9c1f8a90f34152ae2fed6678a831",
+      "path": "software/sorter/backend/subsystems/feeder/idle.py",
+      "size": 544
+    },
+    {
+      "candidate_sha256": "6bd7a8270c254801a85221828d5414cb9db5dfd01914acbc619b0f9d4e73145b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6bd7a8270c254801a85221828d5414cb9db5dfd01914acbc619b0f9d4e73145b",
+      "path": "software/sorter/backend/subsystems/feeder/incidents.py",
+      "size": 6802
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/subsystems/feeder/pulse_perception/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "6871746757855264f57913d1ef0218d1b5a3609b38f6b2d4a22f25a1c354b784",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6871746757855264f57913d1ef0218d1b5a3609b38f6b2d4a22f25a1c354b784",
+      "path": "software/sorter/backend/subsystems/feeder/pulse_perception/autotune.py",
+      "size": 23954
+    },
+    {
+      "candidate_sha256": "e529df74eee92568738779bb52650b269323e109ea59c0bde89c91f9cc00498e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e529df74eee92568738779bb52650b269323e109ea59c0bde89c91f9cc00498e",
+      "path": "software/sorter/backend/subsystems/feeder/pulse_perception/config.py",
+      "size": 18335
+    },
+    {
+      "candidate_sha256": "2fd99baf916efca2b182ff7335c377fad62393fa7c5cb4cdd54862847c412e73",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2fd99baf916efca2b182ff7335c377fad62393fa7c5cb4cdd54862847c412e73",
+      "path": "software/sorter/backend/subsystems/feeder/pulse_perception/flow.py",
+      "size": 15881
+    },
+    {
+      "candidate_sha256": "f2d037cc0e4a21dea5a1f1f3095cfd893408d8519b097ccdfc1dd3000d62f651",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f2d037cc0e4a21dea5a1f1f3095cfd893408d8519b097ccdfc1dd3000d62f651",
+      "path": "software/sorter/backend/subsystems/feeder/pulse_perception/stuck_watchdog.py",
+      "size": 11640
+    },
+    {
+      "candidate_sha256": "bf06cce735044460e48be1722bdce091525b487ab96d7891898da2550a484cd4",
+      "classification": "unchanged",
+      "components": [
+        "prerequisite"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "hunks": 1,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bf06cce735044460e48be1722bdce091525b487ab96d7891898da2550a484cd4",
+      "path": "software/sorter/backend/subsystems/feeder/state_machine.py",
+      "prerequisite_sha256": "bf06cce735044460e48be1722bdce091525b487ab96d7891898da2550a484cd4",
+      "size": 5629
+    },
+    {
+      "candidate_sha256": "d5f4d6730d43299f7cbbd6fe65de66f4170849bde6abddad12ac62edf0ed9275",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d5f4d6730d43299f7cbbd6fe65de66f4170849bde6abddad12ac62edf0ed9275",
+      "path": "software/sorter/backend/subsystems/feeder/states.py",
+      "size": 91
+    },
+    {
+      "candidate_sha256": "cd5120f8aa459d73bf065d7b17c196f23c7913a7a8d1568d8262846ce2668205",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cd5120f8aa459d73bf065d7b17c196f23c7913a7a8d1568d8262846ce2668205",
+      "path": "software/sorter/backend/subsystems/feeder/strategies/__init__.py",
+      "size": 290
+    },
+    {
+      "candidate_sha256": "b66b22f43a5b6f02d29ca9d6ee545916f00a2da473ad9e39611edce207da0095",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b66b22f43a5b6f02d29ca9d6ee545916f00a2da473ad9e39611edce207da0095",
+      "path": "software/sorter/backend/subsystems/feeder/strategies/c1_jam_recovery.py",
+      "size": 7322
+    },
+    {
+      "candidate_sha256": "70d0f3634bd265363765ab5851696d5b2bb9d0750c86c287a0471de9757a3a2a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "70d0f3634bd265363765ab5851696d5b2bb9d0750c86c287a0471de9757a3a2a",
+      "path": "software/sorter/backend/subsystems/feeder/strategies/c3_holdover.py",
+      "size": 1094
+    },
+    {
+      "candidate_sha256": "2b4ad7ac0a42c0db8651b3e5ab1632f14ae4853ebd0a4a47ee97877c9e550bb9",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2b4ad7ac0a42c0db8651b3e5ab1632f14ae4853ebd0a4a47ee97877c9e550bb9",
+      "path": "software/sorter/backend/subsystems/power_stress.py",
+      "size": 26506
+    },
+    {
+      "candidate_sha256": "e13c17fcc563c042fc100e4e9368fc7ece78f557c228de80b172e5c03c44422c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e13c17fcc563c042fc100e4e9368fc7ece78f557c228de80b172e5c03c44422c",
+      "path": "software/sorter/backend/subsystems/sample_collection_speed.py",
+      "size": 2108
+    },
+    {
+      "candidate_sha256": "426d488749792ab7d68a6d1154e66e2bb8f6d42cfb3e2d17172fa6ead0f46794",
+      "classification": "unchanged",
+      "components": [
+        "compatibility",
+        "prerequisite",
+        "Slice 3"
+      ],
+      "detail": "Byte-identical active installed source.",
+      "frozen_slice3_sha256": "32540f558dafeba782c5252c0c7911b002a775bed0a7cef9e9e5ef67a0fa3b67",
+      "hunks": 3,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "426d488749792ab7d68a6d1154e66e2bb8f6d42cfb3e2d17172fa6ead0f46794",
+      "path": "software/sorter/backend/subsystems/shared_variables.py",
+      "prerequisite_sha256": "ce0f898750f20e2349ab689be8cf4589897954fdd0f0cfa4d56e7a60188b020e",
+      "size": 11198
+    },
+    {
+      "candidate_sha256": "e847ba1285f534070f395f211155ad0954aae6d297e75cca2f08b4cfdbcae9bc",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e847ba1285f534070f395f211155ad0954aae6d297e75cca2f08b4cfdbcae9bc",
+      "path": "software/sorter/backend/supervisor.py",
+      "size": 21913
+    },
+    {
+      "candidate_sha256": "4e21adcfccca9ee5219758f1e1168295a581d4a154fad05b4d610f89f49905fb",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4e21adcfccca9ee5219758f1e1168295a581d4a154fad05b4d610f89f49905fb",
+      "path": "software/sorter/backend/tmc_telemetry.py",
+      "size": 9323
+    },
+    {
+      "candidate_sha256": "4b9322ac1fe2745bab93e4f4e7bce10785868507022e2892cbfeb3a20a91d44e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4b9322ac1fe2745bab93e4f4e7bce10785868507022e2892cbfeb3a20a91d44e",
+      "path": "software/sorter/backend/toml_config.py",
+      "size": 33399
+    },
+    {
+      "candidate_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "software/sorter/backend/utils/__init__.py",
+      "size": 0
+    },
+    {
+      "candidate_sha256": "3e86749b80205fa486cdcee483d891f422b5ccd9cc33b0f75ce6e926e3f5b73b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "3e86749b80205fa486cdcee483d891f422b5ccd9cc33b0f75ce6e926e3f5b73b",
+      "path": "software/sorter/backend/utils/event.py",
+      "size": 7246
+    },
+    {
+      "candidate_sha256": "2d201be74e30ce1b8dec507c319e254bed586a892b50b34a0cfc04391281d8df",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2d201be74e30ce1b8dec507c319e254bed586a892b50b34a0cfc04391281d8df",
+      "path": "software/sorter/backend/utils/pick_menu.py",
+      "size": 388
+    },
+    {
+      "candidate_sha256": "c659e0af0fecd699a80aba81363b2a22aa181170ecdd182f7d033dfe437cd9ad",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c659e0af0fecd699a80aba81363b2a22aa181170ecdd182f7d033dfe437cd9ad",
+      "path": "software/sorter/backend/uv.lock",
+      "size": 191118
+    },
+    {
+      "candidate_sha256": "22848a9c78f2a6e19423119c5ce52bf45281eed23d250b9835489ed1e80c16f8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "22848a9c78f2a6e19423119c5ce52bf45281eed23d250b9835489ed1e80c16f8",
+      "path": "software/sorter/backend/vision/__init__.py",
+      "size": 382
+    },
+    {
+      "candidate_sha256": "04c58d3c0ac6cbc69655b9552dd322c22803a8d56b2423a5dfd2d126ce7cd332",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "04c58d3c0ac6cbc69655b9552dd322c22803a8d56b2423a5dfd2d126ce7cd332",
+      "path": "software/sorter/backend/vision/burst_store.py",
+      "size": 2519
+    },
+    {
+      "candidate_sha256": "2e2eeb245a8f12071662d292b1c58270b5d963a977752ced87da2e98b04d896d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2e2eeb245a8f12071662d292b1c58270b5d963a977752ced87da2e98b04d896d",
+      "path": "software/sorter/backend/vision/c4_wall_phase.py",
+      "size": 13866
+    },
+    {
+      "candidate_sha256": "0434c7666556c749021ba5b8c1da9097d605ad44eb15b131e8d03cd485a6e532",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0434c7666556c749021ba5b8c1da9097d605ad44eb15b131e8d03cd485a6e532",
+      "path": "software/sorter/backend/vision/camera.py",
+      "size": 51028
+    },
+    {
+      "candidate_sha256": "694dd3042523d22ec7c98e985d1d10c0a9243d923431586c4b90f27ae57994d6",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "694dd3042523d22ec7c98e985d1d10c0a9243d923431586c4b90f27ae57994d6",
+      "path": "software/sorter/backend/vision/camera_device.py",
+      "size": 4163
+    },
+    {
+      "candidate_sha256": "2001244962baeab00ad0494ad756aebcbc0248da5472585233549e6674516910",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "2001244962baeab00ad0494ad756aebcbc0248da5472585233549e6674516910",
+      "path": "software/sorter/backend/vision/camera_feed.py",
+      "size": 7513
+    },
+    {
+      "candidate_sha256": "dcbbbce93402ef43003a5be1cca69d144d9c95840031e02b40f1423fa73b7ae8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "dcbbbce93402ef43003a5be1cca69d144d9c95840031e02b40f1423fa73b7ae8",
+      "path": "software/sorter/backend/vision/camera_service.py",
+      "size": 16136
+    },
+    {
+      "candidate_sha256": "e39ffbd0e1e7583b784391db170832c00f66d8ed06a9cc25360be93069978e4a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e39ffbd0e1e7583b784391db170832c00f66d8ed06a9cc25360be93069978e4a",
+      "path": "software/sorter/backend/vision/channel_alignment.py",
+      "size": 5818
+    },
+    {
+      "candidate_sha256": "74e262121b5232cb404999560fbd59e2cbe7bbb835765f441967860a7bb3efce",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "74e262121b5232cb404999560fbd59e2cbe7bbb835765f441967860a7bb3efce",
+      "path": "software/sorter/backend/vision/classification_analysis_thread.py",
+      "size": 3924
+    },
+    {
+      "candidate_sha256": "c43b8c6e7f0d7945c5504f5a9c7aedd9cf13859de9b302e4852e27e1c5e334fa",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c43b8c6e7f0d7945c5504f5a9c7aedd9cf13859de9b302e4852e27e1c5e334fa",
+      "path": "software/sorter/backend/vision/classification_detection.py",
+      "size": 98
+    },
+    {
+      "candidate_sha256": "96f58728f3023e1e821cbd45a889e585c9a6fc045a2b0b6513db44b150ffc219",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "96f58728f3023e1e821cbd45a889e585c9a6fc045a2b0b6513db44b150ffc219",
+      "path": "software/sorter/backend/vision/default_region_provider.py",
+      "size": 2334
+    },
+    {
+      "candidate_sha256": "70b49176690b0265a33fb081c4ea241e74b1034cceea0979e581889ea79d7185",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "70b49176690b0265a33fb081c4ea241e74b1034cceea0979e581889ea79d7185",
+      "path": "software/sorter/backend/vision/detection_registry.py",
+      "size": 12767
+    },
+    {
+      "candidate_sha256": "8337409fde95a6f791c9f2c92196344906f9c4bac967691b2d3e31be1864a93b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8337409fde95a6f791c9f2c92196344906f9c4bac967691b2d3e31be1864a93b",
+      "path": "software/sorter/backend/vision/diff_configs.py",
+      "size": 1633
+    },
+    {
+      "candidate_sha256": "d22cd8959ef9bd6206a28f86888d2879826d955b717a2c2174285c0d19fb0b3f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "d22cd8959ef9bd6206a28f86888d2879826d955b717a2c2174285c0d19fb0b3f",
+      "path": "software/sorter/backend/vision/feeder_analysis_thread.py",
+      "size": 2686
+    },
+    {
+      "candidate_sha256": "317ef7dec77f20735422e5ed5c2353d832c32ac67932563d8d8e414c3b7c6259",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "317ef7dec77f20735422e5ed5c2353d832c32ac67932563d8d8e414c3b7c6259",
+      "path": "software/sorter/backend/vision/gemini_sam_detector.py",
+      "size": 23895
+    },
+    {
+      "candidate_sha256": "f20707fa07196519287a9b38d9fd2a4e88eef6100a5ca93368d9042d92a25dd8",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f20707fa07196519287a9b38d9fd2a4e88eef6100a5ca93368d9042d92a25dd8",
+      "path": "software/sorter/backend/vision/handdrawn_region_provider.py",
+      "size": 28638
+    },
+    {
+      "candidate_sha256": "dbe5d35e839f90dd37394236d05223f24e185212613d8b33b896d2d83fc9d214",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "dbe5d35e839f90dd37394236d05223f24e185212613d8b33b896d2d83fc9d214",
+      "path": "software/sorter/backend/vision/heatmap_diff.py",
+      "size": 14125
+    },
+    {
+      "candidate_sha256": "bf8178d22809c8e367ed7b8d100683978f2335adc0680803ac3d82b0b17a5e1f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "bf8178d22809c8e367ed7b8d100683978f2335adc0680803ac3d82b0b17a5e1f",
+      "path": "software/sorter/backend/vision/ml/__init__.py",
+      "size": 330
+    },
+    {
+      "candidate_sha256": "591759d17d0947eb3988f4052483d74460ddcbd58c696bcc9dcf156de2d190e3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "591759d17d0947eb3988f4052483d74460ddcbd58c696bcc9dcf156de2d190e3",
+      "path": "software/sorter/backend/vision/ml/base.py",
+      "size": 12448
+    },
+    {
+      "candidate_sha256": "b8aa630bdf2f515e56200f5899e9fa86e28b9cf159cade7058f0c58dafa9098c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b8aa630bdf2f515e56200f5899e9fa86e28b9cf159cade7058f0c58dafa9098c",
+      "path": "software/sorter/backend/vision/ml/factory.py",
+      "size": 5757
+    },
+    {
+      "candidate_sha256": "8df015e48d1a8b0c0f04ea034ce47597e9606eacd1bc363d3996bbdfd6dc3154",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "8df015e48d1a8b0c0f04ea034ce47597e9606eacd1bc363d3996bbdfd6dc3154",
+      "path": "software/sorter/backend/vision/ml/hailo.py",
+      "size": 10673
+    },
+    {
+      "candidate_sha256": "cb1f966abacd00b9db3af4acadf1ca8200764f59de45e4fdd1a41ff216c70531",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "cb1f966abacd00b9db3af4acadf1ca8200764f59de45e4fdd1a41ff216c70531",
+      "path": "software/sorter/backend/vision/ml/ncnn.py",
+      "size": 7701
+    },
+    {
+      "candidate_sha256": "adad23b5750766fb28f7c74fd84a8df3ec5d6b3fe4882a8a5224bd50879316a9",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "adad23b5750766fb28f7c74fd84a8df3ec5d6b3fe4882a8a5224bd50879316a9",
+      "path": "software/sorter/backend/vision/ml/onnx.py",
+      "size": 3552
+    },
+    {
+      "candidate_sha256": "6c82c6fa624da6b3384fb43595648db8e8db70df986d47c6e0086388e9432a6b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6c82c6fa624da6b3384fb43595648db8e8db70df986d47c6e0086388e9432a6b",
+      "path": "software/sorter/backend/vision/ml/rknn.py",
+      "size": 6374
+    },
+    {
+      "candidate_sha256": "e6715b82d8b7225ca947537aecbb7abc2a0ffecadc8d239789040bf8349ddbd3",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e6715b82d8b7225ca947537aecbb7abc2a0ffecadc8d239789040bf8349ddbd3",
+      "path": "software/sorter/backend/vision/mog2_channel_detector.py",
+      "size": 13869
+    },
+    {
+      "candidate_sha256": "1d683af9131f894c841226ff5c3ac5ba945a5762d819768195293acf5a0fa62f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1d683af9131f894c841226ff5c3ac5ba945a5762d819768195293acf5a0fa62f",
+      "path": "software/sorter/backend/vision/mog2_diff_configs.py",
+      "size": 501
+    },
+    {
+      "candidate_sha256": "fef04d9c5e4166e4ebab61eee2687817c1ec5e37f0ed600d293b5cbaf632e05a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "fef04d9c5e4166e4ebab61eee2687817c1ec5e37f0ed600d293b5cbaf632e05a",
+      "path": "software/sorter/backend/vision/outputs/__init__.py",
+      "size": 225
+    },
+    {
+      "candidate_sha256": "e561edb7efe8208af805a3b5e031e041df855eb2815e7654f1a587dbc7369556",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "e561edb7efe8208af805a3b5e031e041df855eb2815e7654f1a587dbc7369556",
+      "path": "software/sorter/backend/vision/outputs/base.py",
+      "size": 269
+    },
+    {
+      "candidate_sha256": "71c968376c139e240bffd6aaf5e5c12154f38d7485e8517de92805007b005d55",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "71c968376c139e240bffd6aaf5e5c12154f38d7485e8517de92805007b005d55",
+      "path": "software/sorter/backend/vision/outputs/base64.py",
+      "size": 375
+    },
+    {
+      "candidate_sha256": "f915457045c2c3ba9fb13c73dcebd78525e9db98a7137b6b449e4dfbb24a46ed",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "f915457045c2c3ba9fb13c73dcebd78525e9db98a7137b6b449e4dfbb24a46ed",
+      "path": "software/sorter/backend/vision/outputs/mjpeg.py",
+      "size": 648
+    },
+    {
+      "candidate_sha256": "aaf11e9432176417f3128c592b2ef6433098b2d339a8914c2231f8dcbee2c39f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "aaf11e9432176417f3128c592b2ef6433098b2d339a8914c2231f8dcbee2c39f",
+      "path": "software/sorter/backend/vision/overlays/__init__.py",
+      "size": 616
+    },
+    {
+      "candidate_sha256": "6a20f6a11caa04cf39a0b27452de6efbd8f7bd26f60a36112251bd3db1f60b03",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "6a20f6a11caa04cf39a0b27452de6efbd8f7bd26f60a36112251bd3db1f60b03",
+      "path": "software/sorter/backend/vision/overlays/base.py",
+      "size": 511
+    },
+    {
+      "candidate_sha256": "4fd4f415c147716dc1d59e877f80ce6aaf9839ad5736a8ce8bbbb6ff2ed14a31",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4fd4f415c147716dc1d59e877f80ce6aaf9839ad5736a8ce8bbbb6ff2ed14a31",
+      "path": "software/sorter/backend/vision/overlays/classification.py",
+      "size": 5318
+    },
+    {
+      "candidate_sha256": "b11cdb95afbbaa8b5cb074051f933b6804d0290fc223687ee4e95f4931b4dd6d",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b11cdb95afbbaa8b5cb074051f933b6804d0290fc223687ee4e95f4931b4dd6d",
+      "path": "software/sorter/backend/vision/overlays/detector.py",
+      "size": 5192
+    },
+    {
+      "candidate_sha256": "767d23d1271cd223959d2cbc125d50719a2cccd98ce8aa2ea53672ffbee4d7b9",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "767d23d1271cd223959d2cbc125d50719a2cccd98ce8aa2ea53672ffbee4d7b9",
+      "path": "software/sorter/backend/vision/overlays/heatmap.py",
+      "size": 1080
+    },
+    {
+      "candidate_sha256": "9840e4ecbfe69062f56aa85f8bd246afd6ad145d01fff39aa71a7f5ac06bb26f",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "9840e4ecbfe69062f56aa85f8bd246afd6ad145d01fff39aa71a7f5ac06bb26f",
+      "path": "software/sorter/backend/vision/overlays/ignored_regions.py",
+      "size": 3155
+    },
+    {
+      "candidate_sha256": "a1618637890a54c34a7c9b46dac1d74581ba8d26cffb74990b577b03cc4af0f1",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "a1618637890a54c34a7c9b46dac1d74581ba8d26cffb74990b577b03cc4af0f1",
+      "path": "software/sorter/backend/vision/overlays/region.py",
+      "size": 1669
+    },
+    {
+      "candidate_sha256": "98928f4bc47da3bfdc63f293c6f9a3ea5ba742862412f9933a3cb41bc91c79f1",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "98928f4bc47da3bfdc63f293c6f9a3ea5ba742862412f9933a3cb41bc91c79f1",
+      "path": "software/sorter/backend/vision/overlays/telemetry.py",
+      "size": 6531
+    },
+    {
+      "candidate_sha256": "0e19cc9a27bdcafe693f1255d52997069e8cea754d602d41f8901e74e166255a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0e19cc9a27bdcafe693f1255d52997069e8cea754d602d41f8901e74e166255a",
+      "path": "software/sorter/backend/vision/overlays/tracker.py",
+      "size": 6551
+    },
+    {
+      "candidate_sha256": "b19b7536a3496c91f53cf6cf4ce33ddfb570b00253d967215820444c10a0cff5",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b19b7536a3496c91f53cf6cf4ce33ddfb570b00253d967215820444c10a0cff5",
+      "path": "software/sorter/backend/vision/regions.py",
+      "size": 1327
+    },
+    {
+      "candidate_sha256": "69a6d1698f3179690cccadc3a6b12d2ab992d32ddb949b958ca4a3ca73b0710b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "69a6d1698f3179690cccadc3a6b12d2ab992d32ddb949b958ca4a3ca73b0710b",
+      "path": "software/sorter/backend/vision/tracking/__init__.py",
+      "size": 8977
+    },
+    {
+      "candidate_sha256": "b65aead78e1fd408eb5e99a850d3da6dc7ae58c711bd8d3298d0e58ca02e51fd",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b65aead78e1fd408eb5e99a850d3da6dc7ae58c711bd8d3298d0e58ca02e51fd",
+      "path": "software/sorter/backend/vision/tracking/appearance.py",
+      "size": 4638
+    },
+    {
+      "candidate_sha256": "5c2dc8d8bb8afa34207217b7c2f509e66060557a227769782ecc3c2a9452df12",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5c2dc8d8bb8afa34207217b7c2f509e66060557a227769782ecc3c2a9452df12",
+      "path": "software/sorter/backend/vision/tracking/base.py",
+      "size": 2361
+    },
+    {
+      "candidate_sha256": "c1fd3a2f92bafbd0fce22b0fbdf571baf15591c3b7b2404a3788432779fb016c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "c1fd3a2f92bafbd0fce22b0fbdf571baf15591c3b7b2404a3788432779fb016c",
+      "path": "software/sorter/backend/vision/tracking/bytetrack_tracker.py",
+      "size": 20897
+    },
+    {
+      "candidate_sha256": "0d44c0b3a8735b95c89a16805e96b0804fa8d69eeeb9b10605f1b605a5056d6b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0d44c0b3a8735b95c89a16805e96b0804fa8d69eeeb9b10605f1b605a5056d6b",
+      "path": "software/sorter/backend/vision/tracking/drop_zone_burst.py",
+      "size": 7276
+    },
+    {
+      "candidate_sha256": "4e4a73f57e673e47faba9e1500b3d74c34608256828c8b4b605a705eac20496b",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "4e4a73f57e673e47faba9e1500b3d74c34608256828c8b4b605a705eac20496b",
+      "path": "software/sorter/backend/vision/tracking/handoff.py",
+      "size": 14618
+    },
+    {
+      "candidate_sha256": "b7ba9df9af44a5bb125aa57e65943f71e68294ce2340fb342cddf06d47a617cf",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b7ba9df9af44a5bb125aa57e65943f71e68294ce2340fb342cddf06d47a617cf",
+      "path": "software/sorter/backend/vision/tracking/history.py",
+      "size": 32879
+    },
+    {
+      "candidate_sha256": "0cc4bd8c6cb9e11f09beefeef50e7bfe71d0ebe2a49144a8945e37fe7a4deb95",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "0cc4bd8c6cb9e11f09beefeef50e7bfe71d0ebe2a49144a8945e37fe7a4deb95",
+      "path": "software/sorter/backend/vision/tracking/polar_tracker.py",
+      "size": 54693
+    },
+    {
+      "candidate_sha256": "5b9c3422b58cf5717ca20db3d71cf6f14e8dd44f6fe0b3b2fa42b1a4f9dd5b1c",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "5b9c3422b58cf5717ca20db3d71cf6f14e8dd44f6fe0b3b2fa42b1a4f9dd5b1c",
+      "path": "software/sorter/backend/vision/types.py",
+      "size": 2729
+    },
+    {
+      "candidate_sha256": "b56afec94e4280e696d42cf5c486c955b039219028f7bd54bfab9fbfd8db647e",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "b56afec94e4280e696d42cf5c486c955b039219028f7bd54bfab9fbfd8db647e",
+      "path": "software/sorter/backend/vision/utils.py",
+      "size": 1473
+    },
+    {
+      "candidate_sha256": "1e8cc352b487556de48dd724b46c606538596cad7db8a191670f6d9ff5cfa57a",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      },
+      "installed_sha256": "1e8cc352b487556de48dd724b46c606538596cad7db8a191670f6d9ff5cfa57a",
+      "path": "software/sorter/backend/vision/vision_manager.py",
+      "size": 231230
+    },
+    {
+      "candidate_sha256": "c0723e0b5e1fafbd13f6b7a6de009522cc913e6fe9ea460ce7c3578b9aaf54cf",
+      "classification": "unchanged",
+      "components": [],
+      "detail": "Byte-identical active installed source.",
+      "installed_sha256": "c0723e0b5e1fafbd13f6b7a6de009522cc913e6fe9ea460ce7c3578b9aaf54cf",
+      "path": "software/hive/sorter-client/hive_client.py",
+      "size": 12910,
+      "installed_metadata": {
+        "uid": 1000,
+        "gid": 1000,
+        "mode": 436
+      }
+    }
+  ]
+}

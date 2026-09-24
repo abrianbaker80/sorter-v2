@@ -47,7 +47,7 @@ _DROP_ZONE = 1
 
 
 def _color_feat(
-    frame_bgr: "np.ndarray | None", bbox: Bbox, center_frac: float
+    frame_bgr: "np.ndarray | None", bbox: Bbox, center_frac: float, color_correct=None
 ) -> Optional[tuple[float, float, float]]:
     """A lighting-tolerant colour descriptor sampled from the CENTRE of the box
     (a big box is mostly platter background, so the centre is where the piece
@@ -71,6 +71,8 @@ def _color_feat(
     crop = frame_bgr[cy1:cy2, cx1:cx2]
     if crop.size == 0:
         return None
+    if color_correct is not None:
+        crop = color_correct(crop, "tracker_color_ms")
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     hue = hsv[..., 0].astype(np.float32) * (2.0 * math.pi / 180.0)  # OpenCV H is 0..179
     sat = hsv[..., 1].astype(np.float32) / 255.0
@@ -162,7 +164,7 @@ class OrderedChannelTracker:
                     zone=int(zone),
                     score=score_by_bbox.get(bbox, 1.0),
                     radius=math.hypot(mx - cx, my - cy),
-                    color=_color_feat(upd.frame_bgr, bbox, cfg.color_center_frac),
+                    color=_color_feat(upd.frame_bgr, bbox, cfg.color_center_frac, getattr(upd, "color_correct", None)),
                     area=float(max(1, (x2 - x1)) * max(1, (y2 - y1))),
                 )
             )

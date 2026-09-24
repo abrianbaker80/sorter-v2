@@ -21,6 +21,7 @@ pipeline validation, not production accuracy.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -108,10 +109,10 @@ class _RknnMixin:
 
 
 def _preprocess_rknn_yolo(
-    image_bgr: np.ndarray, imgsz: int
+    image_bgr: np.ndarray, imgsz: int, *, color_correct=None
 ) -> tuple[np.ndarray, dict[str, float]]:
     """HWC uint8 RGB letterbox — RKNN graph normalizes internally."""
-    letterboxed, scale, pad_x, pad_y = letterbox(image_bgr, imgsz)
+    letterboxed, scale, pad_x, pad_y = letterbox(image_bgr, imgsz, color_correct=color_correct)
     rgb = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB)
     # RKNN expects NHWC — wrap the HWC frame in a batch axis.
     nhwc = np.expand_dims(rgb, axis=0)
@@ -150,10 +151,17 @@ class RknnYoloProcessor(_RknnMixin, BaseProcessor):
         image_bgr: np.ndarray,
         *,
         conf_threshold: float | None = None,
+        color_correct=None,
+        timings=None,
     ) -> list[Detection]:
         rknn = self._ensure_runtime()
-        blob, pre = _preprocess_rknn_yolo(image_bgr, self.imgsz)
+        preprocess_started = time.perf_counter()
+        blob, pre = _preprocess_rknn_yolo(image_bgr, self.imgsz, color_correct=color_correct)
+        execution_started = time.perf_counter()
         outputs = rknn.inference(inputs=[blob])
+        if timings is not None:
+            timings["detector_preprocess_ms"] = (execution_started - preprocess_started) * 1000.0
+            timings["npu_execution_ms"] = (time.perf_counter() - execution_started) * 1000.0
         if not outputs:
             return []
         conf = float(conf_threshold) if conf_threshold is not None else self.conf_threshold

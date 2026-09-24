@@ -90,6 +90,13 @@ class PhysicalDistribution:
                     destination=route if route != REJECT else None,
                 )
             if obj.stage is PieceStage.distributing and self.shared.distribution_ready:
+                # Installed positioning can publish READY before all opposing
+                # flaps settle. The physical C4 owner verifies the entire path.
+                if self.gc is not None and not self.gc.disable_servos:
+                    from subsystems.distribution.flap_path import flap_path_settled
+                    target = obj.destination_bin[0] if obj.destination_bin is not None else None
+                    if not flap_path_settled(self.shared.c4_runtime_owner.irl.servos, target):
+                        return ChuteObservation(None, {})
                 return ChuteObservation(route, {})
             return ChuteObservation(None, {})
         if self.recovering:
@@ -124,8 +131,9 @@ class PhysicalDistribution:
         self.shared.c4_reset_distribution()
 
     def reset(self):
-        from project_harvest_runtime import retire_c4_planned_allocations
-
-        retire_c4_planned_allocations(self.gc)
+        from importlib.util import find_spec
+        if find_spec("project_harvest_runtime") is not None:
+            from project_harvest_runtime import retire_c4_planned_allocations
+            retire_c4_planned_allocations(self.gc)
         self.shared.c4_reset_distribution()
         self.recovering = False

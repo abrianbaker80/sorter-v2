@@ -16,6 +16,23 @@ C4_EXIT_STUCK_INCIDENT_KIND = "exit_stuck"
 C4_STALL_WATCHDOG_SOURCE_KIND = "c4_stall_watchdog"
 
 
+def c4_reject_drain_start_disposition(result: Any, now: float) -> tuple[str, float]:
+    """Retry only a start refused because another hardware operation is active."""
+    if (
+        isinstance(result, dict)
+        and result.get("ok") is True
+        and result.get("message") == "C4 reject drain and destructive reset started."
+    ):
+        return "started", 0.0
+    if isinstance(result, dict) and result.get("message") in {
+        "Another hardware operation is already in progress.",
+        "Hardware recovery already in progress.",
+    }:
+        return "retry", float(now) + 1.0
+    message = result.get("message") if isinstance(result, dict) else None
+    return f"blocked:{message or 'C4 reject recovery could not start'}", 0.0
+
+
 def classification_fallback_incident_kind(
     status: ClassificationStatus,
 ) -> str:
@@ -47,7 +64,11 @@ def publish_classification_fallback_incident(
             active = None
     piece_uuid = str(getattr(piece, "uuid", "") or "")
     if isinstance(active, dict):
-        return active.get("kind") == kind and active.get("piece_uuid") == piece_uuid
+        matching = active.get("kind") == kind and active.get("piece_uuid") == piece_uuid
+        request_c4_reject = getattr(runtime_stats, "requestC4Reject", None)
+        if matching and callable(request_c4_reject):
+            request_c4_reject(str(reason))
+        return matching
 
     status_value = getattr(status, "value", str(status))
     tracked_global_id = getattr(piece, "tracked_global_id", None)
@@ -149,11 +170,16 @@ def publish_classification_track_lost_incident(
     reason: str,
 ) -> bool:
     kind = CLASSIFICATION_TRACK_LOST_INCIDENT_KIND
-    if _incident_handling_off(kind):
-        return False
-
     runtime_stats = getattr(gc, "runtime_stats", None)
     if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
+        return False
+
+    # Expired track ownership is a reject request regardless of whether the
+    # operator-facing incident is disabled or another incident owns the slot.
+    request_c4_reject = getattr(runtime_stats, "requestC4Reject", None)
+    if callable(request_c4_reject):
+        request_c4_reject(str(reason))
+    if _incident_handling_off(kind):
         return False
 
     active = None
@@ -171,8 +197,8 @@ def publish_classification_track_lost_incident(
     payload: dict[str, Any] = {
         "kind": kind,
         "severity": "warning",
-        "status": "waiting_for_operator",
-        "awaiting_operator": True,
+        "status": "reject_pending",
+        "awaiting_operator": False,
         "scope": "classification",
         "channel": "c4",
         "role": "classification_channel",
@@ -183,63 +209,15 @@ def publish_classification_track_lost_incident(
         "reason": str(reason),
         "triggered_at": time.time(),
         "rule": "meaningful_c4_track_expired_from_stale_zone",
-        "resolution": "operator_check_c4_tracking_or_clear_if_expected",
-        "operator_message": (
-            "A C4 track with captured evidence expired before the normal drop flow completed."
-        ),
+        "resolution": "complete_c4_reject_drain",
+        "c4_reject_requested": True,
+        "operator_message": "Uncertain C4 material will be routed to Reject by the supported full-pocket recovery.",
     }
     if isinstance(tracked_global_id, int):
         payload["tracked_global_id"] = int(tracked_global_id)
         payload["track_id"] = int(tracked_global_id)
     runtime_stats.setActiveIncident(payload)
     return True
-
-
-def record_classification_track_lost_auto_resolved(
-    gc: Any,
-    *,
-    piece: Any,
-    reason: str,
-    moved_deg: float,
-    multi_piece: bool,
-) -> None:
-    """Persist a recovered C4 loss without occupying the active-incident slot."""
-    runtime_stats = getattr(gc, "runtime_stats", None)
-    if runtime_stats is None or not hasattr(runtime_stats, "recordAutoResolvedIncident"):
-        return
-
-    now = time.time()
-    piece_uuid = str(getattr(piece, "uuid", "") or "")
-    status = getattr(getattr(piece, "classification_status", None), "value", None)
-    runtime_stats.recordAutoResolvedIncident(
-        {
-            "kind": CLASSIFICATION_TRACK_LOST_INCIDENT_KIND,
-            "source_kind": "c4_discharge_auto_reject",
-            "source": "classification_channel",
-            "severity": "warning",
-            "status": "auto_resolved",
-            "awaiting_operator": False,
-            "scope": "classification",
-            "channel": "c4",
-            "role": "classification_channel",
-            "channel_label": "C4",
-            "piece_uuid": piece_uuid,
-            "piece_short": piece_uuid[:8],
-            "classification_status": str(status or ""),
-            "reason": str(reason),
-            "multi_piece": bool(multi_piece),
-            "auto_clear_moved_deg": float(moved_deg),
-            "triggered_at": now,
-            "resolved_at": now,
-            "rule": "c4_discharge_evidence_lost",
-            "resolution": "auto_rejected_to_bottom_bin_after_c4_clear",
-            "operator_message": (
-                "C4 could not safely complete the normal drop, so the machine "
-                "opened the bottom reject path, cleared C4, and resumed automatically."
-            ),
-        },
-        resolved_by="auto",
-    )
 
 
 def c4_stall_incident_active(gc: Any) -> bool:

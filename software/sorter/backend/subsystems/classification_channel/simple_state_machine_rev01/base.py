@@ -143,75 +143,6 @@ class Rev01BaseState(BaseState):
             self.logger.error(f"{LOG_TAG} move not acknowledged")
         return ok
 
-    def preparePieceForDistribution(self, now: float | None = None) -> bool:
-        """Apply a completed classification and start chute positioning once.
-
-        This logical handoff is independent of C4 motion. Calling it from both
-        MOVING_TO_PRECISE and AWAITING_DISTRIBUTION lets the chute move as soon
-        as the recognition result exists, while context-owned latches make the
-        operation idempotent across the state transition.
-        """
-        obj = self.ctx.known_object
-        if obj is None:
-            return False
-        current = time.monotonic() if now is None else float(now)
-
-        if not self.ctx.classification_applied:
-            with self.ctx.classify_lock:
-                result = self.ctx.classification_result
-                error = self.ctx.classification_error
-            started = float(self.ctx.classify_started_at)
-            elapsed = max(0.0, current - started) if started > 0.0 else 0.0
-            timed_out = (
-                started > 0.0
-                and elapsed > float(self.ctx.config.classify_timeout_s)
-            )
-            if result is None and error is None and not timed_out:
-                return False
-            if timed_out and result is None and error is None:
-                error = "timeout"
-                self.logger.error(
-                    f"{LOG_TAG} Brickognize timed out after "
-                    f"{self.ctx.config.classify_timeout_s}s - routing unknown"
-                )
-            elif error is not None:
-                self.logger.error(
-                    f"{LOG_TAG} Brickognize failed after {elapsed:.2f}s: {error}"
-                )
-            else:
-                items = result.get("items", []) if isinstance(result, dict) else []
-                self.logger.info(
-                    f"{LOG_TAG} Brickognize returned {len(items)} item(s) in "
-                    f"{elapsed:.2f}s; top={items[0] if items else None}"
-                )
-            self.updateKnownObjectWithResult(result, error)
-            self.dumpBurstCaptureArtifacts(
-                all_captures=list(self.ctx.captured_crops),
-                selected_captures=list(self.ctx.selected_captures),
-                result=result,
-                error=error,
-            )
-            self.ctx.classification_applied = True
-
-        if not self.ctx.distribution_placed:
-            if self.ctx.multi_feed_detected:
-                obj.part_id = None
-                obj.part_name = None
-                obj.classification_status = ClassificationStatus.multi_drop_fail
-            elif obj.part_id is None and obj.classification_status in (
-                ClassificationStatus.pending,
-                ClassificationStatus.classifying,
-            ):
-                obj.classification_status = ClassificationStatus.unknown
-            self.transport.placePieceForDistribution(obj)
-            self.ctx.distribution_placed = True
-            self.logger.info(
-                f"{LOG_TAG} handed piece {obj.uuid[:8]} to distribution while "
-                f"C4 transfer continues (status={obj.classification_status}, "
-                f"part_id={obj.part_id})"
-            )
-        return True
-
     def startCaptureSweepMove(self, output_degrees: float, speed_usteps_per_s: int) -> bool:
         return self.startOutputMove(output_degrees, speed_usteps_per_s)
 
@@ -244,42 +175,6 @@ class Rev01BaseState(BaseState):
         obj.aborted = True
         self.logger.info(f"{LOG_TAG} abandoning in-flight piece {obj.uuid[:8]} ({reason})")
         self.emitKnownObject()
-
-    def canAbandonLostTrackObject(self, piece_uuid: str | None) -> bool:
-        """Return whether a faulted rev01 cycle can be removed without credit."""
-        obj = self.ctx.known_object
-        if (
-            obj is None
-            or not isinstance(piece_uuid, str)
-            or obj.uuid != piece_uuid
-        ):
-            return False
-        if not self.ctx.distribution_placed:
-            return True
-        cancel = getattr(self.transport, "cancelPieceForDistribution", None)
-        positioned = self.transport.getPieceForDistributionPositioning()
-        return bool(
-            callable(cancel)
-            and positioned is not None
-            and positioned.uuid == piece_uuid
-        )
-
-    def abandonLostTrackObject(self, reason: str) -> bool:
-        """Cancel a faulted C4 cycle without creating a distribution credit."""
-        obj = self.ctx.known_object
-        if obj is None or not self.canAbandonLostTrackObject(obj.uuid):
-            return False
-        if self.ctx.distribution_placed:
-            canceled = self.transport.cancelPieceForDistribution(obj.uuid)
-            if canceled is None:
-                return False
-        obj.aborted = True
-        obj.updated_at = time.time()
-        self.logger.info(
-            f"{LOG_TAG} abandoning lost-track piece {obj.uuid[:8]} ({reason})"
-        )
-        self.emitKnownObject()
-        return True
 
     @staticmethod
     def encodeFrame(frame: np.ndarray) -> Optional[str]:
@@ -399,14 +294,18 @@ class Rev01BaseState(BaseState):
         return [crops[idx] for idx in chosen_indices]
 
     def spawnClassifyThread(self, all_captures: list[np.ndarray]) -> None:
-        # Provider I/O runs off the control loop. Optional upstream imagery is
-        # already captured and transfer-owned; it never creates a wait here.
+        # Runs entirely off the state-machine thread: the Brickognize fan-out is
+        # blocking HTTP and MUST NOT run on the main loop. Fires the parallel
+        # request fan-out (the combined call plus single-image calls). The
+        # combined call's result is kept whenever it recognizes the piece at all;
+        # otherwise the highest-confidence single-image call wins (see
+        # _runClassifyRequests).
         obj = self.ctx.known_object
         piece_uuid = obj.uuid if obj is not None else None
-        cycle_id = int(self.ctx.cycle_id)
         # Up to classify_burst_count frames drive classification: they are the
         # C4 images sent to Brickognize. _selectBurstIndices runs the
-        # existing within-burst geometry and quality selection. The rest of
+        # within-burst quality selection, which ships FEWER frames when part of
+        # the burst is motion-blurred or the piece isn't contained. The rest of
         # the burst is kept on the KnownObject (used=False) for review.
         n_use = max(1, int(self.ctx.config.classify_burst_count))
         burst_entries = (
@@ -417,16 +316,20 @@ class Rev01BaseState(BaseState):
         chosen = [i for i in self._selectBurstIndices(all_captures, n_use) if i < len(burst_entries)]
         used_entries = [burst_entries[i] for i in chosen]
         burst_crops = [all_captures[i] for i in chosen]
-        # Prefer the sharpest usable C4 view, then additional distinct C4 poses.
-        # Optional upstream imagery requires independent physical identity.
-        qualities = self.ctx.captured_crop_quality
-        best = (crop_quality.bestIndex([qualities[i] for i in chosen])
-                if chosen and len(qualities) == len(all_captures) else None)
-        if best is not None and best != 0:
-            burst_crops.insert(0, burst_crops.pop(best))
-            used_entries.insert(0, used_entries.pop(best))
-        optional_view = self.ctx.owned_upstream_view
-        self.ctx.owned_upstream_view = None  # Consume once; never reuse on a later piece.
+        stamps = list(self.ctx.captured_crop_timestamps)
+        # Arrival at C4. Every candidate's dt feature is measured against this,
+        # so it has to be the FIRST burst frame, not the sharpest or the last.
+        arrival_ts = float(stamps[0]) if stamps else float(time.time())
+        # Best-quality burst frame is the anchor the matcher compares against.
+        anchor_bgr = None
+        if burst_crops:
+            qualities = self.ctx.captured_crop_quality
+            best = (
+                crop_quality.bestIndex([qualities[i] for i in chosen])
+                if len(qualities) == len(all_captures)
+                else None
+            )
+            anchor_bgr = burst_crops[best] if best is not None else burst_crops[-1]
 
         def _run() -> None:
             try:
@@ -436,67 +339,60 @@ class Rev01BaseState(BaseState):
                 ]
                 if not sendable:
                     with self.ctx.classify_lock:
-                        if self._classificationCycleCurrentLocked(cycle_id, piece_uuid):
-                            self.ctx.classification_error = "no_captures"
+                        self.ctx.classification_error = "no_captures"
                     return
-                upstream = self._readyUpstreamImages(optional_view, cycle_id, piece_uuid)
-                sendable[1:1] = upstream
-                from recognition_views import distinct_indices
-                sendable = [sendable[i] for i in distinct_indices(
-                    [image.bgr for image in sendable], limit=min(4, MAX_QUERY_IMAGES))]
-                if not self._classificationCycleCurrent(cycle_id, piece_uuid):
-                    return
+                # Upstream C2/C3 views of this same piece, found by the
+                # piece-link model. They are fused into the request alongside the
+                # burst, so they must be resolved BEFORE the fan-out — the burst
+                # gives up slots so the total stays under Brickognize's limit.
+                sendable += self._gatherLinkMatches(
+                    piece_uuid,
+                    anchor_bgr,
+                    arrival_ts,
+                    max_inject=MAX_QUERY_IMAGES - len(sendable),
+                )
                 # The hosted color provider (when selected) runs alongside the
-                # Brickognize request rather than after it, so choosing it costs
+                # Brickognize fan-out rather than after it, so choosing it costs
                 # no extra wall-clock unless it is slower than Brickognize.
                 hosted_color = self._maybeStartHostedColorPredict(sendable, piece_uuid)
                 requests = self._buildClassifyRequests(sendable)
-                self._runClassifyRequests(
-                    requests,
-                    piece_uuid,
-                    hosted_color,
-                    expected_cycle_id=cycle_id,
-                )
+                self._runClassifyRequests(requests, piece_uuid, hosted_color)
             except Exception as exc:
                 with self.ctx.classify_lock:
-                    if self._classificationCycleCurrentLocked(cycle_id, piece_uuid):
-                        self.ctx.classification_error = str(exc)
+                    self.ctx.classification_error = str(exc)
 
         thread = threading.Thread(target=_run, daemon=True)
         self.ctx.classify_thread = thread
         thread.start()
 
-    def _classificationCycleCurrentLocked(
-        self, expected_cycle_id: int, piece_uuid: Optional[str]
-    ) -> bool:
-        obj = self.ctx.known_object
-        return bool(
-            int(self.ctx.cycle_id) == int(expected_cycle_id)
-            and obj is not None
-            and obj.uuid == piece_uuid
-        )
-
-    def _classificationCycleCurrent(
-        self, expected_cycle_id: int, piece_uuid: Optional[str]
-    ) -> bool:
-        with self.ctx.classify_lock:
-            return self._classificationCycleCurrentLocked(expected_cycle_id, piece_uuid)
-
-    def _readyUpstreamImages(self, view, cycle_id, piece_uuid):
-        # Indexed release ownership does not identify the physical C4 piece.
-        # _admit stamps this receiver's UUID/cycle onto a channel-local C3 crop;
-        # equality of those copied values is circular, not cross-camera proof.
-        # The original collector also has only C3-local track generations. Until
-        # an independent same-piece link exists, these candidates are ineligible.
-        # C4 classification continues immediately: no lookup, wait or model call.
-        return []
-
     def _buildClassifyRequests(self, sendable: list[_SendImage]) -> list[_ClassifyRequest]:
-        # One provider request owns the selected available views. The former
-        # parallel single-image request was redundant; legacy config cannot
-        # re-enable that duplicate on this production path.
-        return [_ClassifyRequest(ClassificationAttemptStrategy.combined,
-                                 'combined', list(sendable))]
+        # The parallel request fan-out. All of these are submitted at once; the
+        # highest-confidence result wins (see _runClassifyRequests). They are
+        # redundant, not sequential retries — a lone clean frame frequently
+        # recognizes a piece the fused set confuses, and firing every variant
+        # concurrently costs the same wall-clock as the slowest single call.
+        #   combined        — the full set of used burst frames
+        #   single_burst    — only the last (most-settled) burst frame, alone
+        # A single-image request equal to the combined call (e.g. combined is
+        # already just one burst frame) is skipped so we never pay for a duplicate.
+        burst = [s for s in sendable if s.rec.source == "c4_burst"]
+        requests: list[_ClassifyRequest] = [
+            _ClassifyRequest(
+                ClassificationAttemptStrategy.combined, "combined", list(sendable)
+            )
+        ]
+        cfg = self.ctx.config
+        if getattr(cfg, "classify_parallel_single_burst", True) and burst:
+            last_burst = burst[-1]
+            if not (len(sendable) == 1 and sendable[0] is last_burst):
+                requests.append(
+                    _ClassifyRequest(
+                        ClassificationAttemptStrategy.single_burst,
+                        "single_burst",
+                        [last_burst],
+                    )
+                )
+        return requests
 
     @staticmethod
     def _topItem(result: object) -> Optional[dict]:
@@ -594,70 +490,56 @@ class Rev01BaseState(BaseState):
         thread.start()
         return holder
 
-    def _resolveHostedColor(
-        self,
-        hosted_color: Optional[dict],
-        *,
-        expected_cycle_id: int | None = None,
-        piece_uuid: Optional[str] = None,
-    ) -> bool:
+    def _resolveHostedColor(self, hosted_color: Optional[dict]) -> None:
         # Joins the hosted request within its budget and records BOTH the color
         # override and which provider actually answered. A timeout or a bad
         # payload is not an error: the piece keeps Brickognize's color and is
         # recorded as brickognize-sourced, so the stored provenance always
         # reflects what really produced the color rather than what was configured.
-        provider = COLOR_PROVIDER_BRICKOGNIZE
-        resolved_color: Optional[tuple[str, str]] = None
-        resolved_confidence: Optional[float] = None
-        log_message: Optional[str] = None
-        if hosted_color is not None:
-            remaining = max(
-                0.0,
-                HOSTED_COLOR_JOIN_BUDGET_S
-                - (time.monotonic() - hosted_color["started_at"]),
+        if hosted_color is None:
+            self.ctx.color_provider = COLOR_PROVIDER_BRICKOGNIZE
+            self.ctx.hosted_color = None
+            self.ctx.hosted_color_confidence = None
+            return
+        remaining = max(
+            0.0,
+            HOSTED_COLOR_JOIN_BUDGET_S - (time.monotonic() - hosted_color["started_at"]),
+        )
+        hosted_color["thread"].join(remaining)
+        result = hosted_color.get("result")
+        color_id = result.get("color_id") if isinstance(result, dict) else None
+        color_name = result.get("color_name") if isinstance(result, dict) else None
+        confidence = result.get("confidence") if isinstance(result, dict) else None
+        if color_id is None or not color_name:
+            self.ctx.color_provider = COLOR_PROVIDER_BRICKOGNIZE
+            self.ctx.hosted_color = None
+            self.ctx.hosted_color_confidence = None
+            self.logger.info(
+                f"{LOG_TAG} hosted color unavailable within "
+                f"{HOSTED_COLOR_JOIN_BUDGET_S:.0f}s — falling back to Brickognize's color"
             )
-            hosted_color["thread"].join(remaining)
-            result = hosted_color.get("result")
-            color_id = result.get("color_id") if isinstance(result, dict) else None
-            color_name = result.get("color_name") if isinstance(result, dict) else None
-            confidence = result.get("confidence") if isinstance(result, dict) else None
-            if color_id is not None and color_name:
-                provider = COLOR_PROVIDER_HIVE_BASICALLY
-                # Hive returns BrickLink color ids as ints; the sorting profile
-                # (and Brickognize) key on the same ids as strings.
-                resolved_color = (str(color_id), str(color_name))
-                resolved_confidence = (
-                    float(confidence) if isinstance(confidence, (int, float)) else None
-                )
-                log_message = f"{LOG_TAG} hosted color applied: {color_name} ({color_id})"
-                if resolved_confidence is not None:
-                    log_message += f" @ {resolved_confidence:.2f}"
-            else:
-                log_message = (
-                    f"{LOG_TAG} hosted color unavailable within "
-                    f"{HOSTED_COLOR_JOIN_BUDGET_S:.0f}s — falling back to "
-                    "Brickognize's color"
-                )
-
-        with self.ctx.classify_lock:
-            if expected_cycle_id is not None and not self._classificationCycleCurrentLocked(
-                expected_cycle_id, piece_uuid
-            ):
-                return False
-            self.ctx.color_provider = provider
-            self.ctx.hosted_color = resolved_color
-            self.ctx.hosted_color_confidence = resolved_confidence
-        if log_message is not None:
-            self.logger.info(log_message)
-        return True
+            return
+        # Hive returns BrickLink color ids as ints; the sorting profile (and
+        # Brickognize) key on the same ids as strings.
+        self.ctx.color_provider = COLOR_PROVIDER_HIVE_BASICALLY
+        self.ctx.hosted_color = (str(color_id), str(color_name))
+        self.ctx.hosted_color_confidence = (
+            float(confidence) if isinstance(confidence, (int, float)) else None
+        )
+        self.logger.info(
+            f"{LOG_TAG} hosted color applied: {color_name} ({color_id})"
+            + (
+                f" @ {self.ctx.hosted_color_confidence:.2f}"
+                if self.ctx.hosted_color_confidence is not None
+                else ""
+            )
+        )
 
     def _runClassifyRequests(
         self,
         requests: list[_ClassifyRequest],
         piece_uuid: Optional[str],
         hosted_color: Optional[dict] = None,
-        *,
-        expected_cycle_id: int | None = None,
     ) -> None:
         # Fire every request concurrently and apply one result. No sequential
         # retries: the calls are redundant and run in parallel. The combined
@@ -671,14 +553,6 @@ class Rev01BaseState(BaseState):
         # when EVERY request errors (a transport failure across the board) is the
         # piece marked errored — a smaller image set can't fix a network failure.
         results = self._runRequestsParallel(requests, piece_uuid)
-        if expected_cycle_id is not None and not self._classificationCycleCurrent(
-            expected_cycle_id, piece_uuid
-        ):
-            self.logger.info(
-                f"{LOG_TAG} discarded late classification for abandoned cycle "
-                f"{(piece_uuid or 'unknown')[:8]}"
-            )
-            return
         attempts: list[ClassificationAttempt] = []
         # ClassificationAttempt <-> the request that produced it, so the applied
         # one can be flagged in _finalizeAttempts.
@@ -711,9 +585,6 @@ class Rev01BaseState(BaseState):
                         str(top_color.get("name"))
                         if isinstance(top_color, dict) and top_color.get("name") is not None
                         else None
-                    ),
-                    color_confidence=(
-                        top_color.get("score") if isinstance(top_color, dict) else None
                     ),
                     error=error,
                     duration_s=dur,
@@ -784,10 +655,7 @@ class Rev01BaseState(BaseState):
             )
         else:
             with self.ctx.classify_lock:
-                if expected_cycle_id is None or self._classificationCycleCurrentLocked(
-                    expected_cycle_id, piece_uuid
-                ):
-                    self.ctx.classification_error = errors[0] if errors else "no_result"
+                self.ctx.classification_error = errors[0] if errors else "no_result"
             self.logger.warning(
                 f"{LOG_TAG} all {len(requests)} classify requests errored"
             )
@@ -795,26 +663,9 @@ class Rev01BaseState(BaseState):
         # MUST settle before _finalizeAttempts publishes classification_result:
         # AWAITING_DISTRIBUTION polls for that field, not for this thread, so a
         # provider resolved afterwards could miss the piece entirely.
-        if not self._resolveHostedColor(
-            hosted_color,
-            expected_cycle_id=expected_cycle_id,
-            piece_uuid=piece_uuid,
-        ):
-            return
-        with self.ctx.classify_lock:
-            if expected_cycle_id is not None and not self._classificationCycleCurrentLocked(
-                expected_cycle_id, piece_uuid
-            ):
-                return
-            self.ctx.mold_provider = MOLD_PROVIDER_BRICKOGNIZE
-        self._finalizeAttempts(
-            requests,
-            attempts,
-            attempt_reqs,
-            applied,
-            expected_cycle_id=expected_cycle_id,
-            piece_uuid=piece_uuid,
-        )
+        self._resolveHostedColor(hosted_color)
+        self.ctx.mold_provider = MOLD_PROVIDER_BRICKOGNIZE
+        self._finalizeAttempts(requests, attempts, attempt_reqs, applied)
 
     def _finalizeAttempts(
         self,
@@ -822,10 +673,7 @@ class Rev01BaseState(BaseState):
         attempts: list[ClassificationAttempt],
         attempt_reqs: list[_ClassifyRequest],
         applied: Optional[tuple[_ClassifyRequest, dict]],
-        *,
-        expected_cycle_id: int | None = None,
-        piece_uuid: Optional[str] = None,
-    ) -> bool:
+    ) -> None:
         # Apply the winning request if one recognized the piece; otherwise fall
         # back to the first no-recognition result (its image set becomes the
         # "used" set). Every sendable image either drove the applied request
@@ -848,10 +696,6 @@ class Rev01BaseState(BaseState):
         )
         winner_result = applied[1] if applied is not None else None
         with self.ctx.classify_lock:
-            if expected_cycle_id is not None and not self._classificationCycleCurrentLocked(
-                expected_cycle_id, piece_uuid
-            ):
-                return False
             self.ctx.classification_attempts = list(attempts)
             self.ctx.classification_strategy = strategy
             self.ctx.selected_captures = [
@@ -863,7 +707,6 @@ class Rev01BaseState(BaseState):
             f"{LOG_TAG} classify done: applied [{strategy.value}] "
             f"(attempts={[(a.label, a.found) for a in attempts]})"
         )
-        return True
 
     def updateKnownObjectWithResult(self, result: object, error: Optional[str]) -> None:
         obj = self.ctx.known_object
@@ -888,24 +731,6 @@ class Rev01BaseState(BaseState):
         elif isinstance(result, dict):
             items = result.get("items", [])
             colors = result.get("colors", [])
-            obj.classification_item_candidates = [
-                {
-                    key: item.get(key)
-                    for key in ("id", "name", "category", "score", "rank", "type")
-                    if item.get(key) is not None
-                }
-                for item in items[:16]
-                if isinstance(item, dict) and item.get("id") is not None
-            ]
-            obj.classification_color_candidates = [
-                {
-                    key: color.get(key)
-                    for key in ("id", "name", "score", "rank")
-                    if color.get(key) is not None
-                }
-                for color in colors[:16]
-                if isinstance(color, dict) and color.get("id") is not None
-            ]
             # Correction provenance from the applied request: the search id, so a
             # later user correction can be submitted to Brickognize's feedback API
             # without re-querying. Per-result ranks are set alongside the applied
@@ -938,13 +763,6 @@ class Rev01BaseState(BaseState):
                 obj.color_id, obj.color_name = self.ctx.hosted_color
                 obj.color_confidence = self.ctx.hosted_color_confidence
                 obj.brickognize_color_rank = None
-                obj.classification_color_candidates = [
-                    {
-                        "id": str(obj.color_id),
-                        "name": str(obj.color_name),
-                        "score": obj.color_confidence,
-                    }
-                ]
         else:
             obj.classification_status = ClassificationStatus.unknown
 
@@ -979,8 +797,6 @@ class Rev01BaseState(BaseState):
         anchor_bgr,
         arrival_ts: float,
         max_inject: int,
-        *,
-        expected_cycle_id: int | None = None,
     ) -> list["_SendImage"]:
         """Upstream C2/C3 views of this piece, scored by the piece-link model.
 
@@ -1007,11 +823,6 @@ class Rev01BaseState(BaseState):
             self.logger.info(f"{LOG_TAG} link match: no C2/C3 candidates in window")
             return []
 
-        if expected_cycle_id is not None and not self._classificationCycleCurrent(
-            expected_cycle_id, piece_uuid
-        ):
-            return []
-
         obj = self.ctx.known_object
         sendable: list[_SendImage] = []
         attached: list[RecognitionImage] = []
@@ -1034,11 +845,7 @@ class Rev01BaseState(BaseState):
 
         if obj is not None and attached:
             with self.ctx.classify_lock:
-                cycle_current = (
-                    expected_cycle_id is None
-                    or self._classificationCycleCurrentLocked(expected_cycle_id, piece_uuid)
-                )
-                if cycle_current and self.ctx.known_object is obj:
+                if self.ctx.known_object is obj:
                     # NOT recognition_image_set. That list is ground truth (the
                     # C4 burst) and feeds piece_images -> Hive -> training data;
                     # model guesses live on their own list and never enter that

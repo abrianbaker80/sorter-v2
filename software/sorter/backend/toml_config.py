@@ -179,31 +179,26 @@ def setProfilerConfig(updates: dict[str, Any]) -> dict[str, Any]:
 
 def getGoToAngleConfig() -> dict[str, Any]:
     from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict, withC3ReleaseMargin,
+        GoToAngleConfig, configToDict,
     )
     config = _read_toml()
     section = config.get("feeder_go_to_angle")
     defaults = configToDict(GoToAngleConfig())
     if isinstance(section, dict):
-        return {**defaults, **{k: v for k, v in withC3ReleaseMargin(section).items() if k in defaults}}
+        return {**defaults, **{k: v for k, v in section.items() if k in defaults}}
     return defaults
 
 
 def setGoToAngleConfig(updates: dict[str, Any]) -> dict[str, Any]:
     from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict, withC3ReleaseMargin, validateC3ReleaseMargin,
+        GoToAngleConfig, configToDict,
     )
     defaults = configToDict(GoToAngleConfig())
     valid = {k: v for k, v in updates.items() if k in defaults}
 
-    if "ch3_release_margin_output_deg" in valid:
-        valid["ch3_release_margin_output_deg"] = validateC3ReleaseMargin(
-            valid["ch3_release_margin_output_deg"]
-        )
-
     def updater(config: dict[str, Any]) -> None:
         existing = config.get("feeder_go_to_angle")
-        base = withC3ReleaseMargin(existing if isinstance(existing, dict) else {})
+        base = dict(existing) if isinstance(existing, dict) else {}
         base.update(valid)
         config["feeder_go_to_angle"] = base
 
@@ -473,7 +468,10 @@ _INCIDENT_FEEDER_JAM = "feeder_jam"
 _INCIDENT_HANDLING_DEFAULTS: dict[str, str] = {
     _INCIDENT_EXIT_STUCK: _INCIDENT_MODE_AUTOMATIC,
     _INCIDENT_FEEDER_JAM: _INCIDENT_MODE_AUTOMATIC,
-    "distribution_chute_jam": _INCIDENT_MODE_MANUAL,
+    # Off by default: the chute-jam check is a move-budget timeout, and on
+    # deployed machines it has fired on stalls unrelated to the chute
+    # (#594). StallGuard still covers a real mechanical jam.
+    "distribution_chute_jam": _INCIDENT_MODE_OFF,
     "distribution_servo_bus_offline": _INCIDENT_MODE_MANUAL,
     "distribution_no_bin_available": _INCIDENT_MODE_MANUAL,
 }

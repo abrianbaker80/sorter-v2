@@ -1,0 +1,15 @@
+{
+  "zero_phase_deg": 195.772024,
+  "geometry": "f28ecb1df8dc3890da4070d74bcc0ef8800f84b7bc05e40c5a775ee1c39c49c7",
+  "center": [
+    1962,
+    1078
+  ],
+  "shape": [
+    2160,
+    3840
+  ],
+  "camera_id": "classification_channel:/dev/video0",
+  "base_url": "http://10.55.0.2:18082",
+  "operator_reference": "C3 exactly centered halfway between the two fins; receiving pocket 0 at P6."
+}

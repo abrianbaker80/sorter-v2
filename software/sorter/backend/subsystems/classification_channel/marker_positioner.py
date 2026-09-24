@@ -18,6 +18,7 @@ import statistics
 import tempfile
 import time
 from typing import Callable, Protocol
+from uuid import uuid4
 
 
 def error_deg(target: float, actual: float) -> float:
@@ -192,11 +193,15 @@ class StableMarkers:
             return None
         if sample.captured_ns <= self.fence.captured_ns + self.limits.settle_s * 1e9:
             return None
-        self.samples = [
-            s
-            for s in self.samples
-            if now - s.received_mono <= self.limits.max_sample_age_s
-        ]
+        # Each observation passed freshness at its own validation above.
+        # Retain that stationary history across a continuous stream instead of
+        # expiring it again while the next image is being decoded/fitted. A gap
+        # in source captures still breaks the evidence chain; old observations
+        # cannot bridge camera outages or sparse polling to manufacture stability.
+        if self.samples and (
+            sample.captured_ns - self.samples[-1].captured_ns
+        ) / 1e9 > self.limits.max_sample_age_s:
+            self.samples.clear()
         self.samples.append(sample)
         offsets = [
             error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples
@@ -218,6 +223,95 @@ class StableMarkers:
             error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples
         ]
         phase = (self.samples[0].phase_deg + statistics.median(offsets)) % 360
+        return MarkerSample(
+            sample.epoch,
+            sample.sequence,
+            sample.captured_ns,
+            sample.received_mono,
+            phase,
+            sample.geometry,
+        )
+
+
+class SourceContinuityMarkers(StableMarkers):
+    """Stopped-position evidence follows source captures, not poll timing.
+
+    Older valid fits support stability across skipped captures. Only a fresh
+    newest fit may confirm position, and source discontinuity still resets the
+    window. This is the same rule used by the frozen startup bootstrap.
+    """
+
+    def __init__(self, fence, geometry, limits, *, capture_period_s=None):
+        super().__init__(fence, geometry, limits)
+        self.capture_period_s = capture_period_s
+        self.last_reason = None
+        self.last_reset_reason = None
+
+    def add(self, sample: MarkerSample | None, now: float) -> MarkerSample | None:
+        self.last_reason = None
+        self.last_reset_reason = None
+        if sample is None:
+            self.samples.clear()
+            self.last_reason = self.last_reset_reason = "no_marker_fit"
+            return None
+        if sample.epoch != self.fence.epoch or sample.geometry != self.geometry:
+            self.samples.clear()
+            self.last_reason = self.last_reset_reason = "camera_epoch_or_geometry_changed"
+            raise PositionError("camera epoch or geometry changed during positioning")
+        if sample.sequence <= self.fence.sequence or sample.captured_ns <= self.fence.captured_ns:
+            if self.samples:
+                self.samples.clear()
+                self.last_reset_reason = "before_source_frame_fence"
+            self.last_reason = "before_source_frame_fence"
+            return None
+        if sample.sequence <= self.last_sequence or sample.captured_ns <= self.last_capture:
+            self.samples.clear()
+            self.last_sequence, self.last_capture = sample.sequence, sample.captured_ns
+            self.last_reason = self.last_reset_reason = "source_sequence_or_capture_not_advancing"
+            return None
+        if self.samples:
+            previous = self.samples[-1]
+            elapsed = (sample.captured_ns - previous.captured_ns) / 1e9
+            skipped = sample.sequence - previous.sequence - 1
+            expected = skipped * (self.capture_period_s or 0.0)
+            if elapsed - expected > self.limits.max_sample_age_s:
+                self.samples.clear()
+                self.last_reset_reason = "source_capture_discontinuity"
+        self.last_sequence, self.last_capture = sample.sequence, sample.captured_ns
+        age = now - sample.received_mono
+        if not math.isfinite(age) or age < 0:
+            self.last_reason = "invalid_or_future_validation_age"
+            return None
+        if not math.isfinite(sample.phase_deg) or not 0 <= sample.phase_deg < 360:
+            self.samples.clear()
+            self.last_reason = self.last_reset_reason = "invalid_marker_phase"
+            return None
+        if sample.captured_ns <= self.fence.captured_ns + self.limits.settle_s * 1e9:
+            self.last_reason = "inside_post_fence_settle"
+            return None
+        self.samples.append(sample)
+        offsets = [error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples]
+        if max(offsets) - min(offsets) > self.limits.stable_spread_deg:
+            self.samples = [sample]
+            self.last_reason = self.last_reset_reason = "unstable_marker_phase"
+            return None
+        if len(self.samples) > 32:
+            self.samples = self.samples[:1] + self.samples[-31:]
+        if (
+            age > self.limits.max_sample_age_s
+            or len(self.samples) < 3
+            or (sample.captured_ns - self.samples[0].captured_ns) / 1e9
+            < self.limits.stable_span_s
+        ):
+            self.last_reason = (
+                "stale_newest_history_retained" if age > self.limits.max_sample_age_s
+                else "insufficient_stable_samples" if len(self.samples) < 3
+                else "insufficient_stable_span"
+            )
+            return None
+        offsets = [error_deg(s.phase_deg, self.samples[0].phase_deg) for s in self.samples]
+        phase = (self.samples[0].phase_deg + statistics.median(offsets)) % 360
+        self.last_reason = "stable_fresh_fit"
         return MarkerSample(
             sample.epoch,
             sample.sequence,
@@ -305,6 +399,7 @@ class MarkerPositioner:
         *,
         limits: PositionLimits | None = None,
         clock: Callable[[], float] = time.monotonic,
+        diagnostic_sink: Callable[[dict], None] | None = None,
     ):
         self.motor, self.source, self.mapping = motor, source, mapping
         if motor.coordinate_identity() != mapping.motor_coordinates:
@@ -323,9 +418,96 @@ class MarkerPositioner:
         self._total_correction = 0.0
         self._epoch = None
         self._last_error = None
+        if diagnostic_sink is None:
+            logger = getattr(getattr(getattr(motor, "stepper", None), "_gc", None), "logger", None)
+            if callable(getattr(logger, "_log", None)):
+                diagnostic_sink = lambda row: logger._log(
+                    "INFO", "[C4-POSITIONER] " + json.dumps(row, separators=(",", ":"))
+                )
+        self._diagnostic_sink = diagnostic_sink
+        self._diagnostic_started = False
+        self._diagnostic_active = False
+        self._diagnostic_id = None
+        self._first_post_fence_frame = None
+
+    def _record(self, event: str, **fields):
+        """Best-effort passive evidence; never participates in control decisions."""
+        if not self._diagnostic_active or self._diagnostic_sink is None:
+            return
+        try:
+            self._diagnostic_sink({
+                "attempt_id": self._diagnostic_id,
+                "event": event,
+                "recorded_wall_s": time.time(),
+                "bound_boundary": self.boundary,
+                "pending_boundary": self.pending,
+                **fields,
+            })
+        except Exception:
+            pass
+
+    def _history_evidence(self):
+        return [
+            {"sequence": s.sequence, "source_capture_monotonic_ns": s.captured_ns,
+             "phase_deg": s.phase_deg}
+            for s in getattr(self._window, "samples", ())
+        ]
+
+    def _record_observation(self, raw, validated_at, accepted):
+        if not self._diagnostic_active:
+            return
+        source_row = getattr(self.source, "last_observation", None)
+        source_row = source_row if isinstance(source_row, dict) else {}
+        if raw is not None and (
+            source_row.get("sequence") != raw.sequence
+            or source_row.get("source_capture_monotonic_ns") != raw.captured_ns
+        ):
+            source_row = {}
+        epoch = raw.epoch if raw is not None else source_row.get("epoch")
+        sequence = raw.sequence if raw is not None else source_row.get("sequence")
+        capture = raw.captured_ns if raw is not None else source_row.get("source_capture_monotonic_ns")
+        retrieval = raw.received_mono if raw is not None else source_row.get("retrieval_monotonic_s")
+        phase = raw.phase_deg if raw is not None else source_row.get("phase_deg")
+        fence = self._window.fence
+        past_fence = (
+            epoch == fence.epoch and sequence is not None and capture is not None
+            and sequence > fence.sequence
+            and capture > fence.captured_ns + self.limits.settle_s * 1e9
+        )
+        stage = "post_motion" if self._receipt is not None else "pre_motion"
+        evidence = {
+            "stage": stage,
+            "source_epoch": epoch,
+            "source_sequence": sequence,
+            "source_capture_monotonic_ns": capture,
+            "retrieval_monotonic_s": retrieval,
+            "retrieval_wall_s": source_row.get("retrieval_wall_s"),
+            "validation_monotonic_s": validated_at,
+            "age_s": validated_at - retrieval if retrieval is not None else None,
+            "raw_phase_deg": phase,
+            "stable_phase_deg": accepted.phase_deg if accepted is not None else None,
+            "past_stopped_frame_fence": past_fence,
+            "window_reason": getattr(self._window, "last_reason", None),
+            "history_reset_reason": getattr(self._window, "last_reset_reason", None),
+            "history": self._history_evidence(),
+        }
+        if stage == "post_motion" and past_fence and self._first_post_fence_frame is None:
+            self._first_post_fence_frame = {k: evidence[k] for k in (
+                "source_epoch", "source_sequence", "source_capture_monotonic_ns",
+                "retrieval_monotonic_s", "raw_phase_deg",
+            )}
+            self._record("first_post_fence_frame", **self._first_post_fence_frame)
+        self._record("marker_observation", **evidence)
 
     def _fail(self, exc: Exception):
         self.fault = str(exc)
+        try:
+            self._record("failure", reason=self.fault,
+                         first_post_fence_frame=self._first_post_fence_frame,
+                         history=self._history_evidence())
+        except Exception:
+            pass
+        self._diagnostic_active = False
         try:
             self.on_fault(self.fault)
         finally:
@@ -339,12 +521,27 @@ class MarkerPositioner:
         self._token = self.motor.stationary_token()
         if self.motor.coordinate_identity() != self.mapping.motor_coordinates:
             raise PositionError("motor coordinates differ from persisted mapping")
+        fence_request_wall = time.time()
+        fence_request_monotonic = time.monotonic()
         fence = self.source.fence()
         self.motor.check_token(self._token)
         if self._epoch is not None and fence.epoch != self._epoch:
             raise PositionError("camera restarted during index")
         self._epoch = fence.epoch
-        self._window = StableMarkers(fence, self.mapping.geometry, self.limits)
+        self._window = SourceContinuityMarkers(
+            fence,
+            self.mapping.geometry,
+            self.limits,
+            capture_period_s=getattr(self.source, "capture_period_s", None),
+        )
+        self._record("stopped_frame_fence",
+                     stage="post_motion" if self._receipt is not None else "pre_motion",
+                     fence_request_wall_s=fence_request_wall,
+                     fence_request_monotonic_s=fence_request_monotonic,
+                     fence={"epoch": fence.epoch, "sequence": fence.sequence,
+                            "source_capture_monotonic_ns": fence.captured_ns},
+                     source_health=getattr(self.source, "last_fence_health", None),
+                     capture_period_s=getattr(self.source, "capture_period_s", None))
 
     def begin_bind(self, boundary: int) -> None:
         self._available()
@@ -374,6 +571,12 @@ class MarkerPositioner:
         self._corrections, self._total_correction = 0, 0.0
         self._last_error = None
         self._started = self.clock()
+        if not self._diagnostic_started and self._diagnostic_sink is not None:
+            self._diagnostic_started = self._diagnostic_active = True
+            self._diagnostic_id = uuid4().hex
+            self._first_post_fence_frame = None
+            self._record("index_requested", request_start_monotonic_s=self._started,
+                         request_start_wall_s=time.time(), speed=speed)
         try:
             # Verify idle custody of the motor, then re-observe the old physical
             # boundary before sending approximate travel. No stale bind reuse.
@@ -406,9 +609,20 @@ class MarkerPositioner:
             self._fail(exc)
 
     def _move(self, degrees: float):
+        requested_degrees = degrees * self.mapping.motor_sign
+        self._record("motor_request_start", request_start_wall_s=time.time(),
+                     request_start_monotonic_s=time.monotonic(),
+                     requested_degrees=requested_degrees)
         self._receipt = self.motor.start(
-            degrees * self.mapping.motor_sign, self._speed, self._token
+            requested_degrees, self._speed, self._token
         )
+        start = getattr(self._receipt, "start_position", None)
+        target = getattr(self._receipt, "target_position", None)
+        steps = ((target - start + 2**31) % 2**32) - 2**31 if start is not None and target is not None else None
+        self._record("motor_receipt", motor_id=getattr(self._receipt, "motor_id", None),
+                     generation=getattr(self._receipt, "generation", None),
+                     start_position=start, requested_steps=steps,
+                     target_position=target, requested_degrees=requested_degrees)
         self._window = None
 
     def poll(self) -> ConfirmedIndex | None:
@@ -425,19 +639,46 @@ class MarkerPositioner:
                 # Keep the receipt and recheck it on every observation tick;
                 # an intervening stop/replacement must invalidate confirmation.
                 if self._window is None:
+                    self._record("motor_completion_verified",
+                                 completion_wall_s=time.time(),
+                                 completion_monotonic_s=time.monotonic(),
+                                 stopped=True,
+                                 final_reported_step_counter=getattr(self._receipt, "target_position", None),
+                                 counter_source="tracked_move_complete verified MCU counter")
                     self._observe_stopped()
             self.motor.check_token(self._token)
-            sample = self._window.add(self.source.sample(), self.clock())
+            raw = self.source.sample()
+            validated_at = self.clock()
+            try:
+                sample = self._window.add(raw, validated_at)
+            except Exception:
+                try:
+                    self._record_observation(raw, validated_at, None)
+                except Exception:
+                    pass
+                raise
+            try:
+                self._record_observation(raw, validated_at, sample)
+            except Exception:
+                pass
             self.motor.check_token(self._token)
-            if self.clock() - self._started > self.limits.timeout_s:
-                raise PositionError("marker index deadline exceeded during observation")
             if sample is None:
+                if self.clock() - self._started > self.limits.timeout_s:
+                    raise PositionError("marker index deadline exceeded during observation")
                 return None
             target = self.boundary if self._preparing else self.pending
             residual = error_deg(self.mapping.phase(target), sample.phase_deg)
             if self._preparing:
+                if self.clock() - self._started > self.limits.timeout_s:
+                    raise PositionError("marker index deadline exceeded during observation")
                 if abs(residual) > self.limits.tolerance_deg:
                     raise PositionError("idle rotor moved off the bound marker target")
+                self._record("pre_motion_fit", source_epoch=sample.epoch,
+                             source_sequence=sample.sequence,
+                             source_capture_monotonic_ns=sample.captured_ns,
+                             retrieval_monotonic_s=sample.received_mono,
+                             retrieval_wall_s=(getattr(self.source, "last_observation", None) or {}).get("retrieval_wall_s"),
+                             phase_deg=sample.phase_deg, residual_deg=residual)
                 self._preparing = False
                 self._move(36.0 + residual)
                 return None
@@ -449,6 +690,10 @@ class MarkerPositioner:
                     f"marker correction did not converge: residual {residual:.3f} degrees"
                 )
             if abs(residual) <= self.limits.tolerance_deg:
+                # Retrieval on this clock follows source capture, so a frame
+                # retrieved by the deadline was necessarily captured in time.
+                if sample.received_mono > self._started + self.limits.timeout_s:
+                    raise PositionError("marker index deadline exceeded during observation")
                 result = ConfirmedIndex(
                     self.pending,
                     sample.phase_deg,
@@ -460,7 +705,16 @@ class MarkerPositioner:
                 )
                 self.boundary, self.pending = self.pending, None
                 self._receipt = None
+                self._record("confirmed", source_epoch=sample.epoch,
+                             source_sequence=sample.sequence,
+                             source_capture_monotonic_ns=sample.captured_ns,
+                             phase_deg=sample.phase_deg, residual_deg=residual,
+                             first_post_fence_frame=self._first_post_fence_frame,
+                             history=self._history_evidence())
+                self._diagnostic_active = False
                 return result
+            if self.clock() - self._started > self.limits.timeout_s:
+                raise PositionError("marker index deadline exceeded during observation")
             if (
                 self._binding
                 or self._corrections >= self.limits.max_corrections

@@ -1,9 +1,10 @@
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 
 @dataclass
 class GoToAngleConfig:
+    ch3_release_margin_output_deg: float = 3.0
     # +1 carries pieces toward the exit (camera-clockwise = forward motor
     # direction). Flip to -1 if a channel's stepper is wired the other way.
     forward_direction_sign: int = 1
@@ -22,8 +23,6 @@ class GoToAngleConfig:
     # between pulses so the downstream channel can confirm receipt before we
     # push again. Mirrors the reactive flow's precise pulsing.
     precise_pulse_output_deg: float = 3.0
-    # Extra clearance beyond the measured exit gap in C3 precise mode.
-    ch3_release_margin_output_deg: float = 3.0
     precise_pulse_pause_ms: int = 300
     # Bulk feeder (c_channel_1) has no vision zones: nudge it forward by a fixed
     # amount whenever c_channel_2's drop zone is clear.
@@ -35,15 +34,6 @@ class GoToAngleConfig:
     enable_ch1: bool = True
     enable_ch2: bool = True
     enable_ch3: bool = True
-
-    # Detect a piece that remains at the C1->C2 or C2->C3 transfer lip while
-    # the downstream rotor keeps moving beneath it.  A short upstream nudge
-    # seats the piece on the downstream rotor so normal transport can resume.
-    stuck_watchdog_enabled: bool = True
-    stuck_no_progress_ms: int = 5000
-    stuck_progress_epsilon_deg: float = 3.0
-    stuck_nudge_output_deg: float = 4.0
-    stuck_max_nudge_attempts: int = 3
 
     # --- Drop-zone detection persistence --------------------------------
     # Latch C2/C3 drop-zone occupancy: once a piece is seen in the drop zone,
@@ -107,14 +97,14 @@ _DEFAULTS = GoToAngleConfig()
 # ``section`` groups fields under a denoted subheader in the tuning UI. Order
 # within a section is preserved; sections appear in first-seen order.
 FIELD_META: list[dict] = [
+    {"section": "Precise hand-off", "key": "ch3_release_margin_output_deg", "label": "C3 release margin (output deg)", "type": "float", "default": _DEFAULTS.ch3_release_margin_output_deg, "description": "Extra C3 travel beyond the measured leading-piece exit gap in precise mode. Independent of C2 pulses; the maximum move clamp still applies. Unused when C3 fast eject is enabled."},
     {"section": "Motion", "key": "forward_direction_sign", "label": "Forward direction sign (+1/-1)", "type": "int", "default": _DEFAULTS.forward_direction_sign, "description": "Which way the motor turns to carry pieces toward the exit. Leave at +1; use -1 only if a channel's stepper is wired backwards and pieces move the wrong way."},
     {"section": "Motion", "key": "move_speed_usteps_per_s", "label": "Move speed (µsteps/s)", "type": "int", "default": _DEFAULTS.move_speed_usteps_per_s, "description": "Motor speed for every move on this page (microsteps per second). Higher = snappier moves."},
     {"section": "Motion", "key": "advance_output_deg", "label": "Normal advance (output deg)", "type": "float", "default": _DEFAULTS.advance_output_deg, "description": "Normal advance per move when pieces are present but none is at the exit yet — carries the train forward toward the exit zone."},
     {"section": "Motion", "key": "min_move_output_deg", "label": "Min move (output deg)", "type": "float", "default": _DEFAULTS.min_move_output_deg, "description": "Moves smaller than this are treated as noise and skipped."},
     {"section": "Motion", "key": "max_move_output_deg", "label": "Max move clamp (output deg)", "type": "float", "default": _DEFAULTS.max_move_output_deg, "description": "Clamp on any single move, so a bad angle calculation can never spin a channel wildly."},
     {"section": "Motion", "key": "settle_after_move_ms", "label": "Settle after advance (ms)", "type": "int", "default": _DEFAULTS.settle_after_move_ms, "description": "Cooldown after a normal advance before the channel is re-evaluated, giving pieces time to stop sliding."},
-    {"section": "Precise hand-off", "key": "precise_pulse_output_deg", "label": "C2 precise pulse angle (output deg)", "type": "float", "default": _DEFAULTS.precise_pulse_output_deg, "description": "Fixed C2 advance per precise pulse. Also used by the legacy vision flow; indexed C3 uses its separate release margin."},
-    {"section": "Precise hand-off", "key": "ch3_release_margin_output_deg", "label": "C3 release margin (output deg)", "type": "float", "default": _DEFAULTS.ch3_release_margin_output_deg, "description": "Extra C3 travel beyond the measured leading-piece exit gap in precise mode. Independent of C2 pulses; the maximum move clamp still applies. Unused when C3 fast eject is enabled."},
+    {"section": "Precise hand-off", "key": "precise_pulse_output_deg", "label": "Precise pulse angle (output deg)", "type": "float", "default": _DEFAULTS.precise_pulse_output_deg, "description": "At the exit, the piece is nudged forward by this small fixed angle per pulse instead of being shoved past the edge in one move."},
     {"section": "Precise hand-off", "key": "precise_pulse_pause_ms", "label": "Precise pulse pause between pulses (ms)", "type": "int", "default": _DEFAULTS.precise_pulse_pause_ms, "description": "Pause between precise pulses so the downstream channel can confirm receipt before the next push."},
     {"section": "C1 (bulk)", "key": "ch1_advance_output_deg", "label": "C1 bulk advance (output deg)", "type": "float", "default": _DEFAULTS.ch1_advance_output_deg, "description": "C1 (the bulk feeder) has no vision zones: it advances by this fixed amount whenever C2's drop zone is clear."},
     {"section": "C1 (bulk)", "key": "ch1_settle_after_move_ms", "label": "C1 settle after move (ms)", "type": "int", "default": _DEFAULTS.ch1_settle_after_move_ms, "description": "Cooldown after each C1 bulk advance before it may move again."},
@@ -122,11 +112,6 @@ FIELD_META: list[dict] = [
     {"section": "Channels", "key": "enable_ch1", "label": "Enable C1 (bulk)", "type": "bool", "default": _DEFAULTS.enable_ch1, "description": "Run the C1 (bulk) channel. Off = this channel never moves."},
     {"section": "Channels", "key": "enable_ch2", "label": "Enable C2", "type": "bool", "default": _DEFAULTS.enable_ch2, "description": "Run the C2 channel. Off = this channel never moves."},
     {"section": "Channels", "key": "enable_ch3", "label": "Enable C3", "type": "bool", "default": _DEFAULTS.enable_ch3, "description": "Run the C3 channel. Off = this channel never moves."},
-    {"section": "Jam recovery", "key": "stuck_watchdog_enabled", "label": "Enable transfer-lip recovery", "type": "bool", "default": _DEFAULTS.stuck_watchdog_enabled, "description": "Detect a piece that the downstream rotor cannot move because it is still hung on the upstream transfer lip, then nudge the upstream rotor to seat it."},
-    {"section": "Jam recovery", "key": "stuck_no_progress_ms", "label": "No-progress timeout (ms)", "type": "int", "default": _DEFAULTS.stuck_no_progress_ms, "description": "How long an actively driven piece may remain at the same travel position before automatic upstream recovery starts."},
-    {"section": "Jam recovery", "key": "stuck_progress_epsilon_deg", "label": "Progress threshold (output deg)", "type": "float", "default": _DEFAULTS.stuck_progress_epsilon_deg, "description": "Minimum forward travel that proves the piece is moving and resets recovery."},
-    {"section": "Jam recovery", "key": "stuck_nudge_output_deg", "label": "Upstream nudge (output deg)", "type": "float", "default": _DEFAULTS.stuck_nudge_output_deg, "description": "Forward nudge applied to the upstream rotor when the downstream rotor cannot move the piece."},
-    {"section": "Jam recovery", "key": "stuck_max_nudge_attempts", "label": "Maximum nudge attempts", "type": "int", "default": _DEFAULTS.stuck_max_nudge_attempts, "description": "Automatic upstream nudges allowed before the existing feeder-jam incident is raised."},
     {"section": "Detection persistence", "key": "drop_zone_persistence_ms", "label": "C2/C3 drop-zone occupancy hold (ms)", "type": "int", "default": _DEFAULTS.drop_zone_persistence_ms, "description": "Once a piece is seen in the C2/C3 drop zone, keep reporting the zone occupied until this many ms pass with NO detection. Smooths over one/two-frame detector dropouts so the upstream channel doesn't feed a second piece on top of one that's still there. 0 disables."},
     {"section": "Fast eject (C3)", "key": "ch2_fast_eject_enabled", "label": "C2 fast eject", "type": "bool", "default": _DEFAULTS.ch2_fast_eject_enabled, "description": "Use the closed-loop fast eject on C2 instead of precise pulsing: drive the leading piece's centre-of-mass to the exit edge, re-measuring after every move, then watch for it downstream."},
     {"section": "Fast eject (C3)", "key": "ch3_fast_eject_enabled", "label": "C3 fast eject", "type": "bool", "default": _DEFAULTS.ch3_fast_eject_enabled, "description": "Use the closed-loop fast eject on C3 instead of precise pulsing: drive the leading piece's centre-of-mass to the exit edge, re-measuring after every move, then watch for it downstream."},

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
-from .config import channelMoveSpeed
+from .config import PulsePerceptionConfig, channelMoveSpeed
 from subsystems.feeder.incidents import (
     clear_feeder_jam_incident,
     feeder_jam_incident_active,
@@ -38,17 +38,6 @@ class _ChannelStuckState:
     # the first nudge). Drives the recorded duration of an auto-freed jam. None
     # until the first nudge; cleared on every _reset.
     stall_started_at: Optional[float] = None
-    # True after this watchdog successfully published an operator incident.
-    # If that incident disappears without observed piece motion, the operator
-    # cleared it externally and this watchdog must start a fresh observation
-    # window instead of reusing the exhausted attempt budget.
-    incident_raised: bool = False
-    # Identity labels the position reference, not the stall budget or incident.
-    ref_track_id: Optional[int] = None
-    # References belong to identities, so alternating leaders can accumulate
-    # sub-epsilon movement without comparing different pieces. Cleared after
-    # credited progress/recovery, and bounded against unending identity churn.
-    track_positions: dict[int, float] = field(default_factory=dict)
 
 
 class FeederStuckWatchdog:
@@ -68,26 +57,9 @@ class FeederStuckWatchdog:
     operator-facing feeder-jam incident. All state is per channel and lives only
     on the coordinator thread (the feeder step)."""
 
-    def __init__(self, gc: Any, *, request_nudge=None) -> None:
+    def __init__(self, gc: Any) -> None:
         self.gc = gc
-        self._request_nudge = request_nudge
         self._trackers: dict[int, _ChannelStuckState] = {}
-        self._paused_at: Optional[float] = None
-
-    def pause(self, now: float) -> None:
-        """Exclude an intentional feeder hold without resetting recovery state."""
-        if self._paused_at is None:
-            self._paused_at = now
-
-    def resume(self, now: float) -> None:
-        if self._paused_at is None:
-            return
-        held_s = max(0.0, now - self._paused_at)
-        for tracker in self._trackers.values():
-            tracker.last_progress_at += held_s
-            if tracker.stall_started_at is not None:
-                tracker.stall_started_at += held_s
-        self._paused_at = None
 
     def _reset(self, channel_id: int, now: float, pos: Optional[float]) -> None:
         self._trackers[channel_id] = _ChannelStuckState(
@@ -105,17 +77,14 @@ class FeederStuckWatchdog:
         upstream_enabled: bool,
         leading_pos_deg: Optional[float],
         wants_advance: bool,
-        cfg: Any,
+        cfg: PulsePerceptionConfig,
         now: float,
-        leading_track_id: Optional[int] = None,
     ) -> None:
-        if self._paused_at is not None:
-            return
-        if not cfg.stuck_watchdog_enabled or not upstream_enabled or _handling_off():
-            # Feature disabled, upstream intentionally disabled, or the operator
-            # set this incident to "off": drop any state and never raise. This
-            # watchdog diagnoses an upstream transfer-lip jam, so there is no
-            # valid recovery or escalation when that upstream channel is off.
+        if not cfg.stuck_watchdog_enabled or _handling_off():
+            # Feature disabled or the operator set this incident to "off": drop
+            # any state and never raise. (An already-raised jam clears the next
+            # time the piece moves via the branch below only while enabled, so if
+            # it was just turned off, clear it here too.)
             if feeder_jam_incident_active(self.gc, channel_label=channel_label):
                 clear_feeder_jam_incident(self.gc, channel_label=channel_label)
             self._trackers.pop(channel_id, None)
@@ -128,28 +97,17 @@ class FeederStuckWatchdog:
 
         piece_present = leading_pos_deg is not None
 
-        jam_active = feeder_jam_incident_active(self.gc, channel_label=channel_label)
-
-        # The operator-clear endpoint owns the incident record, while this
-        # object owns the position/timer/attempt state. Reconcile those two
-        # lifecycles before evaluating the same detection again.
-        if tracker.incident_raised and not jam_active:
-            self._reset(channel_id, now, leading_pos_deg)
-            tracker = self._trackers[channel_id]
-
-        if piece_present:
-            if tracker.ref_pos_deg is None:
-                tracker.last_progress_at = now
-            advanced = self._observe_position(tracker, float(leading_pos_deg), leading_track_id)
-
         # A jam we already raised for this channel is held until the piece moves
         # (operator freed it) or leaves entirely (operator removed it).
-        if jam_active:
-            tracker.incident_raised = True
+        if feeder_jam_incident_active(self.gc, channel_label=channel_label):
             if not piece_present:
                 clear_feeder_jam_incident(self.gc, channel_label=channel_label)
                 self._reset(channel_id, now, leading_pos_deg)
                 return
+            if tracker.ref_pos_deg is None:
+                tracker.ref_pos_deg = leading_pos_deg
+                return
+            advanced = tracker.ref_pos_deg - float(leading_pos_deg)
             if advanced >= cfg.stuck_progress_epsilon_deg:
                 clear_feeder_jam_incident(self.gc, channel_label=channel_label)
                 self._reset(channel_id, now, leading_pos_deg)
@@ -165,6 +123,12 @@ class FeederStuckWatchdog:
             self._reset(channel_id, now, leading_pos_deg)
             return
 
+        if tracker.ref_pos_deg is None:
+            tracker.ref_pos_deg = leading_pos_deg
+            tracker.last_progress_at = now
+            return
+
+        advanced = tracker.ref_pos_deg - float(leading_pos_deg)
         if advanced >= cfg.stuck_progress_epsilon_deg:
             # Real forward progress: the channel is doing its job. If nudges got
             # it here, the automatic watchdog just freed a jam without ever
@@ -172,14 +136,7 @@ class FeederStuckWatchdog:
             self._record_auto_resolved_if_nudged(
                 tracker, channel_id, channel_label, upstream_label, now
             )
-            logger = getattr(self.gc, "logger", None)
-            if logger is not None and leading_track_id is not None:
-                logger.info(
-                    f"FeederStuckWatchdog: {channel_label} observed progress "
-                    f"track={leading_track_id} reference={tracker.ref_pos_deg:.1f} "
-                    f"position={leading_pos_deg:.1f} forward={advanced:.1f}deg"
-                )
-            self._start_position_window(tracker, float(leading_pos_deg), leading_track_id)
+            tracker.ref_pos_deg = leading_pos_deg
             tracker.last_progress_at = now
             tracker.nudge_attempts = 0
             tracker.stall_started_at = None
@@ -201,15 +158,13 @@ class FeederStuckWatchdog:
             cfg.stuck_max_nudge_attempts
         ):
             moved = self._nudge_upstream(upstream_stepper, upstream_channel_id, cfg)
-            if moved is None:
-                return  # Normal motion is busy; preserve the recovery budget.
             if tracker.nudge_attempts == 0:
                 # First nudge of this stall: remember when it started (monotonic)
                 # so an auto-freed jam records its real duration.
                 tracker.stall_started_at = now - stalled_ms / 1000.0
             tracker.nudge_attempts += 1
             tracker.last_progress_at = now
-            self._start_position_window(tracker, float(leading_pos_deg), leading_track_id)
+            tracker.ref_pos_deg = leading_pos_deg
             logger = getattr(self.gc, "logger", None)
             if logger is not None:
                 logger.info(
@@ -231,7 +186,6 @@ class FeederStuckWatchdog:
             no_progress_ms=stalled_ms,
             nudge_attempts=tracker.nudge_attempts,
         )
-        tracker.incident_raised = bool(published)
         logger = getattr(self.gc, "logger", None)
         if logger is not None:
             logger.warning(
@@ -241,38 +195,6 @@ class FeederStuckWatchdog:
             )
         # Keep ref so the active-incident branch can detect the piece moving once
         # the operator frees it; don't reset the clock (incident now owns it).
-
-    @staticmethod
-    def _observe_position(tracker, pos: float, track_id: Optional[int]) -> float:
-        if track_id is None:
-            # Legacy observations remain position-based. A missing ID cannot
-            # borrow a known piece's reference and manufacture forward motion.
-            ref = tracker.ref_pos_deg if tracker.ref_track_id is None else None
-        else:
-            ref = tracker.track_positions.get(track_id)
-            if ref is None:
-                # Eviction only forgets position evidence; it never extends the
-                # stall clock, spends/forgives attempts, or clears an incident.
-                if len(tracker.track_positions) >= 32:
-                    del tracker.track_positions[next(iter(tracker.track_positions))]
-                tracker.track_positions[track_id] = pos
-            else:
-                # Retain recently observed leaders when the bound is reached.
-                tracker.track_positions.pop(track_id)
-                tracker.track_positions[track_id] = ref
-        tracker.ref_pos_deg = pos if ref is None else ref
-        tracker.ref_track_id = track_id
-        return 0.0 if ref is None else ref - pos
-
-    @staticmethod
-    def _start_position_window(tracker, pos: float, track_id: Optional[int]) -> None:
-        # Once motion is credited or a recovery is attempted, do not let stale
-        # evidence for another leader renew the next no-progress interval.
-        tracker.track_positions.clear()
-        if track_id is not None:
-            tracker.track_positions[track_id] = pos
-        tracker.ref_pos_deg = pos
-        tracker.ref_track_id = track_id
 
     def _record_auto_resolved_if_nudged(
         self,
@@ -303,23 +225,15 @@ class FeederStuckWatchdog:
         )
 
     def _nudge_upstream(
-        self, upstream_stepper: Any, upstream_channel_id: int, cfg: Any
-    ) -> bool | None:
+        self, upstream_stepper: Any, upstream_channel_id: int, cfg: PulsePerceptionConfig
+    ) -> bool:
         if upstream_stepper is None:
             return False
-        if self._request_nudge is not None:
-            return self._request_nudge(upstream_stepper, upstream_channel_id, cfg)
         sign = 1 if cfg.forward_direction_sign >= 0 else -1
         motor_deg = sign * abs(float(cfg.stuck_nudge_output_deg)) * CHANNEL_OUTPUT_GEAR_RATIO
         # The nudge turns the UPSTREAM rotor, so it runs at that channel's speed,
         # not the stalled channel's.
-        # Pulse-perception has per-channel speeds; Go-to-Angle intentionally
-        # uses one shared move speed.  Resolve either shape so both feeder modes
-        # use this one recovery implementation.
-        if hasattr(cfg, "move_speed_usteps_per_s"):
-            speed = int(cfg.move_speed_usteps_per_s)
-        else:
-            speed = channelMoveSpeed(cfg, upstream_channel_id)
+        speed = channelMoveSpeed(cfg, upstream_channel_id)
         try:
             upstream_stepper.enabled = True
         except Exception:

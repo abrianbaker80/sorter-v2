@@ -200,7 +200,9 @@ def _crop(scene, detection):
     if any(d is not detection and _overlap(box, d.bbox) for d in scene.detections):
         return None
     x1, y1, x2, y2 = box
-    return scene.bgr[y1:y2, x1:x2].copy()
+    crop = scene.bgr[y1:y2, x1:x2].copy()
+    correct = getattr(scene, "correct_pixels", None)
+    return correct(crop, "recognition_crop_color_ms") if correct is not None else crop
 
 
 class RecognitionJourneys:

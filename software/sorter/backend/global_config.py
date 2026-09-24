@@ -49,9 +49,6 @@ class GlobalConfig:
     # Directory of uploaded BrickStore inventory (.bsx) files + the active-pointer
     # file. Used for "not in inventory" routing (see bsx_inventory.py).
     bsx_files_dir: str
-    # Immutable Project Harvest sources and parsed draft manifests. These
-    # drafts are inert and cannot reserve bins or affect routing.
-    project_harvest_dir: str
     should_write_camera_feeds: bool
     machine_id: str
     run_id: str
@@ -154,8 +151,6 @@ def mkGlobalConfig() -> GlobalConfig:
     # Uploaded BrickStore inventory (.bsx) files for "not in inventory" routing.
     gc.bsx_files_dir = str(backend_dir / "bsx_files")
     os.makedirs(gc.bsx_files_dir, exist_ok=True)
-    gc.project_harvest_dir = str(backend_dir / "project_harvest_drafts")
-    os.makedirs(gc.project_harvest_dir, exist_ok=True)
     gc.machine_id = getMachineId()
     gc.run_id = str(uuid.uuid4())
     # Allow env-var fallback so the launching supervisor can flip these

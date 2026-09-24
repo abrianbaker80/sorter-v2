@@ -1,25 +1,16 @@
 import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
 import numpy as np
 
 from blob_manager import getChannelPolygons
-from subsystems.classification_channel.five_sector_platter import (
-    DEFAULT_C4_SECTOR_COUNT,
-    C4FiveSectorPlatter,
-)
+from subsystems.classification_channel.five_sector_platter import C4FiveSectorPlatter
 
-SPOKE_COUNT = DEFAULT_C4_SECTOR_COUNT
+SPOKE_COUNT = 5
 SPOKE_SEPARATION_DEG = 360.0 / SPOKE_COUNT
-SPOKE_HOME_MOVE_TIMEOUT_MS = 10_000
-SPOKE_HOME_FRESH_FRAME_TIMEOUT_S = 3.0
-SPOKE_HOME_SETTLE_S = 0.5
-SPOKE_HOME_MAX_RESIDUAL_DEG = 1.0
-SPOKE_HOME_STABLE_READS = 3
-SPOKE_HOME_STABLE_TOLERANCE_DEG = 0.75
 
 
 @dataclass(frozen=True)
@@ -59,18 +50,6 @@ class DetectorResult:
 
 
 DETECTOR_PARAMS = DetectorParams()
-
-
-def _spokeSeparationDeg(spoke_count: int) -> float:
-    if type(spoke_count) is not int or spoke_count < 2:
-        raise ValueError("spoke_count must be an integer >= 2")
-    return 360.0 / float(spoke_count)
-
-
-def _spokeOffsetsDeg(spoke_count: int) -> np.ndarray:
-    return np.arange(spoke_count, dtype=np.float32) * np.float32(
-        _spokeSeparationDeg(spoke_count)
-    )
 
 
 def _number(value: object) -> float | None:
@@ -117,25 +96,8 @@ def angleForPoint(
 def computeForwardAlignmentDeltaDeg(
     spoke_angle_deg: float,
     reference_angle_deg: float,
-    *,
-    spoke_count: int = SPOKE_COUNT,
 ) -> float:
-    return (float(reference_angle_deg) - float(spoke_angle_deg)) % _spokeSeparationDeg(
-        spoke_count
-    )
-
-
-def computeSignedAlignmentErrorDeg(
-    spoke_angle_deg: float,
-    target_angle_deg: float,
-    *,
-    spoke_count: int = SPOKE_COUNT,
-) -> float:
-    separation = _spokeSeparationDeg(spoke_count)
-    return (
-        (float(target_angle_deg) - float(spoke_angle_deg) + separation / 2.0)
-        % separation
-    ) - separation / 2.0
+    return (float(reference_angle_deg) - float(spoke_angle_deg)) % SPOKE_SEPARATION_DEG
 
 
 def loadSpokeHomeGeometry(
@@ -280,7 +242,6 @@ def _scoreCenter(
     feature_image: np.ndarray,
     annulus: Annulus,
     params: DetectorParams,
-    spoke_count: int,
 ) -> float:
     coarse_params = DetectorParams(
         polar_n_theta=params.center_refine_polar_n_theta,
@@ -310,8 +271,8 @@ def _scoreCenter(
         kernel = cv2.getGaussianKernel(kernel_size, sigma).flatten()
         extended = np.concatenate([signal, signal, signal])
         signal = np.convolve(extended, kernel, mode="same")[coarse_params.polar_n_theta : coarse_params.polar_n_theta * 2]
-    thetas = np.arange(0.0, _spokeSeparationDeg(spoke_count), 0.5, dtype=np.float32)
-    offsets = _spokeOffsetsDeg(spoke_count)
+    thetas = np.arange(0.0, SPOKE_SEPARATION_DEG, 0.5, dtype=np.float32)
+    offsets = np.array([0.0, 72.0, 144.0, 216.0, 288.0], dtype=np.float32)
     idx = ((thetas[:, None] + offsets[None, :]) * bin_per_deg) % coarse_params.polar_n_theta
     values = signal[idx.astype(np.int64)].sum(axis=1)
     finite = np.isfinite(values)
@@ -325,7 +286,6 @@ def _refineCenterForSpokes(
     image: np.ndarray,
     annulus: Annulus,
     params: DetectorParams,
-    spoke_count: int,
 ) -> Annulus:
     if params.center_refine_radius_frac <= 0 or not params.center_refine_stage_steps_frac:
         return annulus
@@ -366,7 +326,7 @@ def _refineCenterForSpokes(
                 candidate = _clampAnnulusToImage(candidate, image.shape)
                 if candidate.outer_radius <= candidate.inner_radius:
                     continue
-                score = _scoreCenter(feature_image, candidate, params, spoke_count)
+                score = _scoreCenter(feature_image, candidate, params)
                 if score > stage_best_score:
                     stage_best_score = score
                     stage_best_x = candidate.center_x
@@ -413,12 +373,9 @@ def detectSpokeAngle(
     image: np.ndarray,
     annulus: Annulus,
     params: DetectorParams = DETECTOR_PARAMS,
-    *,
-    spoke_count: int = SPOKE_COUNT,
 ) -> DetectorResult:
-    spoke_separation_deg = _spokeSeparationDeg(spoke_count)
     annulus = _clampAnnulusToImage(annulus, image.shape)
-    annulus = _refineCenterForSpokes(image, annulus, params, spoke_count)
+    annulus = _refineCenterForSpokes(image, annulus, params)
     annulus = _clampAnnulusToImage(annulus, image.shape)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     if annulus.outer_radius <= annulus.inner_radius or annulus.outer_radius < 10:
@@ -431,8 +388,8 @@ def detectSpokeAngle(
             annulus_used=annulus,
         )
     signal = _radialIntegralSignal(gray, annulus, params)
-    thetas = np.arange(0.0, spoke_separation_deg, params.search_step_deg, dtype=np.float32)
-    offsets_deg = _spokeOffsetsDeg(spoke_count)
+    thetas = np.arange(0.0, SPOKE_SEPARATION_DEG, params.search_step_deg, dtype=np.float32)
+    offsets_deg = np.array([0.0, 72.0, 144.0, 216.0, 288.0], dtype=np.float32)
     bin_per_deg = params.polar_n_theta / 360.0
     angle_grid_deg = (thetas[:, None] + offsets_deg[None, :]) % 360.0
     angle_grid_bins = angle_grid_deg * bin_per_deg
@@ -470,7 +427,7 @@ def detectSpokeAngle(
         if coeffs[0] < 0:
             refined = -coeffs[1] / (2 * coeffs[0])
             if xs[0] <= refined <= xs[-1]:
-                peak_theta = float(refined % spoke_separation_deg)
+                peak_theta = float(refined % SPOKE_SEPARATION_DEG)
 
     return DetectorResult(
         angle_deg=peak_theta,
@@ -499,95 +456,112 @@ def clearPiecesFromChannel(
     )
 
 
-def _moveStepperBlocking(stepper: Any, steps: int) -> bool:
-    move_blocking = getattr(stepper, "move_steps_blocking", None)
-    if callable(move_blocking):
-        return bool(move_blocking(int(steps), timeout_ms=SPOKE_HOME_MOVE_TIMEOUT_MS))
-    if not bool(stepper.move_steps(int(steps))):
-        return False
-    deadline = time.monotonic() + SPOKE_HOME_MOVE_TIMEOUT_MS / 1000.0
-    while time.monotonic() < deadline:
-        if bool(stepper.stopped):
-            return True
-        time.sleep(0.01)
-    return False
+def _signedInt32(value: int) -> int:
+    return ((int(value) + 2**31) % 2**32) - 2**31
 
 
-def _waitForStableSpokeResult(
-    capture: Any,
-    captured_after: float,
-    annulus: Annulus,
-    params: DetectorParams,
+def _stopStepperAndVerify(
+    stepper: Any,
     *,
-    spoke_count: int,
-    initial_result: DetectorResult | None = None,
-    required_target_angle_deg: float | None = None,
-) -> DetectorResult | None:
-    """Wait for distinct stream frames that agree on the stopped phase.
+    timeout_s: float = 2.0,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> None:
+    """Use the existing stepper stop command and verify it at the MCU."""
+    stop = getattr(stepper, "move_at_speed", None)
+    stationary = getattr(stepper, "stationary_verified", None)
+    if not callable(stop) or not callable(stationary):
+        raise RuntimeError("C4 spoke-home cannot verify the supported motor stop")
+    stop(0, force=True)
+    deadline = clock() + max(0.0, float(timeout_s))
+    while True:
+        if bool(stationary()):
+            return
+        if clock() >= deadline:
+            raise RuntimeError("C4 spoke-home stop was not verified by the MCU")
+        sleep(0.05)
 
-    Raspberry Pi MJPEG frames are timestamped when dequeued. A buffered motion
-    frame can therefore look newer than the motor stop; a short phase consensus
-    proves that the stream has caught up to the stationary rotor.
-    """
-    deadline = time.monotonic() + SPOKE_HOME_FRESH_FRAME_TIMEOUT_S
-    last_frame_ts = float(captured_after)
-    stable_results = [initial_result] if initial_result is not None else []
-    measurement_annulus = (
-        initial_result.annulus_used if initial_result is not None else annulus
-    )
-    measurement_params = (
-        replace(params, center_refine_radius_frac=0.0)
-        if initial_result is not None
-        else params
-    )
-    while time.monotonic() < deadline:
-        frame_obj = getattr(capture, "latest_frame", None)
-        frame_ts = _number(getattr(frame_obj, "timestamp", None))
-        raw = getattr(frame_obj, "raw", None)
-        if frame_ts is None or frame_ts <= last_frame_ts or raw is None:
-            time.sleep(0.02)
-            continue
-        last_frame_ts = frame_ts
-        result = detectSpokeAngle(
-            raw,
-            measurement_annulus,
-            measurement_params,
-            spoke_count=spoke_count,
-        )
-        if not result.success:
-            stable_results = []
-            continue
-        if required_target_angle_deg is not None:
-            target_error = computeSignedAlignmentErrorDeg(
-                result.angle_deg,
-                required_target_angle_deg,
-                spoke_count=spoke_count,
+
+def _moveStepperAndWaitForCompletion(
+    stepper: Any,
+    steps: int,
+    *,
+    timeout_s: float = 10.0,
+    stop_timeout_s: float = 2.0,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> None:
+    """Keep recovery ownership until the acknowledged move reaches its target."""
+    stationary = getattr(stepper, "stationary_verified", None)
+    if not callable(stationary):
+        raise RuntimeError("C4 spoke-home has no raw MCU stopped-state feedback")
+    try:
+        initially_stationary = bool(stationary())
+    except Exception as exc:
+        try:
+            _stopStepperAndVerify(
+                stepper,
+                timeout_s=stop_timeout_s,
+                clock=clock,
+                sleep=sleep,
             )
-            if abs(target_error) > SPOKE_HOME_MAX_RESIDUAL_DEG:
-                # A short run of stable pre-move frames may still be queued in
-                # the network stream. Do not mistake that buffered phase for
-                # the stopped result of the alignment move.
-                stable_results = []
-                continue
-        if stable_results:
-            phase_change = computeSignedAlignmentErrorDeg(
-                result.angle_deg,
-                stable_results[-1].angle_deg,
-                spoke_count=spoke_count,
+        except Exception as stop_exc:
+            raise RuntimeError(
+                "C4 spoke-home could not read initial motion state and could not "
+                "verify the stop"
+            ) from stop_exc
+        raise RuntimeError(
+            "C4 spoke-home could not read initial motion state; stop was sent and verified"
+        ) from exc
+    if not initially_stationary:
+        try:
+            _stopStepperAndVerify(
+                stepper,
+                timeout_s=stop_timeout_s,
+                clock=clock,
+                sleep=sleep,
             )
-            if abs(phase_change) > SPOKE_HOME_STABLE_TOLERANCE_DEG:
-                stable_results = []
-        stable_results.append(result)
-        # Center refinement is the expensive part of the detector and the rotor
-        # center cannot change between these stopped frames. Reuse the first
-        # refined annulus so the remaining consensus reads fit inside the same
-        # bounded verification window.
-        measurement_annulus = result.annulus_used
-        measurement_params = replace(params, center_refine_radius_frac=0.0)
-        if len(stable_results) >= SPOKE_HOME_STABLE_READS:
-            return stable_results[-1]
-        time.sleep(0.02)
-    return None
+        except Exception as exc:
+            raise RuntimeError(
+                "C4 was already moving before spoke-home and the stop was not verified"
+            ) from exc
+        raise RuntimeError("C4 was already moving before spoke-home; recovery aborted")
+
+    start_position = _signedInt32(int(stepper.position))
+    target_position = _signedInt32(start_position + int(steps))
+    try:
+        if not bool(stepper.move_steps(int(steps))):
+            raise RuntimeError("C4 spoke-home alignment command was rejected")
+
+        deadline = clock() + max(0.0, float(timeout_s))
+        while True:
+            if bool(getattr(stepper, "stalled", False)):
+                raise RuntimeError("C4 stepper stalled during spoke-home alignment")
+            if bool(stationary()):
+                actual_position = _signedInt32(int(stepper.position))
+                error = _signedInt32(actual_position - target_position)
+                if abs(error) > 1:
+                    raise RuntimeError(
+                        "C4 spoke-home motor stopped before its commanded target "
+                        f"(target={target_position}, actual={actual_position})"
+                    )
+                return
+            if clock() >= deadline:
+                raise RuntimeError("C4 spoke-home alignment move timed out")
+            sleep(0.05)
+    except Exception as exc:
+        try:
+            _stopStepperAndVerify(
+                stepper,
+                timeout_s=stop_timeout_s,
+                clock=clock,
+                sleep=sleep,
+            )
+        except Exception as stop_exc:
+            raise RuntimeError(
+                f"{exc}; C4 spoke-home could not verify the stop command"
+            ) from stop_exc
+        raise
 
 
 def maybeRunSpokeHome(
@@ -621,37 +595,13 @@ def maybeRunSpokeHome(
         gc.logger.warning("C4 rev01 spoke home skipped: saved classification-channel geometry incomplete")
         return False
     annulus, zero_point = geometry
-    platter = C4FiveSectorPlatter.from_irl_config(irl_config)
 
     # This duplicates the older wall-phase work on purpose so the rev01 spoke-home
     # path stays isolated here, matching where Spencer already understood and used it.
-    initial_frame_ts = _number(getattr(capture.latest_frame, "timestamp", None))
-    if initial_frame_ts is None:
-        initial_frame_ts = time.time()
-    initial_result = detectSpokeAngle(
-        frame,
-        annulus,
-        DETECTOR_PARAMS,
-        spoke_count=platter.sector_count,
-    )
-    if not initial_result.success:
+    result = detectSpokeAngle(frame, annulus, DETECTOR_PARAMS)
+    if not result.success:
         gc.logger.warning(
-            "C4 rev01 spoke home skipped: detector failed "
-            f"({initial_result.failure_reason}, "
-            f"prominence={initial_result.prominence_ratio:.2f})"
-        )
-        return False
-    result = _waitForStableSpokeResult(
-        capture,
-        initial_frame_ts,
-        initial_result.annulus_used,
-        DETECTOR_PARAMS,
-        spoke_count=platter.sector_count,
-        initial_result=initial_result,
-    )
-    if result is None:
-        gc.logger.warning(
-            "C4 rev01 spoke home skipped: no stable pre-move spoke phase"
+            f"C4 rev01 spoke home skipped: detector failed ({result.failure_reason}, prominence={result.prominence_ratio:.2f})"
         )
         return False
 
@@ -661,23 +611,18 @@ def maybeRunSpokeHome(
         result.annulus_used.center_x,
         result.annulus_used.center_y,
     )
+    delta_output_deg = computeForwardAlignmentDeltaDeg(
+        result.angle_deg,
+        reference_angle_deg,
+    )
     try:
         from toml_config import getClassificationChannelRev01Config
         from .rev01_config import configFromDict
-
-        rev01_config = configFromDict(getClassificationChannelRev01Config())
-    except Exception as exc:
-        gc.logger.warning(f"C4 rev01 spoke home failed to load configuration: {exc}")
-        return False
-    home_offset_output_deg = float(rev01_config.home_offset_output_deg)
-    target_spoke_angle_deg = (reference_angle_deg + home_offset_output_deg) % _spokeSeparationDeg(
-        platter.sector_count
-    )
-    delta_output_deg = computeForwardAlignmentDeltaDeg(
-        result.angle_deg,
-        target_spoke_angle_deg,
-        spoke_count=platter.sector_count,
-    )
+        home_offset_output_deg = configFromDict(getClassificationChannelRev01Config()).home_offset_output_deg
+    except Exception:
+        home_offset_output_deg = 0.0
+    delta_output_deg += home_offset_output_deg
+    platter = C4FiveSectorPlatter.from_irl_config(irl_config)
     motor_microsteps = platter.output_degrees_to_motor_microsteps(delta_output_deg)
     stepper = getattr(irl, "classification_channel_rotor_stepper", None) or getattr(
         irl,
@@ -693,84 +638,11 @@ def maybeRunSpokeHome(
         f"spoke_angle={result.angle_deg:.2f} "
         f"reference_angle={reference_angle_deg:.2f} "
         f"home_offset={home_offset_output_deg:.2f} "
-        f"sector_count={platter.sector_count} "
         f"forward_delta_output_deg={delta_output_deg:.2f} "
         f"motor_microsteps={motor_microsteps} "
         f"prominence={result.prominence_ratio:.2f}"
     )
-    post_result = result
-    if motor_microsteps != 0:
-        try:
-            stepper.set_speed_limits(
-                16,
-                max(16, int(rev01_config.precise_converge_speed_usteps_per_s)),
-            )
-        except Exception as exc:
-            gc.logger.warning(f"C4 rev01 spoke home failed to set alignment speed: {exc}")
-            return False
-        if not _moveStepperBlocking(stepper, motor_microsteps):
-            gc.logger.warning("C4 rev01 spoke home failed: alignment move did not complete")
-            return False
-
-        # The camera is an MJPEG stream from the Raspberry Pi.  A frame read
-        # immediately after firmware reports stopped can still contain the last
-        # moving image buffered in the stream. Let the mechanics settle, then
-        # require distinct frames that agree on the stopped phase.
-        time.sleep(SPOKE_HOME_SETTLE_S)
-        post_result = _waitForStableSpokeResult(
-            capture,
-            time.time(),
-            result.annulus_used,
-            replace(DETECTOR_PARAMS, center_refine_radius_frac=0.0),
-            spoke_count=platter.sector_count,
-            required_target_angle_deg=target_spoke_angle_deg,
-        )
-        if post_result is None:
-            gc.logger.warning(
-                "C4 rev01 spoke home failed: no stable post-move spoke phase"
-            )
-            return False
-
-    post_reference_angle_deg = angleForPoint(
-        zero_point[0],
-        zero_point[1],
-        post_result.annulus_used.center_x,
-        post_result.annulus_used.center_y,
-    )
-    post_target_angle_deg = (
-        post_reference_angle_deg + home_offset_output_deg
-    ) % _spokeSeparationDeg(platter.sector_count)
-    residual_deg = computeSignedAlignmentErrorDeg(
-        post_result.angle_deg,
-        post_target_angle_deg,
-        spoke_count=platter.sector_count,
-    )
-    if abs(residual_deg) > SPOKE_HOME_MAX_RESIDUAL_DEG:
-        gc.logger.warning(
-            "C4 rev01 spoke home failed post-move verification: "
-            f"phase={post_result.angle_deg:.2f}deg, "
-            f"reference={post_reference_angle_deg:.2f}deg, "
-            f"residual={residual_deg:.2f}deg exceeds "
-            f"{SPOKE_HOME_MAX_RESIDUAL_DEG:.2f}deg"
-        )
-        return False
-
-    try:
-        stepper.position = 0
-        firmware_position = int(stepper.position)
-        host_position = int(getattr(stepper, "current_position_steps", firmware_position))
-    except Exception as exc:
-        gc.logger.warning(f"C4 rev01 spoke home failed to establish position zero: {exc}")
-        return False
-    if firmware_position != 0 or host_position != 0:
-        gc.logger.warning(
-            "C4 rev01 spoke home failed to establish position zero: "
-            f"firmware={firmware_position}, host={host_position}"
-        )
-        return False
-
-    gc.logger.info(
-        "C4 rev01 spoke home complete: "
-        f"residual={residual_deg:.2f}deg, firmware_position=0, host_position=0"
-    )
+    if motor_microsteps == 0:
+        return True
+    _moveStepperAndWaitForCompletion(stepper, int(motor_microsteps))
     return True

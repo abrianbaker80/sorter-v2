@@ -28,10 +28,8 @@ class TickBus:
         self._publish_counts: dict[str, int] = {}
         self._station_gates: dict[StationId, StationGate] = {}
         self._piece_requests: dict[tuple[StationId, StationId], PieceRequest] = {}
-        self._piece_release_attempts: dict[
-            tuple[StationId, StationId], PieceReleaseAttempt
-        ] = {}
         self._piece_deliveries: dict[tuple[StationId, StationId], PieceDelivered] = {}
+        self._piece_release_attempts: dict[tuple[StationId, StationId], PieceReleaseAttempt] = {}
         self._chute_motion: ChuteMotion | None = None
         self._tick_started_at_mono: float = 0.0
 
@@ -81,13 +79,6 @@ class TickBus:
     ) -> PieceDelivered | None:
         return self._piece_deliveries.get((source, target))
 
-    def piece_release_attempt(
-        self,
-        source: StationId,
-        target: StationId,
-    ) -> PieceReleaseAttempt | None:
-        return self._piece_release_attempts.get((source, target))
-
     def has_pending_piece_request(
         self,
         *,
@@ -130,6 +121,14 @@ class TickBus:
         payload["tick_started_at_mono"] = self._tick_started_at_mono
         payload["recorded_at_wall"] = time.time()
         return payload
+
+    def piece_release_attempt(
+        self,
+        source: StationId,
+        target: StationId,
+    ) -> PieceReleaseAttempt | None:
+        return self._piece_release_attempts.get((source, target))
+
 
 
 def _serialize_value(value: Any) -> Any:
