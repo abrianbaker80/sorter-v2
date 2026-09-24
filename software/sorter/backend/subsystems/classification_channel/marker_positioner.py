@@ -417,10 +417,11 @@ class MarkerPositioner:
         if self.pending is None:
             return None
         try:
-            if self.clock() - self._started > self.limits.timeout_s:
-                raise PositionError("marker index deadline exceeded")
+            deadline = self._started + self.limits.timeout_s
             if self._receipt is not None:
                 if not self.motor.complete(self._receipt):
+                    if self.clock() > deadline:
+                        raise PositionError("marker index deadline exceeded")
                     return None
                 # Keep the receipt and recheck it on every observation tick;
                 # an intervening stop/replacement must invalidate confirmation.
@@ -429,26 +430,25 @@ class MarkerPositioner:
             self.motor.check_token(self._token)
             sample = self._window.add(self.source.sample(), self.clock())
             self.motor.check_token(self._token)
-            if self.clock() - self._started > self.limits.timeout_s:
-                raise PositionError("marker index deadline exceeded during observation")
+            expired = self.clock() > deadline
             if sample is None:
+                if expired:
+                    raise PositionError("marker index deadline exceeded during observation")
                 return None
             target = self.boundary if self._preparing else self.pending
             residual = error_deg(self.mapping.phase(target), sample.phase_deg)
-            if self._preparing:
-                if abs(residual) > self.limits.tolerance_deg:
-                    raise PositionError("idle rotor moved off the bound marker target")
-                self._preparing = False
-                self._move(36.0 + residual)
-                return None
-            if (
+            not_converged = (
                 self._last_error is not None
                 and abs(residual) >= self._last_error - 0.1
+            )
+            # Camera capture time is on another monotonic clock. Receipt by the
+            # deadline proves this source frame was captured before it.
+            if (
+                not self._preparing
+                and not not_converged
+                and abs(residual) <= self.limits.tolerance_deg
+                and sample.received_mono <= deadline
             ):
-                raise PositionError(
-                    f"marker correction did not converge: residual {residual:.3f} degrees"
-                )
-            if abs(residual) <= self.limits.tolerance_deg:
                 result = ConfirmedIndex(
                     self.pending,
                     sample.phase_deg,
@@ -461,6 +461,18 @@ class MarkerPositioner:
                 self.boundary, self.pending = self.pending, None
                 self._receipt = None
                 return result
+            if expired:
+                raise PositionError("marker index deadline exceeded during observation")
+            if self._preparing:
+                if abs(residual) > self.limits.tolerance_deg:
+                    raise PositionError("idle rotor moved off the bound marker target")
+                self._preparing = False
+                self._move(36.0 + residual)
+                return None
+            if not_converged:
+                raise PositionError(
+                    f"marker correction did not converge: residual {residual:.3f} degrees"
+                )
             if (
                 self._binding
                 or self._corrections >= self.limits.max_corrections

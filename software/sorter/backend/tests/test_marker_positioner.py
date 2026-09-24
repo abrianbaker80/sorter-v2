@@ -272,6 +272,92 @@ def test_trim_does_not_extend_deadline_or_confirm_without_fresh_markers():
     assert r.p.boundary == 0 and len(r.commands) == 2
 
 
+def _near_deadline_target_history(phase_offset=0):
+    r = Rig()
+    r.bind()
+    r.p.request_index(1, 1000)
+    while not r.commands:
+        r.clock.advance()
+        assert r.p.poll() is None
+    r.clock.value = r.p._started + 0.5
+    assert r.p.poll() is None  # establish the post-motion source fence
+    r.phase = (r.p.mapping.phase(1) + phase_offset) % 360
+    for elapsed in (7.68, 7.76):
+        r.clock.value = r.p._started + elapsed
+        assert r.p.poll() is None
+    assert len(r.p._window.samples) == 2
+    return r
+
+
+def test_predeadline_target_capture_confirms_after_validation_crosses_deadline():
+    r = _near_deadline_target_history(phase_offset=-0.020165)
+    r.clock.value = r.p._started + 7.84
+    original_sample = r.sample
+    captured = []
+
+    def slow_validation():
+        observation = original_sample()
+        captured.append(observation)
+        r.clock.advance(0.29547)
+        return observation
+
+    r.sample = slow_validation
+    result = r.p.poll()
+    assert captured[0].received_mono < r.p._started + r.p.limits.timeout_s
+    assert r.clock() - r.p._started == pytest.approx(8.13547)
+    assert result.boundary == r.p.boundary == 1
+    assert result.source_capture_ns == captured[0].captured_ns
+    assert result.residual_deg == pytest.approx(0.020165)
+    assert not r.failures and len(r.commands) == 1
+
+
+def test_postdeadline_target_capture_cannot_confirm():
+    r = _near_deadline_target_history()
+    r.clock.value = r.p._started + 7.99
+    original_sample = r.sample
+    captured = []
+
+    def late_capture():
+        r.clock.advance(0.03)
+        observation = original_sample()
+        captured.append(observation)
+        return observation
+
+    r.sample = late_capture
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    assert captured[0].received_mono > r.p._started + r.p.limits.timeout_s
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 1 and len(r.failures) == 1
+
+
+def test_no_predeadline_target_confirmation_times_out_without_trim():
+    r = _near_deadline_target_history(phase_offset=2)
+    r.clock.value = r.p._started + 7.84
+    original_sample = r.sample
+
+    def slow_validation():
+        observation = original_sample()
+        r.clock.advance(0.29547)
+        return observation
+
+    r.sample = slow_validation
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 1 and len(r.failures) == 1
+
+
+def test_in_deadline_target_confirmation_still_succeeds():
+    r = _near_deadline_target_history()
+    r.clock.value = r.p._started + 7.84
+    result = r.p.poll()
+    assert result.boundary == r.p.boundary == 1
+    assert result.corrections == 0 and result.residual_deg == pytest.approx(0)
+    assert r.clock() - r.p._started < r.p.limits.timeout_s
+    assert not r.failures and len(r.commands) == 1
+
+
 def test_idle_rotor_displacement_refuses_new_motion():
     r = Rig()
     r.bind()
