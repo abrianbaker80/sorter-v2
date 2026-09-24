@@ -244,6 +244,28 @@ re-reviewed without remaining findings.
 
 This slice supersedes the former roadmap item numbered 5.
 
+## First bounded physical qualification checkpoint
+
+The separately authorized first trial from `a15e598` is in progress. One red
+load physically advanced clockwise through seven 36-degree indexes, remained
+retained after six, and exited on the seventh as DISCARD. Empty-P6 DRAIN and
+normal termination passed for that single load. Multiple-buffer FIFO, wraparound,
+routed-load/predictive timing and final integration acceptance remain pending.
+
+An explicit qualification-only API binds the accepted adapter without creating
+or selecting the normal controller. Calibration commands are bounded and
+receipt replay is segregated by binding identity. Measured feedback latency
+was included in the qualification callback and timing bounds. Accepted Slices
+1–5 were not redesigned. The 2026-09-15 continuation replaces side-camera fall-clear measurement with a
+provisional destination-layer engineering model: 0.85/0.95/1.00/1.05/1.10/1.15 s
+for physical layers 1..6. The three-layer experimental binding selects the actual
+routed layer, with a conservative deepest-layer bound for DISCARD passthrough.
+The model is centralized and configurable; physical operating qualification is
+pending. Full seventh-sweep completion remains a conservative release-time bound,
+not a measurement of first release. No normal-path cutover.
+
+[Physical evidence, timing bounds, tests, deployment and next measurement](../../../analysis_artifacts/fail-forward-physical-20260914/status.md)
+
 ## Remaining migration slices
 
 6. First-class C1 Exit camera, physical-state sensing and shared UI parity.

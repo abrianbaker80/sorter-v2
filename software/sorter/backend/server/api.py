@@ -172,6 +172,9 @@ app.include_router(versions_router)
 app.include_router(status_ping_router)
 app.include_router(leds_router)
 
+from server.routers.c4_qualification import install as install_c4_qualification
+install_c4_qualification(app)
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------

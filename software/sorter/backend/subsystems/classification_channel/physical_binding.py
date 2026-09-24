@@ -16,6 +16,7 @@ from .demand_planner import C4DemandPlanner, ChuteMove, ChuteObservation, Timing
 from .fail_forward_runtime import C4RuntimeCoordinator
 from .intake_routing import C4IntakeRoutingBridge
 from .physical_fifo import PhysicalC4FIFO
+from .fall_clear import FallClearModel
 
 if TYPE_CHECKING:
     from hardware.sorter_interface import StepperMotor
@@ -37,6 +38,7 @@ class C4Calibration:
     chute_eta_scale: float = 1.0
     chute_eta_allowance_s: float = 0.0
     fall_clear_s: float = 1.5  # Compatibility only, not physically measured.
+    fall_clear_model: FallClearModel | None = None
 
     def __post_init__(self) -> None:
         self.make_fifo()  # Reuse Slice 1's exact geometry validation.
@@ -251,8 +253,18 @@ class PhysicalC4Binding:
         fifo = calibration.make_fifo()
         bridge = C4IntakeRoutingBridge(fifo, recognize=safe_recognize,
                                       routing_timeout_s=routing_timeout_s)
+        timing = calibration.timing()
+        if calibration.fall_clear_model is not None:
+            model = calibration.fall_clear_model
+            durations = {key: model.seconds(address.layer_index + 1)
+                         for key, address in self.chute.destinations.items()}
+            # DISCARD opens every flap. Conservatively bound passthrough by the
+            # deepest installed layer including its full contact-path allowance.
+            durations[discard_destination] = model.seconds(len(chute.layout.layers))
+            timing = Timing(timing.release_after_start_s, timing.arrival_margin_s,
+                            durations[discard_destination], durations)
         self.runtime = C4RuntimeCoordinator(bridge, C4DemandPlanner(
-            fifo, calibration.timing(), discard_destination=discard_destination),
+            fifo, timing, discard_destination=discard_destination),
             self.motor, self.chute)
 
     def tick(self, now: float):

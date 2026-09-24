@@ -26,8 +26,8 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from pydantic import BaseModel
 
 from blob_manager import BLOB_DIR, getCameraSetup, getChannelPolygons, getClassificationPolygons
@@ -3361,17 +3361,68 @@ def save_camera_layout(payload: CameraLayoutPayload) -> Dict[str, Any]:
 
 
 @router.get("/api/cameras/list")
-def list_cameras() -> Dict[str, Any]:
+def list_cameras(request: Request) -> Dict[str, Any]:
     """List local USB cameras plus discovered network camera streams."""
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         usb_fut = pool.submit(_list_usb_cameras)
         net_fut = pool.submit(getDiscoveredCameraStreams)
+        network = [dict(camera, preview_url=str(request.url_for(
+            "network_camera_preview", camera_id=camera["id"])))
+            for camera in net_fut.result()]
+        # Discovery is transient; explicitly configured cameras must remain
+        # selectable after a backend restart or a missed mDNS announcement.
+        # Reuse the existing role feed, not a guessed upstream snapshot path.
+        _, config = _read_machine_params_config()
+        seen = {camera["source"] for camera in network}
+        for role, source in config.get("cameras", {}).items():
+            if role not in CAMERA_SETUP_ROLES or not isinstance(source, str) or source in seen:
+                continue
+            parsed = urllib_parse.urlsplit(source)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                continue
+            seen.add(source)
+            network.append(dict(kind="network", id=f"configured:{role}",
+                name=f"Configured camera ({role})", source=source,
+                preview_url=str(request.base_url).rstrip("/") + f"/api/cameras/feed/{role}",
+                host=parsed.hostname, port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                transport="configured", last_seen_ms=0))
         return {
             "usb": usb_fut.result(),
-            "network": net_fut.result(),
+            "network": network,
         }
+
+
+class _NoPreviewRedirect(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+@router.get("/api/cameras/network-preview/{camera_id}", name="network_camera_preview")
+def network_camera_preview(camera_id: str) -> Response:
+    """Serve a discovered camera's JPEG over the browser-reachable backend.
+
+    Accept a discovered ID, never an arbitrary client-supplied upstream URL.
+    Bound response size/time and forbid redirects to other destinations.
+    """
+    camera = next((c for c in getDiscoveredCameraStreams() if c["id"] == camera_id), None)
+    if camera is None:
+        raise HTTPException(404, "Network camera is no longer discovered")
+    url = camera["preview_url"]
+    parsed = urllib_parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(502, "Invalid discovered preview address")
+    limit = 8 * 1024 * 1024
+    try:
+        with urllib_request.build_opener(_NoPreviewRedirect()).open(url, timeout=3) as upstream:
+            body = upstream.read(limit + 1)
+            if (len(body) > limit or not body.startswith(b"\xff\xd8")
+                    or not body.endswith(b"\xff\xd9")):
+                raise ValueError("invalid JPEG preview")
+    except (OSError, ValueError, urllib_error.URLError) as exc:
+        raise HTTPException(502, "Camera preview unavailable") from exc
+    return Response(body, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 def _device_capturing_index(index: int):

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from math import isfinite
 from typing import Mapping
+from types import MappingProxyType
 
 from .physical_fifo import Discharge, IndexTarget, PhysicalC4FIFO, Pocket, PocketState
 
@@ -43,10 +44,23 @@ class Timing:
     release_after_start_s: float
     arrival_margin_s: float
     fall_clear_s: float = NORMAL_FALL_CLEAR_S
+    fall_clear_by_destination: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         for name in ("release_after_start_s", "arrival_margin_s", "fall_clear_s"):
             _seconds(getattr(self, name), name)
+        if self.fall_clear_by_destination is not None:
+            values = dict(self.fall_clear_by_destination)
+            for destination, seconds in values.items():
+                if not destination.strip():
+                    raise ValueError("empty fall-clear destination")
+                _seconds(seconds, "destination fall-clear")
+            object.__setattr__(self, "fall_clear_by_destination", MappingProxyType(values))
+
+    def fall_clear_for(self, destination: str) -> float:
+        if self.fall_clear_by_destination is None:
+            return self.fall_clear_s
+        return self.fall_clear_by_destination[destination]
 
 
 @dataclass(frozen=True)
@@ -213,9 +227,14 @@ class C4DemandPlanner:
             if not self._started_at <= release <= now:
                 raise ValueError("release outside this physical index interval")
         old_boundary = self.fifo.boundary
+        # Validate before consuming the FIFO target; a missing adapter route
+        # must never lose custody and then fail while calculating its timer.
+        due = next((p for p in self._loads() if self.fifo.station_of(p.pocket_id) == 0), None)
+        duration = (self.timing.fall_clear_for(self._destination(due))
+                    if target.boundary > old_boundary and due is not None else 0.0)
         events = self.fifo.complete_index(target, confirmed_microsteps=confirmed_microsteps)
         if self.fifo.boundary != old_boundary:
             self._active = None
         if events:
-            self._fall_clear_at = max(self._fall_clear_at, release + self.timing.fall_clear_s)
+            self._fall_clear_at = max(self._fall_clear_at, release + duration)
         return events
