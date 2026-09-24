@@ -22,6 +22,7 @@ router = APIRouter()
 
 def _system_status_payload() -> Dict[str, Any]:
     return {
+        "c4_drain": shared_state.c4_drain_result,
         "hardware_state": shared_state.hardware_state,
         "hardware_error": shared_state.hardware_error,
         "homing_step": shared_state.hardware_homing_step,
@@ -167,6 +168,18 @@ def recover_system() -> Dict[str, Any]:
         busy_message="Already recovering hardware.",
         missing_fn_message="No hardware recovery function registered.",
         started_message="Safe hardware recovery started.",
+    )
+
+
+@router.post("/api/system/c4-drain-reset")
+def complete_c4_drain() -> Dict[str, Any]:
+    """Operator-authorized destructive drain of all possible C4 pockets to Reject."""
+    return _start_hardware_worker(
+        state="homing", step="Draining C4 to Reject...", success_state="ready",
+        fn=shared_state._hardware_c4_drain_fn,
+        busy_message="Hardware recovery already in progress.",
+        missing_fn_message="Complete C4 recovery is unavailable.",
+        started_message="C4 reject drain and destructive reset started.",
     )
 
 

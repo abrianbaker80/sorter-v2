@@ -1,8 +1,10 @@
 import inspect
 import statistics
 import time
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 MAX_TIMING_SAMPLES = 5000
@@ -161,6 +163,7 @@ class RuntimeStatsCollector:
         self._servo_bus_offline_since_ts: float | None = None
         self._bus_provider: Any | None = None
         self._active_incident: dict[str, Any] | None = None
+        self._incident_lock = threading.RLock()
         # Row id of the durable incident_records row backing the current
         # active incident, if persistence succeeded. None whenever there is
         # no active incident or the DB write failed (never blocks the machine).
@@ -171,6 +174,208 @@ class RuntimeStatsCollector:
         # reliable event counters for deriving rates (Hz) over a time window.
         self._perf_total_counts: dict[str, int] = {}
         self._last_updated_at = time.time()
+        self._transfer_episodes: dict[str, dict[str, Any]] = {}
+        self._transfer_metrics_started_at: float | None = None
+        self._provider_availability: dict[str, dict[str, Any]] = {}
+        self._indexed_mode = False
+        self._owned_piece_uuids: frozenset[str] = frozenset()
+        self._harvest_scope: tuple[str, float, OrderedDict[str, tuple[float, bool]]] | None = None
+
+    def observeProviderAvailability(self, provider: str, available: bool) -> None:
+        # Existing detector responses only: no extra request, polling or retry.
+        # An outage is a failure streak, not a count of affected physical pieces.
+        now = time.time()
+        old = self._provider_availability.get(provider, {})
+        state = dict(old)
+        state["outages"] = old.get("outages", 0) + int(not available and old.get("available") is not False)
+        state["failure_observations"] = old.get("failure_observations", 0) + int(not available)
+        state["available"] = available
+        state["last_observed_at"] = now
+        if old.get("available") != available:
+            state["state_since"] = now
+        self._provider_availability[provider] = state
+
+    def reconcileC4Drain(self) -> None:
+        """Archive drained uncertainty without recording invented piece deliveries."""
+        now = time.time()
+        with self._incident_lock:
+            for key, episode in list(self._transfer_episodes.items()):
+                if episode.get("completed_at") is None:
+                    self._transfer_episodes[key] = {**episode,
+                        "state": "operator_reject_drain", "completed_at": now,
+                        "completion_category": "unverified", "group_size_unknown": True}
+            self._owned_piece_uuids = frozenset()
+            incident = self._active_incident
+            if incident and (incident.get("source_kind") == "bounded_c3_transfer" or
+                    incident.get("kind") in {"classification_track_lost",
+                        "classification_intake_request_timeout",
+                        "distribution_no_bin_available", "distribution_chute_jam",
+                        "distribution_servo_bus_offline", "chute_needs_homing"} or
+                    incident.get("kind") == "stepper_stall" and
+                    incident.get("channel") in {"c4", "classification_channel"}):
+                self._clearActiveIncident(resolved_by="complete_c4_reject_drain")
+
+    def observeTransferEpisode(self, episode: dict[str, Any]) -> None:
+        episode_id = episode["episode_id"]
+        previous = self._transfer_episodes.get(episode_id, {})
+        # A replay or late pipeline update cannot undo terminal accounting.
+        if previous.get("completed_at") is not None:
+            return
+        self._transfer_episodes[episode_id] = {**previous, **episode}
+        if self._transfer_metrics_started_at is None:
+            self._transfer_metrics_started_at = float(episode["started_at_wall"])
+
+    def _observeTransferCompletion(self, obj: dict[str, Any]) -> None:
+        from defs.known_object import UNVERIFIED_C4_HANDOFF
+        episode_id = obj.get("transfer_episode_id")
+        episode = self._transfer_episodes.get(episode_id)
+        if (episode is None or episode.get("completed_at") is not None
+                or obj.get("stage") != "distributed" or obj.get("distributed_at") is None):
+            return
+        if obj.get("transport_failure_reason") == UNVERIFIED_C4_HANDOFF:
+            self._transfer_episodes[episode_id] = {**episode,
+                "state": "unverified_pocket_cleared", "completed_at": obj["distributed_at"],
+                "completion_category": "unverified", "group_size_unknown": True}
+            return
+        reject = obj.get("reject_category")
+        if obj.get("transport_failure_reason"):
+            reject = "transport"
+        elif not reject and obj.get("request_failed"):
+            reject = "provider"
+        elif not reject and obj.get("harvest_exception"):
+            reject = "harvest_exception"
+        elif not reject and (obj.get("forced_reject_reason") or not obj.get("part_id")):
+            reject = "classification"
+        elif not reject and obj.get("destination_bin") is None:
+            reject = "routing_exception"
+        episode = {**episode, "state": "completed", "completed_at": obj["distributed_at"],
+                   "completion_category": reject or "useful",
+                   "group_size_unknown": bool(obj.get("physical_group_size_unknown"))}
+        self._transfer_episodes[episode_id] = episode
+
+    def _transferSnapshot(self, now: float) -> dict[str, Any]:
+        episodes = list(self._transfer_episodes.values())
+        terminal = [e for e in episodes if e.get("completed_at") is not None]
+        unverified = sum(e.get("completion_category") == "unverified" for e in terminal)
+        complete = [e for e in terminal if e.get("completion_category") != "unverified"]
+        single = [e for e in complete if not e.get("group_size_unknown")]
+        categories = {name: sum(e.get("completion_category") == name for e in single)
+                      for name in ("useful", "transport", "handling", "classification",
+                                   "provider", "surplus", "harvest_exception", "routing_exception")}
+        unknown = sum(bool(e.get("group_size_unknown")) for e in complete)
+        elapsed = max(0.0, now - self._transfer_metrics_started_at) if self._transfer_metrics_started_at is not None else 0.0
+        # Physical discard percent is unavailable for an unreconciled cohort or
+        # an unknown-size clump. Episode rates remain explicitly episode rates.
+        reconciled = bool(episodes) and len(single) == len(episodes)
+        return {
+            "started_at": self._transfer_metrics_started_at, "ended_at": now, "elapsed_s": elapsed,
+            "new_transfer_episodes": len(episodes),
+            "followthrough_actions": sum(e.get("followthrough_count", 0) for e in episodes),
+            "recovery_required_episodes": sum(e.get("recovery_started_mono") is not None for e in episodes),
+            "recovery_active_time_s": sum(e.get("recovery_elapsed_s", 0.0) for e in episodes),
+            "recovery_success_by_stage": {
+                str(stage): sum(e.get("recovery_success_stage") == stage for e in episodes)
+                for stage in (1, 2, 3)},
+            "recovery_stage_actions": {
+                str(stage): sum(any(l.get("stage") == stage for l in e.get("recovery_legs", []))
+                                for e in episodes) for stage in (1, 2, 3)},
+            "recovery_motor_moves": sum(l.get("accepted") is True
+                for e in episodes for l in e.get("recovery_legs", [])),
+            "recovery_motor_moves_per_arrived_load": (
+                sum(l.get("accepted") is True for e in episodes if e.get("recovery_success_stage") is not None
+                    for l in e.get("recovery_legs", [])) /
+                sum(e.get("recovery_success_stage") is not None for e in episodes)
+                if any(e.get("recovery_success_stage") is not None for e in episodes) else None),
+            "recovered_transport_reject_loads": sum(e.get("recovery_success_stage") is not None
+                and e.get("completion_category") == "transport" for e in complete),
+            "successful_first_pass_transfers": sum(bool(e.get("first_pass")) for e in episodes),
+            "unresolved_physical_transfers": sum(e.get("state") == "unresolved" for e in episodes),
+            "pending_episodes": len(episodes) - len(terminal),
+            "unverified_pockets_cleared": unverified,
+            "completed_loads": len(complete), "completed_single_pieces": len(single),
+            "unknown_size_completed_groups": unknown,
+            "total_completed_pieces": len(single) if not (unknown or unverified) else None,
+            "completed_by_outcome": categories,
+            "attempts_per_minute": len(episodes) * 60.0 / elapsed if elapsed else None,
+            "useful_first_pass_per_minute": categories["useful"] * 60.0 / elapsed if elapsed else None,
+            "transport_discard_percent": 100.0 * (categories["transport"] + categories["handling"]) / len(single) if reconciled else None,
+            "cohort_reconciled": reconciled,
+            "provider_outages": sum(p["outages"] for p in self._provider_availability.values()),
+            "provider_availability": {k: dict(v) for k, v in self._provider_availability.items()},
+            "provider_scope": "OpenRouter detector observed responses; process lifetime, not piece outcomes",
+            "recent_episodes": [dict(e) for e in episodes[-100:]],
+            "episode_details_truncated": len(episodes) > 100,
+        }
+
+    def setOwnedPieceUuids(self, uuids) -> None:
+        # The coordinator publishes a complete immutable ownership snapshot;
+        # the broadcaster never traverses a concurrently changing pocket ledger.
+        self._owned_piece_uuids = frozenset(uuids)
+
+    def setIndexedMode(self) -> None:
+        self._indexed_mode = True
+
+    def observeState(self, machine: str, state: str, **clock) -> None:
+        previous = self._state_current.get(machine, {}).get("state")
+        if previous != state:
+            self.observeStateTransition(machine, previous, state, **clock)
+
+    def endState(self, machine: str, *, now_monotonic: float | None = None) -> None:
+        current = self._state_current.pop(machine, None)
+        if current is not None and self._is_running:
+            now = time.monotonic() if now_monotonic is None else now_monotonic
+            totals = self._state_totals_s.setdefault(machine, {})
+            state = current["state"]
+            totals[state] = totals.get(state, 0.0) + max(
+                0.0, now - current["entered_at_monotonic"]
+            )
+
+    def observeHarvestReservation(self, allocation: dict, *, now_wall=None) -> None:
+        if allocation.get("mode") != "live":
+            return
+        activation = allocation.get("runtime_id")
+        scope = self._harvest_scope
+        if not activation or (scope is not None and activation == scope[0]):
+            return
+        self._harvest_scope = (str(activation), time.time() if now_wall is None else now_wall, OrderedDict())
+
+    def observeHarvestConfirmation(self, allocation: dict) -> None:
+        scope = self._harvest_scope
+        if (allocation.get("mode") != "live" or allocation.get("status") != "confirmed"
+                or scope is None or allocation.get("runtime_id") != scope[0]):
+            return
+        activation, started_at, confirmations = scope
+        allocation_id = str(allocation.get("allocation_id") or "")
+        if not allocation_id or allocation_id in confirmations:
+            return
+        try:
+            confirmed_at = datetime.fromisoformat(allocation["confirmed_at"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return
+        # Replaying a historical confirmation cannot inflate this observation.
+        if confirmed_at < started_at:
+            return
+        confirmations[allocation_id] = (
+            confirmed_at, allocation.get("group_id") != "harvest-exception"
+        )
+        while len(confirmations) > MAX_CHANNEL_EXIT_EVENTS:
+            confirmations.popitem(last=False)
+
+    def _harvestSnapshot(self, now: float) -> dict:
+        scope = self._harvest_scope
+        if scope is None:
+            return {"activation_id": None, "bag_ppm": None, "distributed_ppm": None}
+        activation, start, confirmations = scope
+        start = max(start, now - 300.0)
+        duration = max(0.0, now - start)
+        events = [bag for ts, bag in list(confirmations.values()) if start <= ts <= now]
+        return {
+            "activation_id": activation,
+            "window_started_at": start, "window_ended_at": now, "window_s": duration,
+            "distributed_count": len(events), "bag_count": sum(events),
+            "distributed_ppm": len(events) * 60.0 / duration if duration else None,
+            "bag_ppm": sum(events) * 60.0 / duration if duration else None,
+        }
 
     def setBusProvider(self, bus_provider: Any | None) -> None:
         self._bus_provider = bus_provider
@@ -259,10 +464,12 @@ class RuntimeStatsCollector:
             lookup_entry = {}
         lookup_entry.update(obj)
         self._known_object_lookup[obj_uuid] = lookup_entry
+        self._observeTransferCompletion(lookup_entry)
         while len(self._known_object_lookup) > MAX_KNOWN_OBJECT_LOOKUP_ENTRIES:
             self._known_object_lookup.popitem(last=False)
 
-        if not self._is_running:
+        from defs.known_object import UNVERIFIED_C4_HANDOFF
+        if not self._is_running or lookup_entry.get("transport_failure_reason") == UNVERIFIED_C4_HANDOFF:
             return
         current = self._piece_by_uuid.get(obj_uuid, {})
         current.update(obj)
@@ -308,7 +515,10 @@ class RuntimeStatsCollector:
         if not self._is_running:
             return []
         reaped: list[dict[str, Any]] = []
+        owned = self._owned_piece_uuids
         for entry in self._known_object_lookup.values():
+            if str(entry.get("uuid") or "") in owned:
+                continue
             if entry.get("dead") or entry.get("aborted"):
                 continue
             if entry.get("distributed_at") is not None:
@@ -362,6 +572,13 @@ class RuntimeStatsCollector:
         self._last_updated_at = event["exited_at"]
 
     def setActiveIncident(self, incident: dict[str, Any]) -> None:
+        payload = dict(incident)
+        if not payload.get('source'):
+            payload['source'] = self._deriveIncidentSource()
+        with self._incident_lock:
+            self._setActiveIncident(payload)
+
+    def _setActiveIncident(self, incident: dict[str, Any]) -> None:
         """Publish the single operator-facing incident currently blocking flow.
 
         Every incident is stamped with a ``source`` identifying the code that
@@ -433,7 +650,16 @@ class RuntimeStatsCollector:
 
     def activeIncident(self) -> dict[str, Any] | None:
         """Return the currently active blocking incident, if any."""
-        return dict(self._active_incident) if self._active_incident else None
+        with self._incident_lock:
+            return dict(self._active_incident) if self._active_incident else None
+
+    def clearActiveIncidentIfMatches(self, expected: dict, *, resolved_by: str) -> bool:
+        """An owned recovery may release only the exact fault it validated."""
+        with self._incident_lock:
+            if self._active_incident != expected:
+                return False
+            self._clearActiveIncident(resolved_by=resolved_by)
+            return True
 
     def clearActiveIncident(
         self,
@@ -441,6 +667,13 @@ class RuntimeStatsCollector:
         kind: str | None = None,
         piece_uuid: str | None = None,
         resolved_by: str = "system",
+    ) -> None:
+        with self._incident_lock:
+            self._clearActiveIncident(kind=kind, piece_uuid=piece_uuid, resolved_by=resolved_by)
+
+    def _clearActiveIncident(
+        self, *, kind: str | None = None, piece_uuid: str | None = None,
+        resolved_by: str = 'system',
     ) -> None:
         if self._active_incident is None:
             return
@@ -875,6 +1108,8 @@ class RuntimeStatsCollector:
     ) -> None:
         now_wall = time.time() if now_wall is None else now_wall
         now_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
+        if machine == "distribution":
+            self.endState("distribution.occupancy", now_monotonic=now_monotonic)
         self._last_updated_at = now_wall
 
         current = self._state_current.get(machine)
@@ -1222,10 +1457,11 @@ class RuntimeStatsCollector:
 
         state_machines: dict[str, Any] = {}
         state_totals_snapshot: dict[str, dict[str, float]] = {}
-        for machine, current in self._state_current.items():
+        for machine in self._state_current.keys() | self._state_totals_s.keys():
+            current = self._state_current.get(machine, {})
             totals = dict(self._state_totals_s.get(machine, {}))
-            current_state = str(current.get("state"))
-            if self._is_running:
+            current_state = current.get("state")
+            if self._is_running and current_state is not None:
                 entered_at_mono = float(current.get("entered_at_monotonic", time.monotonic()))
                 totals[current_state] = totals.get(current_state, 0.0) + max(
                     0.0, time.monotonic() - entered_at_mono
@@ -1263,12 +1499,16 @@ class RuntimeStatsCollector:
             if isinstance(exited_at, (int, float)):
                 channel_exit_timestamps[channel].append(float(exited_at))
 
+        classification_active_states = (
+            {"capture_tail", "index_motion"} if self._indexed_mode
+            else CLASSIFICATION_ACTIVE_OCCUPANCY_STATES
+        )
         channel_active_time_s = {
             "c_channel_2": float(feeder_signal_totals_s.get("stepper_busy_ch2", 0.0) or 0.0),
             "c_channel_3": float(feeder_signal_totals_s.get("stepper_busy_ch3", 0.0) or 0.0),
             "classification_channel": sum(
                 float(state_totals_snapshot.get("classification.occupancy", {}).get(state_name, 0.0) or 0.0)
-                for state_name in CLASSIFICATION_ACTIVE_OCCUPANCY_STATES
+                for state_name in classification_active_states
             ),
         }
 
@@ -1329,8 +1569,12 @@ class RuntimeStatsCollector:
                     state_name: float(
                         state_totals_snapshot.get("classification.occupancy", {}).get(state_name, 0.0) or 0.0
                     )
-                    for state_name in sorted(CLASSIFICATION_ACTIVE_OCCUPANCY_STATES)
+                    for state_name in sorted(classification_active_states)
                 }
+            if self._indexed_mode and channel == "c_channel_2":
+                # This active path has no confirmed C2 exit producer.
+                channel_entry.update(exit_count=None, overall_ppm=None, active_ppm=None)
+                channel_entry["exit_available"] = False
             channel_throughput[channel] = channel_entry
 
         perf_ms = {
@@ -1354,6 +1598,8 @@ class RuntimeStatsCollector:
                 "inter_piece_ppm": _calcValueSummary(inter_piece_ppm_samples),
             },
             "channel_throughput": channel_throughput,
+            "harvest_throughput": self._harvestSnapshot(now),
+            "transfer_throughput": self._transferSnapshot(now),
             "feeder": {
                 "pulse_counts": pulse_counts,
                 "skip_counts": dict(sorted(self._skip_counts.items())),
@@ -1385,7 +1631,7 @@ class RuntimeStatsCollector:
             ),
             "blocked_reason_counts": dict(sorted(self._blocked_reason_counts.items())),
             "pieces_cached": len(self._piece_by_uuid),
-            "active_incident": dict(self._active_incident) if self._active_incident else None,
+            "active_incident": self.activeIncident(),
             "servo_bus_offline_since_ts": self._servo_bus_offline_since_ts,
             "last_update_age_s": max(0.0, now - self._last_updated_at),
         }

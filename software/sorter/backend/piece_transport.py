@@ -206,6 +206,13 @@ class ClassificationChannelTransport(PieceTransport):
             piece_for_distribution_drop=self._exit_piece,
         )
 
+    def resetC4Distribution(self) -> None:
+        """Exclusive complete C4 recovery; never called by pause/track loss."""
+        self._wait_piece = None
+        self._exit_piece = None
+        self._classification_piece = None
+        self._canceled_positioning_piece_uuid = None
+
     def placePieceForDistribution(self, obj: KnownObject) -> None:
         """Stage an externally-owned piece directly into the positioning slot.
 
@@ -239,7 +246,13 @@ class ClassificationChannelTransport(PieceTransport):
                 self._canceled_positioning_piece_uuid = piece_uuid
             return piece
         piece = self._wait_piece
-        if piece is None or piece.uuid != piece_uuid:
+        if piece is None:
+            # A still-owned indexed pocket can lose only its software slot.
+            # Preserve cancellation acknowledgement even when that slot is gone;
+            # READY must not interpret the missing record as a physical drop.
+            self._canceled_positioning_piece_uuid = piece_uuid
+            return None
+        if piece.uuid != piece_uuid:
             return None
         self._wait_piece = None
         self._canceled_positioning_piece_uuid = piece_uuid

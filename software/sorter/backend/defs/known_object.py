@@ -5,6 +5,11 @@ import uuid
 import time
 
 
+# Persisted in transport_failure_reason: this record owns a possibly empty
+# reject pocket, not a confirmed physical arrival.
+UNVERIFIED_C4_HANDOFF = "c3_handoff_unverified"
+
+
 class PieceStage(str, Enum):
     created = "created"
     distributing = "distributing"
@@ -107,6 +112,10 @@ class ClassificationAttempt:
 
 @dataclass
 class KnownObject:
+    c4_discard: bool = False
+    c4_pocket_id: int | None = None
+    c4_generation: int | None = None
+    c4_marker_exit_boundary: int | None = None
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -186,6 +195,12 @@ class KnownObject:
     harvest_group_id: Optional[str] = None
     harvest_group_label: Optional[str] = None
     harvest_exception: bool = False
+    transfer_episode_id: Optional[str] = None
+    transfer_first_pass: bool = False
+    transport_failure_reason: Optional[str] = None
+    forced_reject_reason: Optional[str] = None
+    reject_category: Optional[str] = None
+    physical_group_size_unknown: bool = False
     # Pipeline modes that must never stop on a piece-level routing failure set
     # this flag. If no real bin can be selected, distribution sends the piece
     # through to the bottom reject instead of raising an operator incident.

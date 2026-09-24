@@ -154,17 +154,18 @@ def reserve_piece(gc: Any, piece: Any) -> dict[str, Any] | None:
             "HARVEST_OVERSIZE_REQUIRES_MANUAL_HANDLING",
             "An oversized piece cannot safely enter an activated bag bin. Remove it manually.",
         )
-    return store.propose_live_allocation(
+    forced_reject = bool(getattr(piece, "forced_reject_reason", None))
+    allocation = store.propose_live_allocation(
         piece_id=str(piece.uuid),
-        part_id=str(piece.part_id) if piece.part_id is not None else None,
-        color_id=str(piece.color_id) if piece.part_id is not None else None,
-        item_candidates=list(
+        part_id=str(piece.part_id) if piece.part_id is not None and not forced_reject else None,
+        color_id=str(piece.color_id) if piece.part_id is not None and not forced_reject else None,
+        item_candidates=[] if forced_reject else list(
             getattr(piece, "classification_item_candidates", None) or []
         ),
-        color_candidates=list(
+        color_candidates=[] if forced_reject else list(
             getattr(piece, "classification_color_candidates", None) or []
         ),
-        classification_attempts=[
+        classification_attempts=[] if forced_reject else [
             {
                 "part_id": getattr(attempt, "part_id", None),
                 "part_name": getattr(attempt, "part_name", None),
@@ -178,6 +179,10 @@ def reserve_piece(gc: Any, piece: Any) -> dict[str, Any] | None:
             for attempt in (getattr(piece, "classification_attempts", None) or [])
         ],
     )
+    stats = getattr(gc, "runtime_stats", None)
+    if stats is not None and hasattr(stats, "observeHarvestReservation"):
+        stats.observeHarvestReservation(allocation)
+    return allocation
 
 
 def confirm_piece_drop(gc: Any, piece: Any) -> dict[str, Any] | None:
@@ -224,3 +229,10 @@ def confirm_piece_drop(gc: Any, piece: Any) -> dict[str, Any] | None:
             "piece_id": str(piece.uuid),
         },
     )
+
+
+def retire_c4_planned_allocations(gc, *, piece_ids=None):
+    root = getattr(gc, "project_harvest_dir", None)
+    if not isinstance(root, str) or not root.strip():
+        return 0
+    return _store(gc).retire_c4_planned_allocations(piece_ids=piece_ids)

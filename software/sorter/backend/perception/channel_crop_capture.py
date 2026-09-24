@@ -79,6 +79,14 @@ class _TrackState:
     last_seen_ts: float
 
 
+@dataclass(frozen=True)
+class _ReadyC3Run:
+    generation: object
+    last_ts: float
+    bbox: tuple[int, int, int, int]
+    crops: tuple = ()
+
+
 class ChannelCropCollector:
     def __init__(self, *, perception_service: Any, logger: Any = None,
                  config: Optional[ChannelCropCaptureConfig] = None) -> None:
@@ -92,6 +100,140 @@ class ChannelCropCollector:
         self._last_frame_ts: dict[int, float] = {}
         self._last_prune = 0.0
         self._captured_total = 0
+        # Recognition can reuse already-created crops without waiting for disk
+        # or the collector. This optional cache never changes capture cadence.
+        self._clearReadyC3()
+
+    def _clearReadyC3(self) -> None:
+        self._ready_incarnation = None
+        self._ready_last_ts = None
+        self._ready_runs: dict[int, _ReadyC3Run] = {}
+        self._ready_observations: tuple = ()
+        self._ready_published: tuple = (None, frozenset(), ())
+
+    def _c3Incarnation(self):
+        try:
+            worker = self._service.workers().get(3)
+            tracker = worker._tracker._tracker
+            return (worker, tracker) if tracker is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _sameIncarnation(left, right) -> bool:
+        return (left is not None and right is not None
+                and left[0] is right[0] and left[1] is right[1])
+
+    def _observeReadyC3(self, pieces, frame, incarnation) -> bool:
+        """Record only continuous, isolated observations; never track a piece."""
+        ts = float(frame.timestamp)
+        if incarnation is None:
+            self._clearReadyC3()
+            return False
+        if not self._sameIncarnation(incarnation, self._ready_incarnation):
+            self._clearReadyC3()
+            self._ready_incarnation = incarnation
+            # A worker may still publish its old sample after tracker replacement.
+            self._ready_last_ts = ts
+            return False
+        if self._ready_last_ts is not None and ts <= self._ready_last_ts:
+            if ts < self._ready_last_ts:
+                self._clearReadyC3()
+                self._ready_incarnation = incarnation
+                self._ready_last_ts = ts
+            return False
+        previous = self._ready_runs
+        # Reuse the existing fresh-image horizon; inference need not be 30 Hz.
+        if self._ready_last_ts is not None and ts - self._ready_last_ts > 1.5:
+            previous = {}
+        self._ready_last_ts = ts
+        bgr = getattr(frame, "bgr", None)
+        if bgr is None or not getattr(bgr, "size", 0):
+            self._ready_runs = {}
+            self._ready_observations = ()
+            self._ready_published = (incarnation, frozenset(), ())
+            return False
+        h, w = bgr.shape[:2]
+        boxes = []
+        for piece in pieces:
+            try:
+                box = tuple(int(v) for v in piece.bbox)
+                if len(box) != 4:
+                    raise ValueError("invalid bbox")
+            except (AttributeError, TypeError, ValueError):
+                # An unlocatable neighbor makes isolation unknowable.
+                boxes = []
+                pieces = ()
+                break
+            boxes.append(box)
+        ids = [getattr(piece, "sv_bt_track_id", None) for piece in pieces]
+        runs = {}
+        pad = self._cfg.crop_pad_px
+        for index, (piece, box) in enumerate(zip(pieces, boxes)):
+            track_id = ids[index]
+            if (not isinstance(track_id, int) or isinstance(track_id, bool)
+                    or track_id <= 0 or ids.count(track_id) != 1):
+                continue
+            x1, y1, x2, y2 = box
+            if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h):
+                continue
+            padded = (max(0, x1-pad), max(0, y1-pad), min(w, x2+pad), min(h, y2+pad))
+            if any(j != index and max(padded[0], other[0]) < min(padded[2], other[2])
+                   and max(padded[1], other[1]) < min(padded[3], other[3])
+                   for j, other in enumerate(boxes)):
+                continue
+            old = previous.get(track_id)
+            runs[track_id] = _ReadyC3Run(
+                old.generation if old else object(), ts, box,
+                old.crops if old else (),
+            )
+            if len(runs) >= 32:
+                break
+        self._ready_runs = runs
+        active = frozenset((tid, run.generation) for tid, run in runs.items())
+        self._ready_observations = tuple(obs for obs in self._ready_observations
+                                         if (obs[1], obs[3]) in active)
+        # Publish invalidation before any optional crop encoding can be busy.
+        self._ready_published = (incarnation, active, self._ready_observations)
+        return True
+
+    def _publishReadyC3(self, incarnation) -> None:
+        if (self._stop.is_set()
+                or not self._sameIncarnation(incarnation, self._c3Incarnation())):
+            self._clearReadyC3()
+            return
+        active = frozenset((tid, run.generation) for tid, run in self._ready_runs.items())
+        observations = tuple(obs for obs in self._ready_observations
+                             if (obs[1], obs[3]) in active)
+        observations += tuple((run.last_ts, tid, run.bbox, run.generation, run.crops)
+                              for tid, run in self._ready_runs.items())
+        self._ready_observations = observations[-32:]
+        # One immutable publication: readers neither lock nor wait for a tick.
+        self._ready_published = (incarnation, active, self._ready_observations)
+
+    def ready_c3_views(self, frame_ts, leader_id, bbox) -> list[dict]:
+        """Return up to four ready crops bound to this exact release observation.
+
+        Recognition chooses its smaller distinct subset without delaying C4.
+        """
+        incarnation, active, observations = self._ready_published
+        if not self._sameIncarnation(incarnation, self._c3Incarnation()):
+            return []
+        try:
+            box = tuple(int(v) for v in bbox)
+            ts = float(frame_ts)
+        except (TypeError, ValueError):
+            return []
+        for observed_ts, tid, observed_box, generation, crops in reversed(observations):
+            if (observed_ts != ts or tid != leader_id or observed_box != box
+                    or (tid, generation) not in active):
+                continue
+            eligible = [crop for crop in crops if 0 <= ts-crop[0] <= 1.5]
+            if not self._sameIncarnation(incarnation, self._c3Incarnation()):
+                return []
+            return [{"frame_ts": stamp, "bgr": bgr, "source": "c3_history"}
+                    for stamp, bgr in eligible]
+        return []
 
     # --- lifecycle ------------------------------------------------------
 
@@ -109,6 +251,7 @@ class ChannelCropCollector:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         self._thread = None
+        self._clearReadyC3()
 
     def stats(self) -> dict[str, Any]:
         return {"captured_total": self._captured_total, "tracked": len(self._tracks)}
@@ -134,6 +277,7 @@ class ChannelCropCollector:
         while not self._stop.is_set():
             cfg = self._cfg
             if not cfg.enabled or not self._isSorting():
+                self._clearReadyC3()
                 self._stop.wait(0.5)
                 continue
             for channel_id in cfg.channels:
@@ -146,11 +290,16 @@ class ChannelCropCollector:
             self._stop.wait(cfg.poll_interval_s)
 
     def _collectChannel(self, channel_id: int, cfg: ChannelCropCaptureConfig) -> None:
+        incarnation = self._c3Incarnation() if channel_id == 3 else None
         res = self._service.read_pieces_and_frame(channel_id)
         if res is None:
             return
         pieces, frame = res
+        ready_frame = (self._observeReadyC3(pieces, frame, incarnation)
+                       if channel_id == 3 else False)
         if not pieces:
+            if ready_frame:
+                self._publishReadyC3(incarnation)
             return
         ts = float(frame.timestamp)
         if self._last_frame_ts.get(channel_id) == ts:
@@ -162,7 +311,18 @@ class ChannelCropCollector:
         h, w = bgr.shape[:2]
         now = time.time()
         for piece in pieces:
-            self._considerPiece(channel_id, piece, bgr, w, h, ts, now, cfg)
+            crop = self._considerPiece(channel_id, piece, bgr, w, h, ts, now, cfg)
+            if ready_frame and crop is not None:
+                tid = getattr(piece, "sv_bt_track_id", None)
+                run = self._ready_runs.get(tid)
+                if run is not None:
+                    crop["bgr"].flags.writeable = False
+                    self._ready_runs[tid] = _ReadyC3Run(
+                        run.generation, run.last_ts, run.bbox,
+                        (run.crops + ((crop["frame_ts"], crop["bgr"]),))[-4:],
+                    )
+        if ready_frame:
+            self._publishReadyC3(incarnation)
 
     def _cadenceFor(self, channel_id: int, zone_code: int,
                     cfg: ChannelCropCaptureConfig) -> _ZoneCadence:
@@ -172,7 +332,7 @@ class ChannelCropCollector:
 
     def _considerPiece(self, channel_id: int, piece: Any, bgr: np.ndarray,
                        w: int, h: int, ts: float, now: float,
-                       cfg: ChannelCropCaptureConfig) -> None:
+                       cfg: ChannelCropCaptureConfig) -> Optional[dict]:
         zone_code = int(getattr(piece, "zone_code", 0) or 0)
         deg = getattr(piece, "com_forward_to_exit_deg", None)
         deg_f = float(deg) if isinstance(deg, (int, float)) else None
@@ -234,6 +394,7 @@ class ChannelCropCollector:
             state.last_capture_ts = now
             state.last_capture_deg = deg_f
             state.count += 1
+        return {"bgr": crop, "frame_ts": ts}
 
     def _maybePrune(self) -> None:
         now = time.time()

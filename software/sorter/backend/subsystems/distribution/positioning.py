@@ -15,7 +15,7 @@ from global_config import GlobalConfig
 from sorting_profile import SortingProfile, MISC_CATEGORY
 from blob_manager import setBinCategories
 from defs.events import PauseCommandData, PauseCommandEvent
-from defs.known_object import PieceStage
+from defs.known_object import PieceStage, UNVERIFIED_C4_HANDOFF
 from utils.event import knownObjectToEvent
 
 
@@ -123,9 +123,11 @@ class Positioning(BaseState):
                 self._setOccupancyState("positioning.wait_piece_for_distribution")
                 return DistributionState.IDLE
 
-            if getattr(self.shared, "sample_collection_mode", False):
+            if (getattr(self.shared, "sample_collection_mode", False)
+                    or piece.transport_failure_reason == UNVERIFIED_C4_HANDOFF
+                    or piece.c4_discard):
                 self.logger.info(
-                    "Positioning: sample collection mode — opening all layer doors for discard passthrough"
+                    "Positioning: discard passthrough — opening all layer doors"
                 )
                 self._clearBinsFullAlertIfOwned()
                 self._clearChuteJamAlertIfOwned()
@@ -141,6 +143,11 @@ class Positioning(BaseState):
                 self._setOccupancyState("positioning.sample_collection_passthrough")
                 return self._finishPassthrough(now)
 
+            if getattr(piece, "forced_reject_reason", None):
+                # An already locked reject cannot be promoted by late metadata.
+                piece.part_id = None
+                piece.category_id = None
+                piece.high_value_routed = False
             harvest_route = self._reserveHarvestRoute(piece)
             if harvest_route is False:
                 return DistributionState.IDLE
@@ -185,7 +192,7 @@ class Positioning(BaseState):
                 if harvest_active
                 else self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
             )
-            if high_value_category is not None:
+            if high_value_category is not None and not getattr(piece, "forced_reject_reason", None):
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.part_id}) moving-avg "
                     f"${piece.moving_avg_price} clears high-value threshold — routing to "
@@ -433,6 +440,8 @@ class Positioning(BaseState):
         piece.harvest_group_id = allocation["group_id"]
         piece.harvest_group_label = str(destination.get("group_label") or allocation["group_id"])
         piece.harvest_exception = bool(allocation.get("exception"))
+        if not piece.reject_category and allocation.get("match_kind") == "surplus_exception":
+            piece.reject_category = "surplus"
         self.logger.info(
             "Positioning: Harvest piece %s reserved for %s in %s"
             % (piece.uuid, piece.harvest_group_label, destination.get("bin_id"))
@@ -554,6 +563,8 @@ class Positioning(BaseState):
 
     def cleanup(self) -> None:
         super().cleanup()
+        self._occupancy_state = None
+        self.gc.runtime_stats.endState("distribution.occupancy")
         target_address = self._target_address
         self._phase = "init"
         self._target_address = None

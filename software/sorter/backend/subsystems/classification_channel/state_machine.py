@@ -96,34 +96,12 @@ class ClassificationChannelStateMachine(BaseSubsystem):
                 vision=vision,
                 event_queue=event_queue,
             )
-        elif self._mode == ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01:
-            from subsystems.classification_channel.two_piece import (
-                TwoPieceClassificationChannel,
-            )
-            from subsystems.classification_channel.simple_state_machine_rev01.context import (
-                SimpleStateMachineRev01Context,
-            )
+        elif self._mode in (ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
+                            ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01):
+            from .physical_controller import PhysicalC4Controller
             self.states_map = {}
-            self._delegate = TwoPieceClassificationChannel(
-                irl,
-                irl_config,
-                gc,
-                shared,
-                transport,
-                vision,
-                event_queue,
-                SimpleStateMachineRev01Context(),
-            )
-            self._two_piece = self._delegate
-        elif self._mode == ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01:
-            from subsystems.classification_channel.indexed_pocket_pipeline import (
-                IndexedPocketPipeline,
-            )
-
-            self.states_map = {}
-            self._delegate = IndexedPocketPipeline(
-                irl, irl_config, gc, shared, transport, vision, event_queue
-            )
+            self._delegate = PhysicalC4Controller(
+                irl, irl_config, gc, shared, transport, vision, event_queue)
         else:
             self.states_map = {
                 ClassificationChannelState.IDLE: Idle(
@@ -174,6 +152,10 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         self._track_lost_recovery_piece_uuid: str | None = None
 
     def step(self) -> None:
+        delegate = self._activeDelegate()
+        if getattr(delegate, "physical_c4_authority", False):
+            delegate.step()
+            return
         if self._applyRequestedTrackLostRecovery():
             self._checkStall(time.monotonic())
             return
@@ -189,6 +171,9 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         if delegate is not None:
             if not stall_hold:
                 delegate.step()
+            elif hasattr(delegate, "_ledger"):
+                self.gc.runtime_stats.observeState("classification", "incident_hold")
+                self.gc.runtime_stats.observeState("classification.occupancy", "incident_hold")
             self._checkStall(time.monotonic())
             return
         if stall_hold:
@@ -264,7 +249,7 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         return getattr(self, "_delegate", None) or getattr(self, "_two_piece", None)
 
     def supportsStatefulPause(self) -> bool:
-        return self._mode == ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01
+        return bool(getattr(self._activeDelegate(), "physical_c4_authority", False)) or self._mode == ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01
 
     def pause(self) -> None:
         delegate = self._activeDelegate()
@@ -279,6 +264,8 @@ class ClassificationChannelStateMachine(BaseSubsystem):
             resume()
 
     def _checkStall(self, now: float) -> None:
+        if getattr(self._activeDelegate(), "physical_c4_authority", False):
+            return
         # Only the supported rev01 paths (simple + two-piece). Legacy/dynamic
         # paths have their own flow.
         if self._mode not in (
@@ -380,6 +367,8 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         operator's Auto Resolve button: rotate the channel forward
         (occupancy-checked) until it clears or the budget runs out. Blocking;
         must only run on the coordinator thread. Returns a ChannelClearResult."""
+        if getattr(self._activeDelegate(), "physical_c4_authority", False):
+            return None
         max_output_deg = _STALL_AUTO_CLEAR_MAX_TURNS * 360.0
         delegate = self._activeDelegate()
         if delegate is not None:
@@ -415,6 +404,8 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         """Called from the HTTP router when the operator presses Auto Resolve on
         an active stall incident. Only sets a flag — the coordinator thread
         performs the actual motion on its next step()."""
+        if getattr(self._activeDelegate(), "physical_c4_authority", False):
+            return False
         if not c4_stall_incident_active(self.gc):
             return False
         self._stall_resolve_requested = True

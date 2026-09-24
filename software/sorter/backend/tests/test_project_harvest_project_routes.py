@@ -531,6 +531,29 @@ def test_live_activation_is_paused_explicit_and_does_not_start_motion(
         assert runtime["sorter_state"] == "paused"
         assert runtime["activation_starts_motion"] is False
 
+        from defs.known_object import KnownObject
+        from project_harvest_runtime import reserve_piece
+        piece = KnownObject(part_id="3001", color_id="2", forced_reject_reason="c3_arrival_unconfirmed",
+                            classification_item_candidates=[{"id": "3001", "score": 1.0}],
+                            classification_color_candidates=[{"id": "2", "score": 1.0}])
+        gc = SimpleNamespace(project_harvest_dir=str(tmp_path / "harvest"))
+        rejected = reserve_piece(gc, piece)
+        assert rejected["exception"] and rejected["group_id"] == "harvest-exception"
+        assert reserve_piece(gc, piece)["allocation_id"] == rejected["allocation_id"]
+        store = project_harvest_projects.HarvestProjectStore(tmp_path / "harvest")
+        dest = rejected["destination"]
+        store.confirm_allocation(project_id, rejected["allocation_id"], evidence={
+            "physical_drop_confirmed": True, "activation_id": rejected["activation_id"],
+            "destination_bin": [dest["layer_index"], dest["section_index"], dest["bin_index"]],
+        })
+        normal = reserve_piece(gc, KnownObject(part_id="3001", color_id="2", confidence=1.0, color_confidence=1.0))
+        assert normal["exception"] is False
+        dest = normal["destination"]
+        store.confirm_allocation(project_id, normal["allocation_id"], evidence={
+            "physical_drop_confirmed": True, "activation_id": normal["activation_id"],
+            "destination_bin": [dest["layer_index"], dest["section_index"], dest["bin_index"]],
+        })
+
         stopped = client.post(
             f"/api/project-harvest/projects/{project_id}/deactivate",
             json={"operator": "owner", "reason": "controlled stop"},

@@ -113,6 +113,13 @@ def _ensureInitialized() -> None:
                 # The applied color's own score, kept apart from the mold score
                 # in `confidence`. NULL on rows written before the split.
                 ("color_confidence", "REAL"),
+                ("transfer_episode_id", "TEXT"),
+                ("transfer_first_pass", "INTEGER"),
+                ("transport_failure_reason", "TEXT"),
+                ("forced_reject_reason", "TEXT"),
+                ("reject_category", "TEXT"),
+                ("physical_group_size_unknown", "INTEGER"),
+                ("harvest_exception", "INTEGER"),
             ):
                 if _col not in existing_columns:
                     conn.execute(
@@ -219,8 +226,9 @@ def recordPiece(
             "part_id, part_name, color_id, color_name, category_id, confidence, "
             "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
             "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
-            "brickognize_color_rank, color_provider, mold_provider, color_confidence) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "brickognize_color_rank, color_provider, mold_provider, color_confidence, "
+            "transfer_episode_id, transfer_first_pass, transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(uuid) DO UPDATE SET "
             "run_id=excluded.run_id, machine_id=excluded.machine_id, "
             "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
@@ -236,7 +244,14 @@ def recordPiece(
             "brickognize_color_rank=excluded.brickognize_color_rank, "
             "color_provider=excluded.color_provider, "
             "mold_provider=excluded.mold_provider, "
-            "color_confidence=excluded.color_confidence",
+            "color_confidence=excluded.color_confidence, "
+            "transfer_episode_id=COALESCE(excluded.transfer_episode_id, piece_records.transfer_episode_id), "
+            "transfer_first_pass=COALESCE(excluded.transfer_first_pass, piece_records.transfer_first_pass), "
+            "transport_failure_reason=COALESCE(excluded.transport_failure_reason, piece_records.transport_failure_reason), "
+            "forced_reject_reason=COALESCE(excluded.forced_reject_reason, piece_records.forced_reject_reason), "
+            "reject_category=COALESCE(excluded.reject_category, piece_records.reject_category), "
+            "physical_group_size_unknown=COALESCE(excluded.physical_group_size_unknown, piece_records.physical_group_size_unknown), "
+            "harvest_exception=COALESCE(excluded.harvest_exception, piece_records.harvest_exception)",
             (
                 uuid_val,
                 run_id,
@@ -262,6 +277,13 @@ def recordPiece(
                 piece.get("color_provider"),
                 piece.get("mold_provider"),
                 piece.get("color_confidence"),
+                piece.get("transfer_episode_id"),
+                piece.get("transfer_first_pass"),
+                piece.get("transport_failure_reason"),
+                piece.get("forced_reject_reason"),
+                piece.get("reject_category"),
+                piece.get("physical_group_size_unknown"),
+                piece.get("harvest_exception"),
             ),
         )
         conn.commit()
@@ -481,7 +503,8 @@ _SUMMARY_COLUMNS = (
     "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
     "brickognize_listing_id, part_correct, color_corrected_id, "
     "part_feedback_submitted, color_feedback_submitted, "
-    "color_provider, mold_provider, color_confidence"
+    "color_provider, mold_provider, color_confidence, transfer_episode_id, transfer_first_pass, "
+    "transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception"
 )
 
 
@@ -574,6 +597,13 @@ def _rowToSummary(gc: Any, row: sqlite3.Row) -> dict[str, Any]:
         "category_id": row["category_id"],
         "confidence": row["confidence"],
         "color_confidence": row["color_confidence"],
+        "transfer_episode_id": row["transfer_episode_id"],
+        "transfer_first_pass": row["transfer_first_pass"],
+        "transport_failure_reason": row["transport_failure_reason"],
+        "forced_reject_reason": row["forced_reject_reason"],
+        "reject_category": row["reject_category"],
+        "physical_group_size_unknown": row["physical_group_size_unknown"],
+        "harvest_exception": row["harvest_exception"],
         "bin": bin_ref,
         "dead": bool(row["dead"]),
         "has_images": bool(row["has_images"]),

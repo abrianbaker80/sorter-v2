@@ -649,7 +649,7 @@ def main() -> None:
     # backwards-compatible /api/system/home alias. This path owns the motors
     # exclusively until all homing is done and the runtime is published in a
     # paused state.
-    def _home_hardware() -> None:
+    def _home_hardware(*, drain_c4: bool = False) -> None:
         nonlocal irl, controller
 
         _drain_runtime_commands("safe recovery start")
@@ -677,6 +677,8 @@ def main() -> None:
                 f"(auto_feeder={machine_setup.automatic_feeder}, "
                 f"carousel_transport={machine_setup.uses_carousel_transport})"
             )
+        if drain_c4 and _noPowerModeActive(gc):
+            raise RuntimeError("Physical C4 drain is unavailable in no-power mode")
         if _noPowerModeActive(gc):
             gc.logger.warning(
                 "NO_POWER_DEVELOPMENT_MODE=1: safe recovery will initialize runtime "
@@ -726,7 +728,7 @@ def main() -> None:
                 gc.logger.warning(
                     "Manual carousel feed mode is enabled, but carousel trigger detection is not fully configured."
                 )
-        elif feeder_detection_ready and not _noPowerModeActive(gc) and bool(
+        elif feeder_detection_ready and not drain_c4 and not _noPowerModeActive(gc) and bool(
             getattr(machine_setup, "runs_reverse_pulse_calibration", True)
         ):
             # Reverse-pulse calibration seeds background-subtraction models
@@ -782,6 +784,17 @@ def main() -> None:
         elif vision.usesClassificationBaseline() and not vision.loadClassificationBaseline():
             gc.logger.warning("Classification baseline not found — continuing without classification")
 
+        physical_c4 = irl_config.classification_channel_config.mode in (
+            ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
+            ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01)
+        if drain_c4 and not physical_c4:
+            from subsystems.classification_channel.complete_drain import drain_all_pockets
+
+            shared_state.setHardwareStatus(homing_step="Draining every C4 pocket to Reject...")
+            receipt = drain_all_pockets(irl, irl_config, progress=lambda message:
+                shared_state.setHardwareStatus(homing_step=message))
+            shared_state.c4_drain_result = {"status": "drained", **receipt}
+
         classification_mode = getattr(
             getattr(irl_config, "classification_channel_config", None),
             "mode",
@@ -795,6 +808,7 @@ def main() -> None:
                 ClassificationChannelMode.INDEXED_POCKET_PIPELINE_REV01,
             )
             and not _noPowerModeActive(gc)
+            and not physical_c4
         ):
             from subsystems.classification_channel.simple_state_machine_rev01.spoke_home import (
                 maybeRunSpokeHome,
@@ -809,7 +823,7 @@ def main() -> None:
 
         if _noPowerModeActive(gc):
             gc.logger.info("Skipping carousel homing in no-power development mode.")
-        elif bool(getattr(machine_setup, "homes_carousel", True)):
+        elif not physical_c4 and bool(getattr(machine_setup, "homes_carousel", True)):
             shared_state.setHardwareStatus(homing_step="Homing carousel...")
             carousel_hw = getattr(irl, "carousel_hw", None)
             if carousel_hw is not None:
@@ -875,6 +889,14 @@ def main() -> None:
         elif chute is not None:
             gc.logger.info("Skipping chute homing in no-power development mode.")
 
+        if physical_c4 and not _noPowerModeActive(gc):
+            from subsystems.classification_channel.complete_drain import drain_controller
+            receipt = drain_controller(next_controller, progress=lambda message:
+                shared_state.setHardwareStatus(homing_step=message))
+            shared_state.c4_drain_result = {"status": "ready", **receipt}
+        elif drain_c4:
+            gc.runtime_stats.reconcileC4Drain()
+
         _drain_runtime_commands("safe recovery finish")
         with controller_lock:
             controller = next_controller
@@ -924,6 +946,30 @@ def main() -> None:
         shared_state.setHardwareStatus(clear_homing_step=True)
         gc.logger.info("Hardware initialized (steppers ready, no homing performed).")
 
+    def _complete_c4_drain() -> None:
+        shared_state.c4_drain_result = {"status": "running"}
+        try:
+            with controller_lock:
+                retained = controller
+            delegate = getattr(getattr(getattr(retained, "coordinator", None), "classification", None), "_delegate", None)
+            if getattr(delegate, "physical_c4_authority", False):
+                from subsystems.classification_channel.complete_drain import drain_controller
+                from defs.sorter_controller import SorterLifecycle
+                with retained._operation_lock:
+                    receipt = drain_controller(retained, progress=lambda message:
+                        shared_state.setHardwareStatus(homing_step=message))
+                    retained.state = SorterLifecycle.READY
+                    gc.runtime_stats.setLifecycleState("ready")
+                    shared_state.c4_drain_result = {"status": "ready", **receipt}
+            else:
+                _home_hardware(drain_c4=True)
+        except Exception as exc:
+            shared_state.c4_drain_result = {**shared_state.c4_drain_result,
+                                          "status": "blocked", "error": str(exc)}
+            raise
+        shared_state.c4_drain_result = {**shared_state.c4_drain_result, "status": "ready"}
+
+    shared_state._hardware_c4_drain_fn = _complete_c4_drain
     setHardwareStartFn(_home_hardware)
     setHardwareInitializeFn(_initialize_hardware)
     setHardwareResetFn(lambda: _cleanup_runtime_hardware("system reset"))

@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from functools import wraps
+from threading import RLock
 """Implementation of the Sorter Interface hardware drivers"""
 
 # Copyright (c) 2026 Jose I. Romero
@@ -9,13 +12,13 @@ import json
 import math
 import os
 import struct
-import time
 import threading
+import time
 from typing import Protocol
 
 from global_config import GlobalConfig
 
-from .bus import BaseCommandCode, MCUDevice
+from .bus import BaseCommandCode, MCUBusError, MCUDevice
 
 # Kill switch for the firmware StallGuard/DIAG path. When set, the backend never
 # sends ENABLE_STALL_DETECTION / GET_STALL_STATUS / CLEAR_STALL (0x1A/0x1B/0x1C)
@@ -161,6 +164,24 @@ def _controlDataRecordCommand(payload: dict) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class StepperMoveReceipt:
+    motor_id: int
+    generation: int
+    start_position: int
+    target_position: int
+
+
+def _motion_change(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._motion_lock:
+            # Even a rejected/interrupted command invalidates an older receipt.
+            self._motion_generation += 1
+            return method(self, *args, **kwargs)
+    return guarded
+
+
 class StepperMotor:
     def __init__(self, device: MCUDevice, channel: int, gc: GlobalConfig):
         self._dev = device
@@ -174,7 +195,9 @@ class StepperMotor:
         self._current_position_steps = 0
         self._last_set_current: dict[str, int] | None = None
         self._gc = gc
-        self.software_disabled = False
+        self._motion_lock = RLock()
+        self._motion_generation = 0
+        self._software_disabled = False
         # StallGuard config, stamped from [stepper_stallguard.*] at init by
         # applyStepperStallguard. The stall monitor reads these to decide which
         # steppers to arm and at what threshold. sgthrs is None => unconfigured.
@@ -208,6 +231,72 @@ class StepperMotor:
         steps = self.microsteps_for_degrees(degrees)
         return self.move_steps(steps, acceleration=acceleration, force=force)
 
+    @property
+    def software_disabled(self) -> bool:
+        return self._software_disabled
+
+    @software_disabled.setter
+    @_motion_change
+    def software_disabled(self, value: bool) -> None:
+        self._software_disabled = bool(value)
+
+    def start_tracked_move(self, steps: int, speed: int) -> StepperMoveReceipt:
+        """Issue a relative move with a receipt; suppression is never success."""
+        with self._motion_lock:
+            if self.software_disabled or not self.enabled or self.stalled:
+                raise RuntimeError("motor disabled or stalled")
+            if not self.stopped or not isinstance(steps, int) or not -2**31 < steps < 2**31 or steps == 0:
+                raise RuntimeError("motor busy or empty move")
+            start = self.position
+            target = ((start + steps + 2**31) % 2**32) - 2**31
+            marker_start_wall = time.time()
+            try:
+                if self._name == 'carousel':
+                    import c4_marker_telemetry
+                    c4_marker_telemetry.emit('boundary', None, marker_start_wall)
+            except Exception:
+                pass
+            self.set_speed_limits(16, max(16, speed))
+            if not self.move_steps(steps):
+                raise RuntimeError("move not acknowledged")
+            receipt = StepperMoveReceipt(id(self), self._motion_generation, start, target)
+            try:
+                if self._name == 'carousel':
+                    import c4_marker_telemetry
+                    c4_marker_telemetry.emit('start', receipt, marker_start_wall, steps)
+            except Exception:
+                pass
+            return receipt
+
+    def tracked_move_complete(self, receipt: StepperMoveReceipt) -> bool:
+        """Verify this command's pulse-counter completion, not physical delivery.
+
+        No encoder is available. C4 must additionally corroborate piece movement
+        and exit with camera observations. Stops/replacements invalidate receipts.
+        """
+        with self._motion_lock:
+            if receipt.motor_id != id(self) or receipt.generation != self._motion_generation:
+                raise RuntimeError("move interrupted or replaced")
+            if self.software_disabled or not self.enabled or self.stalled:
+                raise RuntimeError("motor disabled or stalled")
+            if not self.stopped:
+                return False
+            if ((self.position + 2**31) % 2**32) - 2**31 != receipt.target_position:
+                raise RuntimeError("motor stopped before completing commanded travel")
+            try:
+                if self._name == 'carousel':
+                    import c4_marker_telemetry
+                    c4_marker_telemetry.emit('complete', receipt, time.time())
+            except Exception:
+                pass
+            return True
+
+    def stationary_verified(self) -> bool:
+        """Read the MCU even when software suppression is enabled."""
+        res = self._dev.send_command(InterfaceCommandCode.STEPPER_IS_STOPPED, self._channel, b'')
+        return len(res.payload) == 1 and res.payload[0] == 1
+
+    @_motion_change
     def move_steps(self, steps: int, *, acceleration: int | None = None, force: bool = False) -> bool:
         """Move the stepper by a given number of microsteps (positive or negative).
 
@@ -246,6 +335,7 @@ class StepperMotor:
         )
         return success
     
+    @_motion_change
     def move_at_speed(self, speed: int, *, acceleration: int | None = None, force: bool = False) -> bool:
         """Move the stepper at a given speed in microsteps per second.
 
@@ -280,6 +370,7 @@ class StepperMotor:
         )
         return success
 
+    @_motion_change
     def jitter(self, amplitude_steps: int, cycles: int, speed: int, acceleration: int, *, force: bool = False) -> bool:
         """Oscillate +-amplitude_steps microsteps for `cycles` full back-and-forths.
 
@@ -378,12 +469,16 @@ class StepperMotor:
         if self.software_disabled:
             return True
         res = self._dev.send_command(InterfaceCommandCode.STEPPER_IS_STOPPED, self._channel, b'')
+        if res.payload not in (b'\x00', b'\x01'):
+            raise MCUBusError("Invalid stepper stopped response payload")
         return bool(res.payload[0])
 
     def stopped_force(self) -> bool:
         if self.software_disabled:
             return True
         res = self._dev.send_command(InterfaceCommandCode.STEPPER_IS_STOPPED, self._channel, b'')
+        if res.payload not in (b'\x00', b'\x01'):
+            raise MCUBusError("Invalid stepper stopped response payload")
         return bool(res.payload[0])
     
     @property
@@ -393,6 +488,7 @@ class StepperMotor:
         return self._physical_to_logical_steps(struct.unpack("<i", res.payload)[0])
 
     @position.setter
+    @_motion_change
     def position(self, position: int):
         """Set the current position of the stepper in microsteps."""
         logical_position = int(position)
@@ -427,6 +523,7 @@ class StepperMotor:
         microsteps = int(round(steps * self._microsteps))
         self.position = microsteps
 
+    @_motion_change
     def home(self, home_speed: int, home_pin: DigitalInputPin | int, home_pin_active_high=True, *, force: bool = False):
         """Home the stepper using the specified home pin and speed.
 
@@ -469,6 +566,7 @@ class StepperMotor:
         return self._enabled
     
     @enabled.setter
+    @_motion_change
     def enabled(self, value: bool):
         """Enable or disable the stepper."""
         self._enabled = bool(value)
@@ -478,12 +576,14 @@ class StepperMotor:
         payload = struct.pack("<?", self._enabled) # 1 byte, boolean
         self._dev.send_command(InterfaceCommandCode.STEPPER_DRV_SET_ENABLED, self._channel, payload)
 
+    @_motion_change
     def enable_force(self, value: bool):
         self._enabled = bool(value)
         self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: set_enabled={self._enabled} (force, software_disabled={self.software_disabled})")
         payload = struct.pack("<?", self._enabled)
         self._dev.send_command(InterfaceCommandCode.STEPPER_DRV_SET_ENABLED, self._channel, payload)
     
+    @_motion_change
     def set_microsteps(self, microsteps: int):
         """Set the microsteps for the stepper."""
         if microsteps not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
@@ -493,6 +593,7 @@ class StepperMotor:
         self._dev.send_command(InterfaceCommandCode.STEPPER_DRV_SET_MICROSTEPS, self._channel, payload)
         self._microsteps = microsteps
     
+    @_motion_change
     def set_current(self, irun: int, ihold: int, ihold_delay: int):
         self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: set_current irun={irun} ihold={ihold} ihold_delay={ihold_delay}")
         payload = struct.pack("<BBB", irun, ihold, ihold_delay) # 3 bytes, three little-endian unsigned integers
@@ -511,6 +612,7 @@ class StepperMotor:
         self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: read_driver_register addr=0x{address:02X} -> 0x{val:08X}")
         return val
 
+    @_motion_change
     def write_driver_register(self, address: int, value: int):
         self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: write_driver_register addr=0x{address:02X} value=0x{value:08X}")
         payload = struct.pack("<BI", address, value) # 1 byte for address, 4 bytes for value
@@ -591,6 +693,7 @@ class StepperMotor:
     def board_info(self) -> dict:
         return dict(getattr(self._dev, "_board_info", {}))
 
+    @_motion_change
     def set_direction_inverted(self, inverted: bool) -> None:
         self._direction_inverted = bool(inverted)
         self._gc.logger.info(

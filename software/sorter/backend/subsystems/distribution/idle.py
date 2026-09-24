@@ -18,6 +18,7 @@ class Idle(BaseState):
             return None
         piece = transport.getPieceForDistributionPositioning()
         if piece is None:
+            transport.consumeCanceledPieceForDistribution()
             # No piece waiting → ensure the gate is open so C4 sees us as
             # ready to accept the next drop. Recovers from a stale gate=False
             # left behind when a Sending cycle was interrupted (pause/resume,

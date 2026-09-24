@@ -3653,6 +3653,36 @@ class HarvestProjectStore:
             conn.commit()
         return self.get_project(project_id)
 
+    def retire_c4_planned_allocations(self, *, piece_ids=None, reason="complete C4 reject recovery"):
+        """Retire only unconfirmed allocations from the active machine runtime.
+
+        No quantities/deliveries are credited. Confirmed history and other
+        runtimes are untouched. Used by C4 discard and completed unknown drain.
+        """
+        with _STORE_LOCK, self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            runtime = conn.execute("SELECT * FROM harvest_runtime_state WHERE singleton_id = 1").fetchone()
+            if runtime is None:
+                return 0
+            activation = _decode_json(runtime["activation_json"], {})
+            rows = conn.execute(
+                "SELECT allocation_id, piece_id FROM harvest_allocations "
+                "WHERE project_id = ? AND runtime_id = ? AND status = 'planned' "
+                "AND mode IN ('live', 'acceptance')",
+                (runtime["project_id"], activation.get("activation_id"))).fetchall()
+            selected = None if piece_ids is None else set(piece_ids)
+            count = 0
+            for row in rows:
+                if selected is not None and row["piece_id"] not in selected:
+                    continue
+                conn.execute("UPDATE harvest_allocations SET status = 'undone', undone_at = ? WHERE allocation_id = ? AND status = 'planned'",
+                             (_now(), row["allocation_id"]))
+                self._append_event(conn, runtime["project_id"], "c4_unconfirmed_allocation_retired",
+                    {"allocation_id": row["allocation_id"], "piece_id": row["piece_id"], "reason": reason})
+                count += 1
+            conn.commit()
+            return count
+
     def undo_allocation(
         self, project_id: str, allocation_id: str, *, reason: str
     ) -> dict[str, Any]:

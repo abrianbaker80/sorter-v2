@@ -5,15 +5,18 @@ from dataclasses import dataclass
 
 
 # Master kill switch for the per-camera color correction pipeline (CCM +
-# response LUT + gamma). Deliberately a hardcoded constant — not an env var and
-# not a machine.toml key — so no deployed machine can silently be running the
-# correction. Suspected cause of the wildly off-color images some machines
-# report; flip to True in the source and redeploy to re-enable it everywhere.
+# response LUT + gamma). Deliberately a hardcoded master gate — not an env var
+# and not a machine.toml key. When enabled, the explicit role allowlist below
+# still limits correction to a physically qualified camera role.
 #
-# Disabling only gates *application* of the profile. Calibrated profiles stay
-# persisted in [camera_color_profiles] untouched, so turning this back on
-# restores every machine's existing calibration as-is.
-COLOR_CORRECTION_ENABLED = False
+# Disabling gates application only. Calibrated profiles in
+# [camera_color_profiles] remain persisted and untouched.
+COLOR_CORRECTION_ENABLED = True
+
+# The first production qualification is scoped to the camera that views the
+# C4 classification channel. A global enable never activates profiles on
+# feeder, C2/C3, top/bottom, or ambiguous role-less image paths.
+COLOR_CORRECTION_ALLOWED_ROLES = frozenset({"classification_channel"})
 
 
 class ClassificationChannelMode(enum.Enum):
@@ -212,6 +215,8 @@ class CameraColorProfile:
     gamma_a: list[float] | None
     gamma_exp: list[float] | None
     gamma_b: list[float] | None
+    calibration_target_type: str | None
+    calibration_reference: str | None
 
     def __init__(
         self,
@@ -224,6 +229,8 @@ class CameraColorProfile:
         gamma_a: list[float] | None = None,
         gamma_exp: list[float] | None = None,
         gamma_b: list[float] | None = None,
+        calibration_target_type: str | None = None,
+        calibration_reference: str | None = None,
     ):
         self.enabled = enabled
         self.matrix = matrix or [
@@ -238,6 +245,8 @@ class CameraColorProfile:
         self.gamma_a = gamma_a
         self.gamma_exp = gamma_exp
         self.gamma_b = gamma_b
+        self.calibration_target_type = calibration_target_type
+        self.calibration_reference = calibration_reference
 
 
 # Matches the firmware's Stepper constructor default (`_accel(10000)` in
@@ -646,7 +655,7 @@ class IRLInterface:
         self.machine_profile = None
         self.led_controller = None
 
-    def enableSteppers(self) -> None:
+    def enableSteppers(self, *, preserve_c4: bool = False) -> None:
         for stepper_name in [
             "c_channel_1_rotor",
             "c_channel_2_rotor",
@@ -658,7 +667,10 @@ class IRLInterface:
         ]:
             attr = f"{stepper_name}_stepper"
             if hasattr(self, attr):
-                getattr(self, attr).enabled = True
+                stepper = getattr(self, attr)
+                if preserve_c4 and stepper_name in {"c_channel_4_rotor", "carousel"} and stepper.enabled:
+                    continue
+                stepper.enabled = True
 
     def disableSteppers(self) -> None:
         seen: set[int] = set()
@@ -787,6 +799,8 @@ def mkCameraColorProfile(
     gamma_a: list[float] | None = None,
     gamma_exp: list[float] | None = None,
     gamma_b: list[float] | None = None,
+    calibration_target_type: str | None = None,
+    calibration_reference: str | None = None,
 ) -> CameraColorProfile:
     return CameraColorProfile(
         enabled=enabled,
@@ -798,6 +812,8 @@ def mkCameraColorProfile(
         gamma_a=gamma_a,
         gamma_exp=gamma_exp,
         gamma_b=gamma_b,
+        calibration_target_type=calibration_target_type,
+        calibration_reference=calibration_reference,
     )
 
 
@@ -839,6 +855,12 @@ def clampCameraColorProfile(profile: CameraColorProfile) -> CameraColorProfile:
         values = [_number(v, 0.0) for v in raw[:length]]
         return values
 
+    def _parse_metadata(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized[:128] if normalized else None
+
     return mkCameraColorProfile(
         enabled=bool(getattr(profile, "enabled", False)),
         matrix=matrix_rows,
@@ -849,6 +871,12 @@ def clampCameraColorProfile(profile: CameraColorProfile) -> CameraColorProfile:
         gamma_a=_parse_float_list("gamma_a", 3),
         gamma_exp=_parse_float_list("gamma_exp", 3),
         gamma_b=_parse_float_list("gamma_b", 3),
+        calibration_target_type=_parse_metadata(
+            getattr(profile, "calibration_target_type", None)
+        ),
+        calibration_reference=_parse_metadata(
+            getattr(profile, "calibration_reference", None)
+        ),
     )
 
 
@@ -867,6 +895,16 @@ def parseCameraColorProfile(raw: object) -> CameraColorProfile:
             gamma_a=raw.get("gamma_a") if isinstance(raw.get("gamma_a"), list) else None,
             gamma_exp=raw.get("gamma_exp") if isinstance(raw.get("gamma_exp"), list) else None,
             gamma_b=raw.get("gamma_b") if isinstance(raw.get("gamma_b"), list) else None,
+            calibration_target_type=(
+                raw.get("calibration_target_type")
+                if isinstance(raw.get("calibration_target_type"), str)
+                else None
+            ),
+            calibration_reference=(
+                raw.get("calibration_reference")
+                if isinstance(raw.get("calibration_reference"), str)
+                else None
+            ),
         )
     )
 
@@ -890,6 +928,10 @@ def cameraColorProfileToDict(profile: CameraColorProfile) -> dict[str, object]:
         result["gamma_exp"] = [float(v) for v in clamped.gamma_exp]
     if clamped.gamma_b is not None:
         result["gamma_b"] = [float(v) for v in clamped.gamma_b]
+    if clamped.calibration_target_type is not None:
+        result["calibration_target_type"] = clamped.calibration_target_type
+    if clamped.calibration_reference is not None:
+        result["calibration_reference"] = clamped.calibration_reference
     return result
 
 

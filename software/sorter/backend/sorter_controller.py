@@ -5,6 +5,7 @@ from runtime_variables import RuntimeVariables
 from coordinator import Coordinator
 from vision import VisionManager
 import queue
+import threading
 
 
 def _broadcastSorterState(state_value: str) -> None:
@@ -28,6 +29,7 @@ class SorterController:
         event_queue: queue.Queue,
         rv: RuntimeVariables,
     ):
+        self._operation_lock = threading.RLock()
         self.state = SorterLifecycle.INITIALIZING
         self.irl = irl
         self.gc = gc
@@ -46,8 +48,14 @@ class SorterController:
     def resume(self) -> None:
         from server import shared_state
 
-        with shared_state.hardware_lifecycle_lock:
-            self.irl.enableSteppers()
+        with shared_state.hardware_lifecycle_lock, self._operation_lock:
+            if shared_state.hardware_state in {"homing", "initializing", "error", "standby"}:
+                return
+            delegate = getattr(self.coordinator.classification, "_delegate", None)
+            if getattr(delegate, "physical_c4_authority", False):
+                self.irl.enableSteppers(preserve_c4=True)
+            else:
+                self.irl.enableSteppers()
             self.coordinator.resume()
             self.state = SorterLifecycle.RUNNING
             self.gc.runtime_stats.setLifecycleState(self.state.value)
@@ -57,22 +65,28 @@ class SorterController:
             _broadcastSorterState(self.state.value)
 
     def pause(self) -> None:
-        self.coordinator.pause()
-        self.state = SorterLifecycle.PAUSED
-        self.gc.runtime_stats.setLifecycleState(self.state.value)
-        self.gc.run_recorder.markPaused()
-        self.gc.lifetime_stats.markStopped()
-        self._setTrackerActive(False)
-        _broadcastSorterState(self.state.value)
+        from server import shared_state
+
+        with shared_state.hardware_lifecycle_lock, self._operation_lock:
+            self.coordinator.pause()
+            self.state = SorterLifecycle.PAUSED
+            self.gc.runtime_stats.setLifecycleState(self.state.value)
+            self.gc.run_recorder.markPaused()
+            self.gc.lifetime_stats.markStopped()
+            self._setTrackerActive(False)
+            _broadcastSorterState(self.state.value)
 
     def stop(self) -> None:
-        self.coordinator.cleanup()
-        self.state = SorterLifecycle.READY
-        self.gc.runtime_stats.setLifecycleState(self.state.value)
-        self.gc.run_recorder.markPaused()
-        self.gc.lifetime_stats.markStopped()
-        self._setTrackerActive(False)
-        _broadcastSorterState(self.state.value)
+        from server import shared_state
+
+        with shared_state.hardware_lifecycle_lock, self._operation_lock:
+            self.coordinator.cleanup()
+            self.state = SorterLifecycle.READY
+            self.gc.runtime_stats.setLifecycleState(self.state.value)
+            self.gc.run_recorder.markPaused()
+            self.gc.lifetime_stats.markStopped()
+            self._setTrackerActive(False)
+            _broadcastSorterState(self.state.value)
 
     def _setTrackerActive(self, active: bool) -> None:
         setter = getattr(self.vision, "setFeederTrackerActive", None)
@@ -86,5 +100,8 @@ class SorterController:
         self.coordinator.reload_sorting_profile()
 
     def step(self) -> None:
-        if self.state == SorterLifecycle.RUNNING:
-            self.coordinator.step()
+        from server import shared_state
+
+        with shared_state.hardware_lifecycle_lock, self._operation_lock:
+            if self.state == SorterLifecycle.RUNNING:
+                self.coordinator.step()

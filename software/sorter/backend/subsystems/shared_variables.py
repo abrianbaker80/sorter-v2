@@ -29,6 +29,19 @@ class SharedVariables:
         self._gc = gc
         self._bus = bus
         self._classification_ready: bool = False
+        # Accepted C3 movement is owned by the feeder until fresh completion.
+        # This is transfer-in-flight information, not a claim of delivery.
+        self.c4_runtime_owner = None
+        self.reserve_c4_transfer = None
+        self.c4_reset_distribution = None
+        self.c3_motion_pending: bool = False
+        # Purpose of the owned move: only bounded staging behind a closed
+        # transfer boundary may overlap C4 indexing. Ownership stays pending.
+        self.c3_safe_staging_pending: bool = False
+        self.c3_release_leader_id: int | None = None
+        self.c3_transfer_episode = None
+        self.c3_release_evidence: dict = {}
+        self.request_c3_recovery = None
         self._distribution_ready: bool = True
         self.transport: Optional["PieceTransport"] = None
         self.carousel: Optional["Carousel"] = None

@@ -1,0 +1,11 @@
+--- deployed/camera_service.py
++++ payload/camera_service.py
+@@ -131,6 +131,8 @@
+                     return
+ 
+         device = CameraDevice(role, config)
++        if role == "classification_channel":
++            device.capture_thread.profiler = getattr(self._gc, "profiler", None)
+         self._devices[role] = device
+         self._feeds[role] = CameraFeed(role, device)
+ 

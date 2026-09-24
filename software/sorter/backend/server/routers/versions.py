@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,14 @@ DEPENDENCY_FILES = (
     "software/sorter/frontend/package.json",
 )
 
+# The C4 camera is a network MJPEG source on the Raspberry Pi.  It lives in
+# the ignored machine-specific TOML, so a release checkout must never replace
+# it.  The release guard below also verifies that the target source still
+# understands the persisted split-feeder URL before allowing a switch.
+CAMERA_CONFIG_RELATIVE_PATH = "software/machine.toml"
+CAMERA_PARSER_RELATIVE_PATH = "software/sorter/backend/irl/config.py"
+CAMERA_SERVICE_RELATIVE_PATH = "software/sorter/backend/vision/camera_service.py"
+
 _repo_root_cache: Optional[Path] = None
 _update_lock = threading.Lock()
 _update_target: Optional[str] = None
@@ -39,6 +48,133 @@ class UpdateRequest(BaseModel):
     kind: str
     name: str
     restart: bool = True
+
+
+def _machine_params_path() -> Path:
+    configured = os.getenv("MACHINE_SPECIFIC_PARAMS_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return _repoRoot() / CAMERA_CONFIG_RELATIVE_PATH
+
+
+def _camera_contract_from_config(raw: object) -> Dict[str, Any]:
+    """Return the persisted C4 source contract without opening the camera."""
+    if not isinstance(raw, dict):
+        return {
+            "configured": False,
+            "layout": None,
+            "source_kind": "missing",
+            "source": None,
+        }
+
+    cameras = raw.get("cameras")
+    if not isinstance(cameras, dict):
+        return {
+            "configured": False,
+            "layout": None,
+            "source_kind": "missing",
+            "source": None,
+        }
+
+    layout = cameras.get("layout", "default")
+    source = cameras.get("classification_channel")
+    # Older configs called the same physical C4 camera ``carousel``.  Keep
+    # that compatibility alias when classification_channel is absent.
+    source_key = "classification_channel"
+    if source is None:
+        source = cameras.get("carousel")
+        source_key = "carousel"
+
+    if isinstance(source, str) and source.strip():
+        source_kind = "url"
+    elif isinstance(source, int) and not isinstance(source, bool) and source >= 0:
+        source_kind = "device_index"
+    else:
+        source_kind = "missing"
+
+    return {
+        "configured": source_kind != "missing",
+        "layout": layout if isinstance(layout, str) else None,
+        "source_key": source_key,
+        "source_kind": source_kind,
+        # Do not expose the private Pi address in the UI payload.
+        "source": None,
+    }
+
+
+def _load_camera_contract() -> Dict[str, Any]:
+    path = _machine_params_path()
+    try:
+        with path.open("rb") as handle:
+            return _camera_contract_from_config(tomllib.load(handle))
+    except FileNotFoundError:
+        return _camera_contract_from_config(None)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return {
+            "configured": False,
+            "layout": None,
+            "source_kind": "invalid",
+            "source": None,
+            "error": str(exc),
+        }
+
+
+def _camera_source_is_supported_by_target(
+    target_ref: str,
+    contract: Dict[str, Any],
+) -> tuple[bool | None, str]:
+    """Check the target release's persisted-source compatibility contract.
+
+    This is intentionally a source-level check performed before checkout.  It
+    prevents the update endpoint from restarting into a release that silently
+    ignores the Raspberry Pi C4 URL, while keeping the machine TOML untouched.
+    """
+    source_kind = contract.get("source_kind")
+    if source_kind == "missing":
+        return None, "No persisted C4 camera source is configured."
+    if source_kind == "invalid":
+        return False, "The persisted machine camera configuration is invalid."
+
+    parser = _gitText("show", f"{target_ref}:{CAMERA_PARSER_RELATIVE_PATH}")
+    service = _gitText("show", f"{target_ref}:{CAMERA_SERVICE_RELATIVE_PATH}")
+    if parser is None or service is None:
+        return False, "The release does not contain the camera compatibility modules."
+
+    if source_kind == "url":
+        parser_support = bool(
+            re.search(
+                r"cameras_section\.get\(\s*['\"]classification_channel['\"]",
+                parser,
+            )
+            and re.search(r"url\s*=\s*carousel_source", parser)
+        )
+        service_support = bool(
+            re.search(r"config\.url\s+is\s+not\s+None", service)
+            and "_config_source_key" in service
+        )
+        if parser_support and service_support:
+            return True, "Release preserves the configured network C4 camera URL."
+        return False, "Release cannot prove support for the configured network C4 camera URL."
+
+    parser_support = bool(re.search(r"device_index\s*=\s*carousel_source", parser))
+    service_support = "config.device_index" in service
+    if parser_support and service_support:
+        return True, "Release preserves the configured C4 device index."
+    return False, "Release cannot prove support for the configured C4 device index."
+
+
+def _live_c4_camera_status() -> str | None:
+    """Read the current process-local C4 health without probing hardware."""
+    try:
+        from server import shared_state
+
+        service = getattr(shared_state, "camera_service", None)
+        if service is None:
+            return None
+        health = service.get_health_map()
+        return health.get("classification_channel") or health.get("carousel")
+    except Exception:
+        return None
 
 
 def _repoRoot() -> Path:
@@ -72,6 +208,13 @@ def _gitLine(*args: str) -> Optional[str]:
         return None
     line = result.stdout.strip()
     return line if line else None
+
+
+def _gitText(*args: str) -> Optional[str]:
+    result = _git(*args)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _commitInfo(ref: str) -> Optional[Dict[str, Any]]:
@@ -202,12 +345,32 @@ def get_versions(refresh: bool = False) -> Dict[str, Any]:
 
     current = _currentInfo()
     available = _branchEntries(current) + _channelEntries(current)
+    camera_contract = _load_camera_contract()
+    for entry in available:
+        target_ref = (
+            f"origin/{entry['name']}"
+            if entry["kind"] == "branch"
+            else f"refs/tags/{entry['name']}"
+        )
+        supported, reason = _camera_source_is_supported_by_target(
+            target_ref, camera_contract
+        )
+        entry["c4_camera_compatible"] = supported
+        entry["c4_camera_reason"] = reason
+
     return {
         "ok": True,
         "current": current,
         "available": available,
         "fetch_error": fetch_error,
         "update_in_progress": _update_target,
+        "c4_camera": {
+            "configured": bool(camera_contract.get("configured")),
+            "layout": camera_contract.get("layout"),
+            "source_kind": camera_contract.get("source_kind"),
+            "live_status": _live_c4_camera_status(),
+            "config_preserved_by_updates": True,
+        },
     }
 
 
@@ -241,6 +404,17 @@ def update_version(req: UpdateRequest) -> Dict[str, Any]:
         target = _commitInfo(target_ref)
         if target is None:
             return {"ok": False, "message": f"Ref not found on origin: {target_ref}"}
+
+        camera_contract = _load_camera_contract()
+        camera_supported, camera_reason = _camera_source_is_supported_by_target(
+            target_ref, camera_contract
+        )
+        if camera_contract.get("configured") and camera_supported is not True:
+            return {
+                "ok": False,
+                "message": f"Cannot switch to {req.name}: {camera_reason}",
+                "c4_camera_compatible": camera_supported,
+            }
 
         old = _commitInfo("HEAD") or {}
         old_sha = old.get("full_sha", "")

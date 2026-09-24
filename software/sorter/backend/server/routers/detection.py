@@ -1999,6 +1999,27 @@ def classification_channel_fallback_incident_clear(
     }
 
 
+class RetainedTransferRecoveryPayload(BaseModel):
+    episode_id: str
+    boundary_index: int
+
+
+@router.post('/api/classification-channel/retained-transfer/recover')
+def recover_retained_transfer(payload: RetainedTransferRecoveryPayload) -> Dict[str, Any]:
+    controller = shared_state.controller_ref
+    coordinator = getattr(controller, 'coordinator', None)
+    delegate = getattr(getattr(coordinator, 'classification', None), '_delegate', None)
+    request = getattr(delegate, 'requestRetainedTransferRecovery', None)
+    if shared_state.hardware_state != 'ready' or not callable(request):
+        raise HTTPException(status_code=409, detail='Retained indexed runtime is not ready')
+    try:
+        request(payload.episode_id, payload.boundary_index)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {'ok': True, 'queued': True, 'episode_id': payload.episode_id,
+            'boundary_index': payload.boundary_index}
+
+
 def _runtime_stats_or_503() -> Any:
     runtime_stats = (
         getattr(shared_state.gc_ref, "runtime_stats", None)

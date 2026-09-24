@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import Spinner from '$lib/components/Spinner.svelte';
+	import { Button, Alert } from '$lib/components/primitives';
 	import {
 		getBackendHttpBase,
 		getBackendWsBase,
@@ -32,6 +33,9 @@
 
 	const manager = getMachinesContext();
 
+	let drainConfirmOpen = $state(false);
+	let drainError = $state<string | null>(null);
+	let drainSubmitting = $state(false);
 	let dismissedHardwareError = $state<string | null>(null);
 	let homingDetailsOpen = $state(false);
 	let hardwareAlertOpen = $state(false);
@@ -144,6 +148,24 @@
 	const needsHoming = $derived(
 		hardwareState === 'standby' || hardwareState === 'error' || hardwareState === 'initialized'
 	);
+
+	async function drainC4() {
+        drainConfirmOpen = false;
+        drainSubmitting = true;
+        drainError = null;
+        const baseUrl = currentBackendBaseUrl();
+        try {
+            const response = await fetch(`${baseUrl}/api/system/c4-drain-reset`, { method: 'POST' });
+            const payload = await response.json();
+            if (!response.ok || !payload.ok) throw new Error(payload.message ?? 'C4 recovery failed');
+            applySystemActionResponse(payload, 'homing', 'Draining C4 to Reject...');
+        } catch (error) {
+            drainError = String(error);
+        } finally {
+            drainSubmitting = false;
+            keepSystemStatusFresh(baseUrl);
+        }
+    }
 
 	async function homeSystem() {
 		const baseUrl = currentBackendBaseUrl();
@@ -508,6 +530,10 @@
 				</span>
 			{/if}
 			<SortingProfileDropdown />
+            <Button onclick={() => (drainConfirmOpen = true)}
+                disabled={drainSubmitting || hardwareState === 'homing' || hardwareState === 'initializing'}>
+                Drain C4 to Reject &amp; Reset
+            </Button>
 
 			{#if hardwareState === 'ready' || hardwareState === 'initialized'}
 				{@const resuming = machineState === 'paused' || hardwareState === 'initialized'}
@@ -720,6 +746,14 @@
 		</div>
 	{/if}
 
+    {#if drainError}<Alert variant="danger">{drainError}</Alert>{/if}
+    <Modal bind:open={drainConfirmOpen} title="Drain C4 to Reject & Reset">
+        <p class="text-sm">This will send C4 contents to Reject and clear C4 ownership. Continue?</p>
+        <div class="mt-4 flex justify-end gap-2">
+            <Button onclick={() => (drainConfirmOpen = false)}>Cancel</Button>
+            <Button onclick={drainC4}>Drain &amp; Reset</Button>
+        </div>
+    </Modal>
 	<Modal bind:open={hardwareAlertOpen} title={hardwareAlertTitle}>
 		<div class="flex flex-col gap-4">
 			<div class="flex items-start gap-3">

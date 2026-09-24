@@ -1,0 +1,41 @@
+{
+  "attempt": "c4-camera-perf-20260921",
+  "target_root": "/home/ubuntu/sorter-upstream-fresh-20260919/software/sorter/backend",
+  "files": {
+    "camera.py": {
+      "baseline_sha256": "cfcd8951808d437676b8cf29c0677f1760ec691fba597bd06e4ee7ce98e0ea35",
+      "payload_sha256": "2b29f03acb2d05e078a9cbddd1c0d8064bd6dceeff3317f4d1fb615570735e48",
+      "bytes": 50780,
+      "patch_sites": [
+        "matrix transform",
+        "C4 capture profiler",
+        "read/decode profiler",
+        "truthful retrieval timestamp",
+        "picture/correction/publication timers",
+        "retrieved frame dimensions",
+        "corrected shared-frame dimensions"
+      ]
+    },
+    "camera_service.py": {
+      "baseline_sha256": "0ac8d6301e1c010e3e8ec2018e5c8bd8f330a629821ad2b42370775809ff7048",
+      "payload_sha256": "dcbbbce93402ef43003a5be1cca69d144d9c95840031e02b40f1423fa73b7ae8",
+      "bytes": 16136,
+      "patch_sites": [
+        "attach C4 capture profiler"
+      ]
+    },
+    "inference.py": {
+      "baseline_sha256": "f2c88b8181c43e3f428a5a62bf3234af294c3df7db3449e77b97f8fd487f7ea5",
+      "payload_sha256": "c982de0cdd45f1ed861f0723b4d1a8d390afc6ab7be726d41c7d77dfc9608afc",
+      "bytes": 38512,
+      "patch_sites": [
+        "inference wait timer start",
+        "measure input wait and truthful age",
+        "reset timer for source rejection",
+        "result publication timer",
+        "restart wait timer",
+        "inference and model-crop dimensions"
+      ]
+    }
+  }
+}

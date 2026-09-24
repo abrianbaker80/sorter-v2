@@ -31,6 +31,16 @@
 		subject: string;
 		is_current: boolean;
 		up_to_date: boolean;
+		c4_camera_compatible: boolean | null;
+		c4_camera_reason: string;
+	};
+
+	type C4CameraStatus = {
+		configured: boolean;
+		layout: string | null;
+		source_kind: string;
+		live_status: string | null;
+		config_preserved_by_updates: boolean;
 	};
 
 	type VersionsPayload = {
@@ -39,6 +49,7 @@
 		available: VersionEntry[];
 		fetch_error: string | null;
 		update_in_progress: string | null;
+		c4_camera: C4CameraStatus;
 	};
 
 	let payload = $state<VersionsPayload | null>(null);
@@ -158,6 +169,23 @@
 					<div class="text-sm text-text-muted">{formatDate(payload.current.commit_unix)}</div>
 				{/if}
 			</div>
+			{#if payload.c4_camera}
+				<div class="mt-3 border-t border-border pt-3 text-sm text-text-muted">
+					C4 camera:
+					<span class="text-text">
+						{#if payload.c4_camera.live_status === 'online'}
+							online
+						{:else if payload.c4_camera.configured}
+							{payload.c4_camera.live_status ?? 'status unavailable'}
+						{:else}
+							not configured
+						{/if}
+					</span>
+					{#if payload.c4_camera.configured}
+						<span> · {payload.c4_camera.source_kind} source retained across releases</span>
+					{/if}
+				</div>
+			{/if}
 		{:else if loading}
 			<div class="mt-2 text-sm text-text-muted">Loading...</div>
 		{/if}
@@ -169,7 +197,8 @@
 				</span>
 				<Button
 					variant="success"
-					disabled={updatingRef !== null}
+					disabled={updatingRef !== null || currentUpdate.c4_camera_compatible !== true}
+					title={currentUpdate.c4_camera_reason}
 					loading={updatingRef === `${currentUpdate.kind}:${currentUpdate.name}`}
 					onclick={() => void applyUpdate(currentUpdate)}
 				>
@@ -228,10 +257,20 @@
 							</div>
 						</div>
 						{#if !entry.is_current}
+							{#if entry.c4_camera_compatible === false}
+								<span class="shrink-0 text-sm text-warning" title={entry.c4_camera_reason}>
+									C4 camera unsupported
+								</span>
+							{:else if entry.c4_camera_compatible === null}
+								<span class="shrink-0 text-sm text-warning" title={entry.c4_camera_reason}>
+									C4 check unavailable
+								</span>
+							{/if}
 							<Button
 								variant="secondary"
 								size="sm"
-								disabled={updatingRef !== null}
+								disabled={updatingRef !== null || entry.c4_camera_compatible !== true}
+								title={entry.c4_camera_reason}
 								loading={updatingRef === `${entry.kind}:${entry.name}`}
 								onclick={() => void applyUpdate(entry)}
 							>

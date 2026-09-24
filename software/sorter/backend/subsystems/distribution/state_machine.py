@@ -33,6 +33,7 @@ class DistributionStateMachine(BaseSubsystem):
         self.sorting_profile = sorting_profile
         self.layout = layout
         self.event_queue = event_queue
+        self.shared.c4_reset_distribution = self.reset_c4
         self.chute = irl.chute
         self.current_state = DistributionState.IDLE
         self.states_map = {
@@ -101,6 +102,15 @@ class DistributionStateMachine(BaseSubsystem):
             and self.shared.distribution_ready
             and self.gc.runtime_stats.activeIncident() is None
         )
+
+    def reset_c4(self):
+        """Exclusive complete C4 recovery, after transfer/motion ownership stops."""
+        for state in self.states_map.values():
+            state.cleanup()
+        self.current_state = DistributionState.IDLE
+        transport = self.shared.transport
+        transport.resetC4Distribution()
+        self.shared.set_distribution_gate(True, reason="C4 reject recovery")
 
     def cleanup(self) -> None:
         self.gc.profiler.exitState("distribution")

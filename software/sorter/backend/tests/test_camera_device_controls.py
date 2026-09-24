@@ -291,3 +291,32 @@ Camera Controls
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_network_capture_mode_exposes_received_mode_without_probe():
+    telemetry = {"resolution": (3840, 2160), "fps": 28.5, "reported_fps": 30.0}
+    capture = SimpleNamespace(getTelemetrySnapshot=lambda: telemetry)
+    service = SimpleNamespace(
+        get_device=lambda role: SimpleNamespace(capture_thread=capture),
+        get_capture_mode_for_role=lambda role: {"width": 1920, "height": 1440, "fps": 24},
+    )
+    config = {"cameras": {"classification_top": "http://camera.invalid/video"}}
+    with patch.object(cameras.shared_state, "camera_service", service), patch.object(
+        cameras, "_read_machine_params_config", return_value=(None, config)
+    ), patch.object(cameras, "_capture_modes_for_source", side_effect=AssertionError("no probe")):
+        response = cameras.get_camera_capture_modes("classification_top")
+        assert not response["supported"] and not response["locally_controlled"]
+        assert response["live"] == {"width": 3840, "height": 2160, "fps": 28.5, "reported_fps": 30.0}
+        assert response["current"]["fps"] == 24
+        telemetry.clear()
+        assert cameras.get_camera_capture_modes("classification_top")["live"] is None
+
+
+def test_usb_capture_mode_preserves_supported_controls():
+    modes = [{"width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"}]
+    with patch.object(cameras.shared_state, "camera_service", None), patch.object(
+        cameras, "_read_machine_params_config", return_value=(None, {"cameras": {"classification_top": 0}})
+    ), patch.object(cameras, "_capture_modes_for_source", return_value=(modes, "test")):
+        response = cameras.get_camera_capture_modes("classification_top")
+    assert response["supported"] and response["locally_controlled"]
+    assert response["modes"] == modes and response["live"] is None

@@ -15,6 +15,13 @@ RECORDS_DIR = BLOB_DIR / "records"
 def _serializePiece(p: KnownObject) -> dict:
     return {
         "uuid": p.uuid,
+        "transfer_episode_id": p.transfer_episode_id,
+        "transfer_first_pass": p.transfer_first_pass,
+        "transport_failure_reason": p.transport_failure_reason,
+        "forced_reject_reason": p.forced_reject_reason,
+        "reject_category": p.reject_category,
+        "physical_group_size_unknown": p.physical_group_size_unknown,
+        "harvest_exception": p.harvest_exception,
         "created_at": p.created_at,
         "classified_at": p.classified_at,
         "distributing_at": p.distributing_at,

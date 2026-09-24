@@ -1,0 +1,129 @@
+--- deployed/camera.py
++++ payload/camera.py
+@@ -702,7 +702,9 @@
+         rgb = frame[:, :, ::-1].astype(np.float32) / 255.0
+ 
+     # Step 2: Affine CCM (3×3 matrix + bias)
+-    corrected = np.tensordot(rgb, matrix.T, axes=1) + bias
++    # OpenCV avoids the full-frame temporary and BLAS dispatch in tensordot.
++    # Keep the same float32 matrix, bias, LUT, gamma, clipping and rounding.
++    corrected = cv2.transform(rgb, matrix) + bias
+ 
+     # Step 3: Per-channel gamma (if available)
+     has_gamma = (
+@@ -745,6 +747,7 @@
+         # 90-frame ring buffer (~3 s at 30 FPS) for burst-capture replay. The
+         # GIL + deque.append atomicity lets us push without holding a lock.
+         self._ring_buffer: deque[CameraFrame] = deque(maxlen=90)
++        self.profiler = None
+         self._picture_settings = clampCameraPictureSettings(config.picture_settings)
+         self._device_settings = parseCameraDeviceSettingsForCapture(config.device_settings)
+         self._color_profile = clampCameraColorProfile(config.color_profile)
+@@ -1150,12 +1153,47 @@
+             # cap.read(); holding the lock there prevents stop/reopen requests
+             # from releasing the handle and leaves the camera stuck until the
+             # whole process exits.
++            prof = self.profiler
++            profiling = (
++                self.name == "classification_channel"
++                and prof is not None
++                and prof.enabled
++            )
++            read_started = time.perf_counter() if profiling else 0.0
+             try:
+-                ret, frame = cap.read()
++                # VideoCapture.read() is grab() followed by retrieve(). Keep
++                # both calls explicit so the profiler separates their API costs.
++                # A backend may decode during grab(), so these are API-stage
++                # timings rather than claims about decoder internals.
++                grab_started = time.perf_counter() if profiling else 0.0
++                ret = cap.grab()
++                if profiling:
++                    prof.observeDuration(
++                        f"camera.{self.name}.opencv_grab_ms",
++                        (time.perf_counter() - grab_started) * 1000,
++                    )
++                if ret:
++                    retrieve_started = time.perf_counter() if profiling else 0.0
++                    ret, frame = cap.retrieve()
++                    if profiling:
++                        prof.observeDuration(
++                            f"camera.{self.name}.opencv_retrieve_ms",
++                            (time.perf_counter() - retrieve_started) * 1000,
++                        )
++                else:
++                    frame = None
+             except Exception:
+                 ret, frame = False, None
++            if profiling:
++                prof.observeDuration(
++                    f"camera.{self.name}.read_decode",
++                    (time.perf_counter() - read_started) * 1000,
++                )
+             if ret:
+                 read_failures = 0
++                # POSIX wall-clock time at successful OpenCV retrieve; later
++                # processing/publication must not make this frame look newer.
++                captured_at = time.time()
+                 if not is_url and width > 0 and height > 0:
+                     frame_h, frame_w = frame.shape[:2]
+                     if (int(frame_w), int(frame_h)) != (int(width), int(height)):
+@@ -1180,11 +1218,25 @@
+                                     self._device_settings = dict(applied)
+                     post_stream_settings = None
+                     post_stream_source = None
++                settings_started = time.perf_counter() if profiling else 0.0
+                 picture_settings = self.getPictureSettings()
+                 color_profile = self.getColorProfile()
++                if profiling:
++                    prof.observeDuration(
++                        f"camera.{self.name}.settings",
++                        (time.perf_counter() - settings_started) * 1000,
++                    )
++                transform_started = time.perf_counter() if profiling else 0.0
++                picture_started = time.perf_counter() if profiling else 0.0
+                 # Apply rotation/flip once; downstream consumers see the same
+                 # geometry whether or not color correction is active.
+                 geom_frame = apply_picture_settings(frame, picture_settings)
++                if profiling:
++                    prof.observeDuration(
++                        f"camera.{self.name}.picture_settings_ms",
++                        (time.perf_counter() - picture_started) * 1000,
++                    )
++                color_started = time.perf_counter() if profiling else 0.0
+                 if getattr(color_profile, "enabled", False):
+                     corrected_frame = apply_camera_color_profile(
+                         geom_frame,
+@@ -1193,16 +1245,31 @@
+                     )
+                 else:
+                     corrected_frame = geom_frame
++                if profiling:
++                    prof.observeDuration(
++                        f"camera.{self.name}.color_profile_ms",
++                        (time.perf_counter() - color_started) * 1000,
++                    )
++                    prof.observeDuration(
++                        f"camera.{self.name}.transform",
++                        (time.perf_counter() - transform_started) * 1000,
++                    )
++                publish_started = time.perf_counter() if profiling else 0.0
+                 camera_frame = CameraFrame(
+                     raw=corrected_frame,
+                     annotated=None,
+                     results=[],
+-                    timestamp=time.time(),
++                    timestamp=captured_at,
+                     uncorrected_raw=geom_frame,
+                 )
+                 self.latest_frame = camera_frame
+                 # deque.append is atomic under the GIL — no lock needed.
+                 self._ring_buffer.append(camera_frame)
++                if profiling:
++                    prof.observeDuration(
++                        f"camera.{self.name}.shared_publish_ms",
++                        (time.perf_counter() - publish_started) * 1000,
++                    )
+             else:
+                 read_failures += 1
+                 # For URL sources, briefly wait then retry (stream may reconnect)

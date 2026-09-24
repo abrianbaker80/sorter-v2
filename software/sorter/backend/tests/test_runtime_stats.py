@@ -290,3 +290,75 @@ class RuntimeStatsReapStuckPiecesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_owned_piece_survives_age_pause_and_distribution_handoff():
+    c = RuntimeStatsCollector()
+    c.setLifecycleState("running", now_wall=0, now_monotonic=0)
+    c.observeKnownObject({"uuid": "owned", "stage": "created", "updated_at": 0})
+    c.observeKnownObject({"uuid": "orphan", "stage": "created", "updated_at": 0})
+    c.setOwnedPieceUuids({"owned"})
+    assert [x["uuid"] for x in c.reapStuckPieces(100, 30)] == ["orphan"]
+    assert c.lookupKnownObject("owned")["updated_at"] == 0
+    c.setLifecycleState("paused", now_wall=100, now_monotonic=100)
+    c.setLifecycleState("running", now_wall=200, now_monotonic=200)
+    c.observeKnownObject({"uuid": "owned", "stage": "distributing"})
+    assert c.reapStuckPieces(300, 30) == []
+    c.observeKnownObject({"uuid": "owned", "stage": "distributed", "distributed_at": 301})
+    c.setOwnedPieceUuids(())
+    assert c.reapStuckPieces(400, 30) == []
+    c.observeKnownObject({"uuid": "abandoned", "stage": "created", "updated_at": 0})
+    c.setOwnedPieceUuids({"abandoned"})
+    c.setOwnedPieceUuids(())
+    assert [x["uuid"] for x in c.reapStuckPieces(500, 30)] == ["abandoned"]
+
+
+def test_gate_dwell_and_distribution_parent_attribution(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("runtime_stats.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("runtime_stats.time.time", lambda: now[0])
+    c = RuntimeStatsCollector()
+    c.setLifecycleState("running")
+    c.observeState("classification.intake_gate", "open")
+    now[0] = 2
+    c.observeState("classification.intake_gate", "open")
+    now[0] = 3
+    c.observeState("classification.intake_gate", "closed: arrival")
+    c.observeState("distribution", "sending")
+    c.observeState("distribution.occupancy", "sending.wait_piece_exit")
+    now[0] = 5
+    c.observeState("distribution", "idle")
+    c.setLifecycleState("paused")
+    now[0] = 10
+    c.setLifecycleState("running")
+    now[0] = 12
+    stats = c.snapshot()["state_machines"]
+    assert stats["classification.intake_gate"]["state_time_s"] == {"open": 3, "closed: arrival": 4}
+    assert stats["distribution.occupancy"]["current_state"] is None
+    assert stats["distribution.occupancy"]["state_time_s"] == {"sending.wait_piece_exit": 2}
+
+
+def test_live_bag_throughput_deduplicates_and_scopes_the_same_window():
+    from datetime import datetime, timezone
+    c = RuntimeStatsCollector()
+    c.observeHarvestReservation({"mode": "live", "runtime_id": "a"}, now_wall=100)
+    def event(id, ts, **kw):
+        return dict(allocation_id=id, runtime_id="a", mode="live", status="confirmed",
+                    confirmed_at=datetime.fromtimestamp(ts, timezone.utc).isoformat(), group_id="bag-1", **kw)
+    bag = event("bag", 110)
+    c.observeHarvestConfirmation(bag)
+    c.observeHarvestConfirmation(bag)
+    exception = event("exception", 120); exception["group_id"] = "harvest-exception"
+    c.observeHarvestConfirmation(exception)
+    for key, value in (("mode", "simulation"), ("mode", "acceptance"), ("status", "planned"), ("runtime_id", "old")):
+        invalid = event(key + value, 130); invalid[key] = value
+        c.observeHarvestConfirmation(invalid)
+    c.observeHarvestConfirmation(event("old-replay", 90))
+    snap = c._harvestSnapshot(160)
+    assert (snap["bag_count"], snap["distributed_count"]) == (1, 2)
+    assert (snap["bag_ppm"], snap["distributed_ppm"], snap["window_s"]) == (1, 2, 60)
+    assert c._harvestSnapshot(500)["distributed_count"] == 0
+    c.observeHarvestReservation({"mode": "live", "runtime_id": "b"}, now_wall=500)
+    c.observeHarvestConfirmation(bag)
+    assert c._harvestSnapshot(560)["activation_id"] == "b"
+    assert c._harvestSnapshot(560)["bag_count"] == 0

@@ -81,6 +81,7 @@ class SimpleStateMachineRev01Context:
         self.classify_thread: Optional[threading.Thread] = None
         self.classify_lock = threading.Lock()
         self.known_object: Optional[KnownObject] = None
+        self.owned_upstream_view: dict | None = None
         # Absolute indexed C4 route for this piece. IDLE admits a piece only at a
         # pocket boundary; MOVING_TO_PRECISE derives both downstream targets from
         # that origin so per-move rounding and camera COM estimates cannot drift.
@@ -157,6 +158,7 @@ class SimpleStateMachineRev01Context:
             self.hosted_color_confidence = None
             self.classify_thread = None
             self.known_object = None
+            self.owned_upstream_view = None
             self.c4_cycle_start_sector = None
             self.c4_safe_staging_target_steps = None
             self.c4_exit_target_steps = None

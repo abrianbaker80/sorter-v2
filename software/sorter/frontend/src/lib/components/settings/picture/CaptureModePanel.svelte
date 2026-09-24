@@ -19,7 +19,8 @@
 		backend?: string;
 		modes: CaptureMode[];
 		current?: { width?: number | null; height?: number | null; fps?: number | null; fourcc?: string | null } | null;
-		live?: { width?: number | null; height?: number | null; fps?: number | null } | null;
+		locally_controlled?: boolean;
+		live?: { width?: number | null; height?: number | null; fps?: number | null; reported_fps?: number | null } | null;
 		message?: string;
 	};
 
@@ -161,8 +162,16 @@
 				Live {data.live.width}Ã—{data.live.height}{#if data.live.fps}
 					 @ {data.live.fps} fps{/if}
 			</div>
+		{:else if !loading}
+			<div class="text-xs text-text-muted">Received mode unavailable</div>
 		{/if}
 	</div>
+	{#if data?.live?.reported_fps != null}
+		<div class="text-xs text-text-muted">Device reports {data.live.reported_fps.toFixed(1)} fps; received rate measures frames arriving here.</div>
+	{/if}
+	{#if data?.locally_controlled === false && data?.current?.width && data?.current?.height}
+		<div class="text-xs text-text-muted">Saved local request: {data.current.width}×{data.current.height}{#if data.current.fps} @ {data.current.fps} fps{/if} (not applied to this network stream).</div>
+	{/if}
 
 	{#if error}
 		<Alert variant="danger">

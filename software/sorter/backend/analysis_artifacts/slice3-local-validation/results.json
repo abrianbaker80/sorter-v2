@@ -1,0 +1,48 @@
+{
+  "acceptance": {
+    "tests": 484,
+    "passed": 477,
+    "baseline_failures": 7
+  },
+  "runtime_tests_passed": 45,
+  "independent_review": {
+    "status": "approved locally",
+    "tests_passed": 189,
+    "findings_remaining": 0,
+    "reviewer": "/root/slice3_review",
+    "approval_scope": "Local source/test approval; no deployment or physical qualification"
+  },
+  "baseline_failure_names": [
+    "perception.tests.test_no_camera_crossover::test_three_workers_do_not_cross_outputs_when_run_concurrently",
+    "tests.test_project_harvest_projects::test_bom_reconciliation_capacity_simulation_and_acceptance_gates",
+    "tests.test_project_harvest_projects::test_capacity_waves_reserved_bins_and_overflow",
+    "tests.test_project_harvest_projects::test_private_moc_csv_non_sortable_and_adaptive_fallback",
+    "tests.test_project_harvest_projects::test_quantity_aware_allocation_confirmation_and_undo_are_durable",
+    "tests.test_stepper_endpoint_safety::test_move_degrees_halts_if_background_stopped_poll_crashes",
+    "tests.test_stepper_endpoint_safety::test_move_degrees_reports_rejected_firmware_start_and_releases_lock",
+    "tests.test_stepper_endpoint_safety::test_pulse_reports_rejected_firmware_start_and_releases_lock"
+  ],
+  "ancillary_collection_issue": "Unchanged legacy test_pulse_perception_flow imports absent C3_TO_C4_DELIVERY_TIMEOUT_S; no tests executed in that attempted collection.",
+  "protected_unchanged": {
+    "subsystems/classification_channel/marker_positioner.py": true,
+    "subsystems/classification_channel/marker_source.py": true,
+    "subsystems/classification_channel/blue_markers.py": true,
+    "recognition_journey_capture.py": true,
+    "recognition_views.py": true,
+    "perception/capture.py": true,
+    "perception/tracking.py": true
+  },
+  "c3_policy_ast_identical_methods": 5,
+  "scoped_diff_check_exit": 0,
+  "deployment": false,
+  "hardware_operation": false,
+  "production_migration": false,
+  "perception": {
+    "tests": 77,
+    "passed": 76,
+    "baseline_failures": 1
+  },
+  "ruff_new_runtime_and_capture": "passed",
+  "syntax_and_duplicate_methods": "passed",
+  "memory_of_test_counts": "Acceptance/perception/runtime/review counts overlap; do not add them."
+}

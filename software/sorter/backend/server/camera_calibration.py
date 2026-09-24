@@ -8,9 +8,19 @@ import cv2
 import numpy as np
 
 try:
-    from calibration_reference import REFERENCE_TILE_HEX, REFERENCE_TILE_RGB
+    from calibration_reference import (
+        COLORCHECKER24_REFERENCE_NAME,
+        COLORCHECKER24_TARGET_TYPE,
+        REFERENCE_TILE_HEX,
+        REFERENCE_TILE_RGB,
+    )
 except ModuleNotFoundError:
-    from .calibration_reference import REFERENCE_TILE_HEX, REFERENCE_TILE_RGB
+    from .calibration_reference import (
+        COLORCHECKER24_REFERENCE_NAME,
+        COLORCHECKER24_TARGET_TYPE,
+        REFERENCE_TILE_HEX,
+        REFERENCE_TILE_RGB,
+    )
 
 _PATTERN_CANDIDATES: list[tuple[int, int]] = []
 for cols, rows in [
@@ -62,10 +72,12 @@ class CalibrationAnalysis:
     board_bbox: tuple[int, int, int, int]
     normalized_board_bbox: tuple[float, float, float, float]
     neutral_mean_bgr: tuple[float, float, float]
-    tile_samples: dict[str, dict[str, float]]
+    tile_samples: dict[str, dict[str, Any]]
+    target_type: str = "six_color_plate"
+    target_reference: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "pattern_size": [self.pattern_size[0], self.pattern_size[1]],
             "score": self.score,
             "total_cells": self.total_cells,
@@ -98,15 +110,24 @@ class CalibrationAnalysis:
                 self.neutral_mean_bgr[1],
                 self.neutral_mean_bgr[2],
             ],
-            "reference_palette": {
+            "tile_samples": self.tile_samples,
+            "target_type": self.target_type,
+        }
+        if self.target_reference is not None:
+            payload["target_reference"] = self.target_reference
+        if self.target_type != COLORCHECKER24_TARGET_TYPE:
+            payload["reference_palette"] = {
                 label: {
                     "hex": REFERENCE_TILE_HEX[label],
-                    "rgb": [REFERENCE_TILE_RGB[label][0], REFERENCE_TILE_RGB[label][1], REFERENCE_TILE_RGB[label][2]],
+                    "rgb": [
+                        REFERENCE_TILE_RGB[label][0],
+                        REFERENCE_TILE_RGB[label][1],
+                        REFERENCE_TILE_RGB[label][2],
+                    ],
                 }
                 for label in ("white", "black", "blue", "red", "green", "yellow")
-            },
-            "tile_samples": self.tile_samples,
-        }
+            }
+        return payload
 
 
 def _linearize_rgb(
@@ -121,16 +142,18 @@ def _linearize_rgb(
     lut_b = response_curve.get("lut_b")
     if not lut_r or not lut_g or not lut_b:
         return rgb_01
-    lut = np.stack([
-        np.array(lut_r, dtype=np.float32),
-        np.array(lut_g, dtype=np.float32),
-        np.array(lut_b, dtype=np.float32),
-    ], axis=1)  # (256, 3)
-    # Convert [0,1] → uint8 indices, look up linear values
+    lut = np.stack(
+        [
+            np.array(lut_r, dtype=np.float32),
+            np.array(lut_g, dtype=np.float32),
+            np.array(lut_b, dtype=np.float32),
+        ],
+        axis=1,
+    )
     indices = np.clip((rgb_01 * 255.0).astype(np.int32), 0, 255)
     result = np.empty_like(rgb_01)
-    for c in range(3):
-        result[:, c] = lut[indices[:, c], c]
+    for channel in range(3):
+        result[:, channel] = lut[indices[:, channel], channel]
     return result
 
 
@@ -140,11 +163,24 @@ def generate_color_profile_from_analysis(
 ) -> dict[str, Any] | None:
     if isinstance(analysis, CalibrationAnalysis):
         tile_samples = analysis.tile_samples
+        target_type = analysis.target_type
+        target_reference = analysis.target_reference
     elif isinstance(analysis, dict):
         raw_samples = analysis.get("tile_samples")
         tile_samples = raw_samples if isinstance(raw_samples, dict) else {}
+        target_type = analysis.get("target_type", "six_color_plate")
+        target_reference = analysis.get("target_reference")
     else:
         return None
+
+    if target_type == COLORCHECKER24_TARGET_TYPE:
+        if target_reference != COLORCHECKER24_REFERENCE_NAME:
+            return None
+        try:
+            from .colorchecker24 import generate_color_profile
+        except ImportError:
+            from colorchecker24 import generate_color_profile
+        return generate_color_profile(tile_samples, target_reference=target_reference)
 
     observed_rows: list[list[float]] = []
     target_rows: list[list[float]] = []
@@ -333,6 +369,10 @@ def analyze_calibration_target(frame: np.ndarray) -> CalibrationAnalysis | None:
     if fixed_target is not None:
         return fixed_target
 
+    colorchecker_target = _analyze_colorchecker24(frame)
+    if colorchecker_target is not None:
+        return colorchecker_target
+
     detection = _detect_checkerboard(frame)
     if detection is not None:
         pattern_size, corners = detection
@@ -346,6 +386,24 @@ def analyze_calibration_target(frame: np.ndarray) -> CalibrationAnalysis | None:
     if plate_quad is None:
         return None
     return _analyze_plate_quad(frame, plate_quad)
+
+
+def analyze_camera_color_target(frame: np.ndarray) -> CalibrationAnalysis | None:
+    """Analyze either supported physical target for camera color correction."""
+    if frame is None or frame.size == 0:
+        return None
+    colorchecker_target = _analyze_colorchecker24(frame)
+    if colorchecker_target is not None:
+        return colorchecker_target
+    return analyze_color_plate_target(frame)
+
+
+def _analyze_colorchecker24(frame: np.ndarray) -> CalibrationAnalysis | None:
+    try:
+        from .colorchecker24 import analyze_colorchecker24
+    except ImportError:
+        from colorchecker24 import analyze_colorchecker24
+    return analyze_colorchecker24(frame)
 
 
 def analyze_color_plate_target(frame: np.ndarray) -> CalibrationAnalysis | None:
@@ -1093,6 +1151,14 @@ def _fixed_target_matches_are_plausible(tile_match_percentages: dict[str, float]
     if best_black_match < 15.0:
         return False
     return True
+
+
+def _encoded_rgb_reference_match_percent(rgb: np.ndarray, label: str) -> float:
+    rgb_u8 = np.clip(np.rint(rgb * 255.0), 0.0, 255.0).astype(np.uint8)
+    bgr_patch = rgb_u8[::-1].reshape((1, 1, 3))
+    lab = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
+    distance = float(np.linalg.norm(lab - np.asarray(_REFERENCE_TILE_LAB[label], dtype=np.float32)))
+    return _reference_match_percent(distance)
 
 
 def _expected_region_score(sample: CellSample, label: str) -> float:

@@ -399,19 +399,14 @@ class Rev01BaseState(BaseState):
         return [crops[idx] for idx in chosen_indices]
 
     def spawnClassifyThread(self, all_captures: list[np.ndarray]) -> None:
-        # Runs entirely off the state-machine thread: the Brickognize fan-out is
-        # blocking HTTP and MUST NOT run on the main loop. Fires the parallel
-        # request fan-out (the combined call plus single-image calls). The
-        # combined call's result is kept whenever it recognizes the piece at all;
-        # otherwise the highest-confidence single-image call wins (see
-        # _runClassifyRequests).
+        # Provider I/O runs off the control loop. Optional upstream imagery is
+        # already captured and transfer-owned; it never creates a wait here.
         obj = self.ctx.known_object
         piece_uuid = obj.uuid if obj is not None else None
         cycle_id = int(self.ctx.cycle_id)
         # Up to classify_burst_count frames drive classification: they are the
         # C4 images sent to Brickognize. _selectBurstIndices runs the
-        # within-burst quality selection, which ships FEWER frames when part of
-        # the burst is motion-blurred or the piece isn't contained. The rest of
+        # existing within-burst geometry and quality selection. The rest of
         # the burst is kept on the KnownObject (used=False) for review.
         n_use = max(1, int(self.ctx.config.classify_burst_count))
         burst_entries = (
@@ -422,20 +417,16 @@ class Rev01BaseState(BaseState):
         chosen = [i for i in self._selectBurstIndices(all_captures, n_use) if i < len(burst_entries)]
         used_entries = [burst_entries[i] for i in chosen]
         burst_crops = [all_captures[i] for i in chosen]
-        stamps = list(self.ctx.captured_crop_timestamps)
-        # Arrival at C4. Every candidate's dt feature is measured against this,
-        # so it has to be the FIRST burst frame, not the sharpest or the last.
-        arrival_ts = float(stamps[0]) if stamps else float(time.time())
-        # Best-quality burst frame is the anchor the matcher compares against.
-        anchor_bgr = None
-        if burst_crops:
-            qualities = self.ctx.captured_crop_quality
-            best = (
-                crop_quality.bestIndex([qualities[i] for i in chosen])
-                if len(qualities) == len(all_captures)
-                else None
-            )
-            anchor_bgr = burst_crops[best] if best is not None else burst_crops[-1]
+        # Prefer the sharpest usable C4 view, then additional distinct C4 poses.
+        # Optional upstream imagery requires independent physical identity.
+        qualities = self.ctx.captured_crop_quality
+        best = (crop_quality.bestIndex([qualities[i] for i in chosen])
+                if chosen and len(qualities) == len(all_captures) else None)
+        if best is not None and best != 0:
+            burst_crops.insert(0, burst_crops.pop(best))
+            used_entries.insert(0, used_entries.pop(best))
+        optional_view = self.ctx.owned_upstream_view
+        self.ctx.owned_upstream_view = None  # Consume once; never reuse on a later piece.
 
         def _run() -> None:
             try:
@@ -448,21 +439,15 @@ class Rev01BaseState(BaseState):
                         if self._classificationCycleCurrentLocked(cycle_id, piece_uuid):
                             self.ctx.classification_error = "no_captures"
                     return
-                # Upstream C2/C3 views of this same piece, found by the
-                # piece-link model. They are fused into the request alongside the
-                # burst, so they must be resolved BEFORE the fan-out — the burst
-                # gives up slots so the total stays under Brickognize's limit.
-                sendable += self._gatherLinkMatches(
-                    piece_uuid,
-                    anchor_bgr,
-                    arrival_ts,
-                    max_inject=MAX_QUERY_IMAGES - len(sendable),
-                    expected_cycle_id=cycle_id,
-                )
+                upstream = self._readyUpstreamImages(optional_view, cycle_id, piece_uuid)
+                sendable[1:1] = upstream
+                from recognition_views import distinct_indices
+                sendable = [sendable[i] for i in distinct_indices(
+                    [image.bgr for image in sendable], limit=min(4, MAX_QUERY_IMAGES))]
                 if not self._classificationCycleCurrent(cycle_id, piece_uuid):
                     return
                 # The hosted color provider (when selected) runs alongside the
-                # Brickognize fan-out rather than after it, so choosing it costs
+                # Brickognize request rather than after it, so choosing it costs
                 # no extra wall-clock unless it is slower than Brickognize.
                 hosted_color = self._maybeStartHostedColorPredict(sendable, piece_uuid)
                 requests = self._buildClassifyRequests(sendable)
@@ -497,34 +482,21 @@ class Rev01BaseState(BaseState):
         with self.ctx.classify_lock:
             return self._classificationCycleCurrentLocked(expected_cycle_id, piece_uuid)
 
+    def _readyUpstreamImages(self, view, cycle_id, piece_uuid):
+        # Indexed release ownership does not identify the physical C4 piece.
+        # _admit stamps this receiver's UUID/cycle onto a channel-local C3 crop;
+        # equality of those copied values is circular, not cross-camera proof.
+        # The original collector also has only C3-local track generations. Until
+        # an independent same-piece link exists, these candidates are ineligible.
+        # C4 classification continues immediately: no lookup, wait or model call.
+        return []
+
     def _buildClassifyRequests(self, sendable: list[_SendImage]) -> list[_ClassifyRequest]:
-        # The parallel request fan-out. All of these are submitted at once; the
-        # highest-confidence result wins (see _runClassifyRequests). They are
-        # redundant, not sequential retries — a lone clean frame frequently
-        # recognizes a piece the fused set confuses, and firing every variant
-        # concurrently costs the same wall-clock as the slowest single call.
-        #   combined        — the full set of used burst frames
-        #   single_burst    — only the last (most-settled) burst frame, alone
-        # A single-image request equal to the combined call (e.g. combined is
-        # already just one burst frame) is skipped so we never pay for a duplicate.
-        burst = [s for s in sendable if s.rec.source == "c4_burst"]
-        requests: list[_ClassifyRequest] = [
-            _ClassifyRequest(
-                ClassificationAttemptStrategy.combined, "combined", list(sendable)
-            )
-        ]
-        cfg = self.ctx.config
-        if getattr(cfg, "classify_parallel_single_burst", True) and burst:
-            last_burst = burst[-1]
-            if not (len(sendable) == 1 and sendable[0] is last_burst):
-                requests.append(
-                    _ClassifyRequest(
-                        ClassificationAttemptStrategy.single_burst,
-                        "single_burst",
-                        [last_burst],
-                    )
-                )
-        return requests
+        # One provider request owns the selected available views. The former
+        # parallel single-image request was redundant; legacy config cannot
+        # re-enable that duplicate on this production path.
+        return [_ClassifyRequest(ClassificationAttemptStrategy.combined,
+                                 'combined', list(sendable))]
 
     @staticmethod
     def _topItem(result: object) -> Optional[dict]:

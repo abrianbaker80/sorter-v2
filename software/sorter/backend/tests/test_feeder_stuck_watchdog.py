@@ -67,7 +67,61 @@ def _cfg() -> PulsePerceptionConfig:
 
 
 class FeederStuckWatchdogTests(unittest.TestCase):
-    def _observe(self, wd, gc, up, cfg, *, pos, wants, now, upstream_enabled=True):
+    def test_pause_preserves_elapsed_time_and_exhausted_recovery_budget(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        cfg.stuck_max_nudge_attempts = 1
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=0)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=2)
+        wd.pause(2.5)
+        wd.pause(100)  # Repeated hold is idempotent.
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=200)
+        self.assertIsNone(gc.runtime_stats.activeIncident())
+        wd.resume(202.5)
+        wd.resume(202.6)  # Repeated resume cannot extend the recovery window.
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=202.75)
+        self.assertIsNone(gc.runtime_stats.activeIncident())
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=203.1)
+        self.assertEqual(len(up.moves), 1)
+        self.assertEqual(gc.runtime_stats.activeIncident()["nudge_attempts"], 1)
+
+    def test_auto_resolved_duration_excludes_paused_time(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=0)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=2)
+        wd.pause(2.5)
+        wd.resume(202.5)
+        self._observe(wd, gc, up, cfg, pos=30, wants=True, now=203)
+        row = gc.runtime_stats.auto_resolved[0]
+        self.assertAlmostEqual(row["no_progress_ms"], 3000)
+        self.assertEqual(row["nudge_attempts"], 1)
+
+    def test_pause_does_not_clear_an_existing_operator_incident(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        cfg.stuck_max_nudge_attempts = 0
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=0)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=2)
+        incident = gc.runtime_stats.activeIncident()
+        wd.pause(2.5)
+        wd.resume(202.5)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=203)
+        self.assertEqual(gc.runtime_stats.activeIncident(), incident)
+        self.assertEqual(up.moves, [])
+
+    def test_busy_owner_defers_without_spending_recovery_attempt(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        results = iter([None, True])
+        wd = FeederStuckWatchdog(gc, request_nudge=lambda *_: next(results))
+        self._observe(wd, gc, up, cfg, pos=40.0, wants=True, now=0.0)
+        self._observe(wd, gc, up, cfg, pos=40.0, wants=True, now=2.0)
+        self.assertEqual(wd._trackers[2].nudge_attempts, 0)
+        self._observe(wd, gc, up, cfg, pos=40.0, wants=True, now=2.1)
+        self.assertEqual(wd._trackers[2].nudge_attempts, 1)
+        self.assertEqual(up.moves, [])
+
+    def _observe(self, wd, gc, up, cfg, *, pos, wants, now, upstream_enabled=True, track_id=None):
         wd.observe(
             channel_id=2,
             channel_label="C2",
@@ -76,10 +130,110 @@ class FeederStuckWatchdogTests(unittest.TestCase):
             upstream_stepper=up,
             upstream_enabled=upstream_enabled,
             leading_pos_deg=pos,
+            leading_track_id=track_id,
             wants_advance=wants,
             cfg=cfg,
             now=now,
         )
+
+    def test_identity_changes_and_missing_ids_cannot_renew_a_real_stall(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=0, track_id=11)
+        for at, track in [(2, 12), (4, None), (6, 13), (8, 14)]:
+            self._observe(wd, gc, up, cfg, pos=40, wants=True, now=at, track_id=track)
+        self.assertEqual(len(up.moves), 3)
+        self.assertEqual(gc.runtime_stats.activeIncident()["nudge_attempts"], 3)
+        incident = gc.runtime_stats.activeIncident()
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=10, track_id=15)
+        self.assertEqual(gc.runtime_stats.activeIncident(), incident)
+
+    def test_successor_rebases_position_but_keeps_budget_until_actual_progress(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=1, wants=True, now=0, track_id=11)
+        self._observe(wd, gc, up, cfg, pos=1, wants=True, now=2, track_id=11)
+        tracker = wd._trackers[2]
+        self._observe(wd, gc, up, cfg, pos=100, wants=True, now=2.5, track_id=13)
+        self.assertEqual((tracker.last_progress_at, tracker.nudge_attempts), (2, 1))
+        self.assertEqual(tracker.stall_started_at, 0)
+        self.assertEqual(gc.runtime_stats.auto_resolved, [])
+        self._observe(wd, gc, up, cfg, pos=95, wants=True, now=2.75, track_id=13)
+        self.assertEqual(tracker.nudge_attempts, 0)
+        self.assertEqual(tracker.last_progress_at, 2.75)
+        self.assertEqual(len(up.moves), 1)
+        self.assertEqual(gc.runtime_stats.auto_resolved[0]["nudge_attempts"], 1)
+
+    def test_missing_identity_does_not_replace_known_reference(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=40, wants=True, now=0, track_id=11)
+        self._observe(wd, gc, up, cfg, pos=38, wants=True, now=0.5, track_id=None)
+        self.assertEqual(wd._trackers[2].track_positions[11], 40)
+        self._observe(wd, gc, up, cfg, pos=36, wants=True, now=0.75, track_id=11)
+        self.assertEqual(wd._trackers[2].last_progress_at, 0.75)
+        self.assertEqual(up.moves, [])
+
+    def test_alternating_moving_leaders_accumulate_small_progress(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        for tick in range(31):
+            self._observe(wd, gc, up, cfg, pos=60-tick, wants=True,
+                          now=tick*0.2, track_id=1+tick%2)
+        self.assertEqual(up.moves, [])
+        self.assertIsNone(gc.runtime_stats.activeIncident())
+
+    def test_alternating_stationary_leaders_do_not_manufacture_progress(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        for tick in range(51):
+            self._observe(wd, gc, up, cfg, pos=60 if tick%2 else 30,
+                          wants=True, now=tick*0.2, track_id=1+tick%2)
+        self.assertEqual(len(up.moves), 3)
+        self.assertIsNotNone(gc.runtime_stats.activeIncident())
+        self.assertEqual(gc.runtime_stats.auto_resolved, [])
+
+    def test_new_identity_cannot_clear_incident_by_appearing_closer(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        cfg.stuck_max_nudge_attempts = 0
+        wd = FeederStuckWatchdog(gc)
+        self._observe(wd, gc, up, cfg, pos=60, wants=True, now=0, track_id=1)
+        self._observe(wd, gc, up, cfg, pos=60, wants=True, now=2, track_id=1)
+        incident = gc.runtime_stats.activeIncident()
+        self._observe(wd, gc, up, cfg, pos=30, wants=True, now=3, track_id=2)
+        self.assertEqual(gc.runtime_stats.activeIncident(), incident)
+        self._observe(wd, gc, up, cfg, pos=25, wants=True, now=4, track_id=2)
+        self.assertIsNone(gc.runtime_stats.activeIncident())
+
+    def test_missing_identity_does_not_compare_different_known_leaders(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        for tick in range(51):
+            self._observe(wd, gc, up, cfg, pos=60 if tick%2 else 30,
+                          wants=True, now=tick*0.2, track_id=1 if tick%2 else None)
+        self.assertEqual(len(up.moves), 3)
+        self.assertIsNotNone(gc.runtime_stats.activeIncident())
+
+    def test_identity_churn_is_bounded_without_postponing_escalation(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        for tick in range(100):
+            self._observe(wd, gc, up, cfg, pos=40, wants=True,
+                          now=tick*0.2, track_id=tick)
+            self.assertLessEqual(len(wd._trackers[2].track_positions), 32)
+        self.assertEqual(len(up.moves), 3)
+        self.assertIsNotNone(gc.runtime_stats.activeIncident())
+
+    def test_previously_credited_motion_cannot_be_reused_after_leader_switch(self):
+        gc, up, cfg = _FakeGC(), _FakeStepper(), _cfg()
+        wd = FeederStuckWatchdog(gc)
+        for at, track, pos in [(0, 1, 60), (0.1, 2, 50), (0.2, 1, 55)]:
+            self._observe(wd, gc, up, cfg, pos=pos, wants=True, now=at, track_id=track)
+        # The second piece's old 50-degree reference predates credited motion.
+        # Its first observation in the new window cannot extend that window.
+        self._observe(wd, gc, up, cfg, pos=45, wants=True, now=0.9, track_id=2)
+        self._observe(wd, gc, up, cfg, pos=45, wants=True, now=1.3, track_id=2)
+        self.assertEqual(len(up.moves), 1)
 
     def test_nudges_upstream_then_escalates_to_jam(self) -> None:
         gc = _FakeGC()

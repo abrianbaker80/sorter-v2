@@ -439,6 +439,13 @@ class Coordinator:
         with prof.timer("coordinator.step.total_ms"):
             coordinator_started = time.perf_counter()
             self.bus.begin_tick()
+            delegate = getattr(self.classification, '_delegate', None)
+            if getattr(delegate, 'physical_c4_authority', False) and delegate.fault:
+                self.feeder.hold_motion()
+                return
+            activate_recovery = getattr(delegate, 'applyRetainedTransferRecovery', None)
+            if activate_recovery is not None:
+                activate_recovery()
             active_incident = self._active_incident()
             if active_incident is not None:
                 self._maybe_start_auto_incident_resolution(active_incident)
@@ -487,6 +494,11 @@ class Coordinator:
                     (time.perf_counter() - classification_started) * 1000.0,
                 )
             with prof.timer("coordinator.step.feeder_ms"):
+                # A physical fault closes the admission path immediately;
+                # the queued lifecycle pause is consumed on the next main tick.
+                if getattr(delegate, 'physical_c4_authority', False) and delegate.fault:
+                    self.feeder.hold_motion()
+                    return
                 feeder_started = time.perf_counter()
                 if self.manual_feed_mode:
                     prof.hit("coordinator.step.feeder_skipped.manual_feed_mode")

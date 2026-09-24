@@ -87,6 +87,38 @@ def mergeNearbyBboxes(
     return out
 
 
+def mergeC4BboxesPreservingIntake(
+    bboxes: Iterable[Bbox], gap_px: float, channel: ChannelDef
+) -> list[tuple[Bbox, list[Bbox]]]:
+    """Merge over-segmentation without moving evidence across the intake edge.
+
+    Axis-aligned boxes in adjacent carousel pockets can overlap across a
+    diagonal divider. Their union can put an arrived piece's COM outside DROP,
+    hiding it from arrival confirmation. Use the same calibrated COM attribution
+    as the consumer to keep intake and non-intake members separate. Also reject
+    a union that changes that attribution; neighbor boxes cannot manufacture
+    intake evidence merely by being merged.
+    """
+    boxes = [tuple(int(v) for v in b) for b in bboxes]
+    raw_zones = {b: zone for _, _, zone, b in orderedPieceObservations(boxes, channel)}
+    groups: dict[bool, list[Bbox]] = {True: [], False: []}
+    out: list[tuple[Bbox, list[Bbox]]] = []
+    for box in boxes:
+        if box not in raw_zones:
+            # Missing calibration/on-channel attribution cannot justify merging.
+            out.append((box, [box]))
+        else:
+            groups[raw_zones[box] == 1].append(box)
+    for in_intake, members in groups.items():
+        for merged, sources in mergeNearbyBboxes(members, gap_px):
+            attributed = orderedPieceObservations([merged], channel)
+            if attributed and (attributed[0][2] == 1) == in_intake:
+                out.append((merged, sources))
+            else:
+                out.extend((source, [source]) for source in sources)
+    return out
+
+
 def bboxArea(bbox: Bbox) -> int:
     x1, y1, x2, y2 = bbox
     w = x2 - x1

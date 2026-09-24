@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import queue
 import time
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
@@ -234,6 +235,11 @@ class SendingChuteReopenGateTests(unittest.TestCase):
         piece.destination_bin = (0, 0, 1)
         shared = self._mkSharedWithTransport(transport)
         gc = _GlobalConfig()
+        allocation = {"mode": "live", "runtime_id": "activation-project",
+                      "allocation_id": "allocation-project", "group_id": "bag-1",
+                      "status": "confirmed", "confirmed_at": datetime.fromtimestamp(time.time() - 1, timezone.utc).isoformat(),
+                      "project_completed": True}
+        gc.runtime_stats.observeHarvestReservation(allocation, now_wall=time.time() - 60)
         event_queue: queue.Queue = queue.Queue()
         sending = _mkSending(
             vision=_FakeVision(live_ids_by_role={"carousel": set()}),
@@ -250,12 +256,15 @@ class SendingChuteReopenGateTests(unittest.TestCase):
             patch("server.shared_state.command_queue", control_queue),
             patch(
                 "project_harvest_runtime.confirm_piece_drop",
-                return_value={"project_completed": True},
+                return_value=allocation,
             ) as confirm,
         ):
             self.assertEqual(DistributionState.IDLE, sending.step())
 
         confirm.assert_called_once_with(gc, piece)
+        counts = gc.runtime_stats.snapshot()["harvest_throughput"]
+        self.assertEqual(1, counts["bag_count"], (counts, gc.runtime_stats._harvest_scope, allocation))
+        self.assertEqual(1, counts["distributed_count"])
         self.assertEqual("distributed", piece.stage.value)
         self.assertEqual([piece], gc.run_recorder.pieces)
         tags = [getattr(event, "tag", None) for event in list(event_queue.queue)]

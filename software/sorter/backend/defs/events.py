@@ -160,6 +160,12 @@ class KnownObjectData(BaseModel):
     harvest_group_id: Optional[str] = None
     harvest_group_label: Optional[str] = None
     harvest_exception: bool = False
+    transfer_episode_id: Optional[str] = None
+    transfer_first_pass: bool = False
+    transport_failure_reason: Optional[str] = None
+    forced_reject_reason: Optional[str] = None
+    reject_category: Optional[str] = None
+    physical_group_size_unknown: bool = False
     tracked_global_id: Optional[int] = None
     classification_channel_zone_state: Optional[str] = None
     classification_channel_zone_center_deg: Optional[float] = None

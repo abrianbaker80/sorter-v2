@@ -2348,6 +2348,8 @@ class VisionManager:
                 time.sleep(wait_s)
             detection = detector.detect(crop, force=request.force or background_request)
             error_detail = detector._last_error if isinstance(detector._last_error, str) and detector._last_error else None
+            if error_detail or detection is not None:
+                self.gc.runtime_stats.observeProviderAvailability("openrouter_detector", not bool(error_detail))
             if error_detail:
                 with self._openrouter_request_lock:
                     self._openrouter_next_allowed_at = max(

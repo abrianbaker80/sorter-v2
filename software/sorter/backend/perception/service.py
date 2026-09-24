@@ -373,6 +373,21 @@ class PerceptionService:
             return None
         return worker.latest_pieces_frame
 
+    def read_journey_buffer(self, channel_id: int):
+        worker = self._workers.get(channel_id)
+        journal = getattr(worker, "journey_scenes", None)
+        return journal.rolling_buffer if journal is not None else None
+
+    def read_journey_scenes(self, channel_id: int):
+        worker = self._workers.get(channel_id)
+        journal = getattr(worker, "journey_scenes", None)
+        return journal.records if journal is not None else ()
+
+    def read_journey_history(self, alias):
+        worker = self._workers.get(alias.channel)
+        journal = getattr(worker, "journey_scenes", None)
+        return journal.details.get(alias) if journal is not None else None
+
     def read_detections(self, channel_id: int):
         """Latest in-crop ``Detection`` list for this channel, each tagged with
         ``in_primary`` and the secondary-zone ids it falls in. Display/tag only —

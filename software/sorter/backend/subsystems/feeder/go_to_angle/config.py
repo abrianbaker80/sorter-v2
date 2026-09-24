@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 
 @dataclass
@@ -21,6 +22,8 @@ class GoToAngleConfig:
     # between pulses so the downstream channel can confirm receipt before we
     # push again. Mirrors the reactive flow's precise pulsing.
     precise_pulse_output_deg: float = 3.0
+    # Extra clearance beyond the measured exit gap in C3 precise mode.
+    ch3_release_margin_output_deg: float = 3.0
     precise_pulse_pause_ms: int = 300
     # Bulk feeder (c_channel_1) has no vision zones: nudge it forward by a fixed
     # amount whenever c_channel_2's drop zone is clear.
@@ -110,7 +113,8 @@ FIELD_META: list[dict] = [
     {"section": "Motion", "key": "min_move_output_deg", "label": "Min move (output deg)", "type": "float", "default": _DEFAULTS.min_move_output_deg, "description": "Moves smaller than this are treated as noise and skipped."},
     {"section": "Motion", "key": "max_move_output_deg", "label": "Max move clamp (output deg)", "type": "float", "default": _DEFAULTS.max_move_output_deg, "description": "Clamp on any single move, so a bad angle calculation can never spin a channel wildly."},
     {"section": "Motion", "key": "settle_after_move_ms", "label": "Settle after advance (ms)", "type": "int", "default": _DEFAULTS.settle_after_move_ms, "description": "Cooldown after a normal advance before the channel is re-evaluated, giving pieces time to stop sliding."},
-    {"section": "Precise hand-off", "key": "precise_pulse_output_deg", "label": "Precise pulse angle (output deg)", "type": "float", "default": _DEFAULTS.precise_pulse_output_deg, "description": "At the exit, the piece is nudged forward by this small fixed angle per pulse instead of being shoved past the edge in one move."},
+    {"section": "Precise hand-off", "key": "precise_pulse_output_deg", "label": "C2 precise pulse angle (output deg)", "type": "float", "default": _DEFAULTS.precise_pulse_output_deg, "description": "Fixed C2 advance per precise pulse. Also used by the legacy vision flow; indexed C3 uses its separate release margin."},
+    {"section": "Precise hand-off", "key": "ch3_release_margin_output_deg", "label": "C3 release margin (output deg)", "type": "float", "default": _DEFAULTS.ch3_release_margin_output_deg, "description": "Extra C3 travel beyond the measured leading-piece exit gap in precise mode. Independent of C2 pulses; the maximum move clamp still applies. Unused when C3 fast eject is enabled."},
     {"section": "Precise hand-off", "key": "precise_pulse_pause_ms", "label": "Precise pulse pause between pulses (ms)", "type": "int", "default": _DEFAULTS.precise_pulse_pause_ms, "description": "Pause between precise pulses so the downstream channel can confirm receipt before the next push."},
     {"section": "C1 (bulk)", "key": "ch1_advance_output_deg", "label": "C1 bulk advance (output deg)", "type": "float", "default": _DEFAULTS.ch1_advance_output_deg, "description": "C1 (the bulk feeder) has no vision zones: it advances by this fixed amount whenever C2's drop zone is clear."},
     {"section": "C1 (bulk)", "key": "ch1_settle_after_move_ms", "label": "C1 settle after move (ms)", "type": "int", "default": _DEFAULTS.ch1_settle_after_move_ms, "description": "Cooldown after each C1 bulk advance before it may move again."},
@@ -138,7 +142,31 @@ FIELD_META: list[dict] = [
 ]
 
 
+def validateC3ReleaseMargin(value: object) -> float:
+    try:
+        margin = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("C3 release margin must be a finite nonnegative number") from None
+    if isinstance(value, bool) or not math.isfinite(margin) or margin < 0:
+        raise ValueError("C3 release margin must be a finite nonnegative number")
+    return margin
+
+
+def withC3ReleaseMargin(d: dict) -> dict:
+    """Preserve the old shared margin until an explicit C3 value is saved."""
+    result = dict(d)
+    if "ch3_release_margin_output_deg" not in result:
+        try:
+            legacy = abs(float(result.get("precise_pulse_output_deg", 3.0)))
+            margin = validateC3ReleaseMargin(legacy)
+        except (TypeError, ValueError, OverflowError):
+            margin = _DEFAULTS.ch3_release_margin_output_deg
+        result["ch3_release_margin_output_deg"] = margin
+    return result
+
+
 def configFromDict(d: dict) -> GoToAngleConfig:
+    d = withC3ReleaseMargin(d)
     cfg = GoToAngleConfig()
     for meta in FIELD_META:
         k = meta["key"]
@@ -146,7 +174,9 @@ def configFromDict(d: dict) -> GoToAngleConfig:
             continue
         raw = d[k]
         try:
-            if meta["type"] == "int":
+            if k == "ch3_release_margin_output_deg":
+                setattr(cfg, k, validateC3ReleaseMargin(raw))
+            elif meta["type"] == "int":
                 setattr(cfg, k, int(raw))
             elif meta["type"] == "bool":
                 setattr(cfg, k, bool(raw))

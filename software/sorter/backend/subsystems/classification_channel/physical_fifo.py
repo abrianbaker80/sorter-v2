@@ -74,6 +74,7 @@ class PhysicalC4FIFO:
         microsteps_per_revolution: int | Fraction,
         origin_microsteps: int = 0,
         clockwise_sign: int = 1,
+        initial_boundary: int = 0,
     ) -> None:
         if type(microsteps_per_revolution) not in (int, Fraction):
             raise ValueError("microsteps_per_revolution must be exact")
@@ -84,7 +85,9 @@ class PhysicalC4FIFO:
         if self._sign not in (-1, 1):
             raise ValueError("clockwise_sign must be -1 or 1")
         self._steps_per_index = Fraction(microsteps_per_revolution, POCKET_COUNT)
-        self._boundary = 0
+        self._boundary = _integer(initial_boundary, "initial_boundary")
+        if initial_boundary < 0:
+            raise ValueError("initial boundary must be nonnegative")
         self._pending: IndexTarget | None = None
         self._pockets = [Pocket(i) for i in range(POCKET_COUNT)]
 
@@ -157,6 +160,37 @@ class PhysicalC4FIFO:
         self._pockets[pocket_id] = replace(pocket, state=state, destination=destination)
         return True
 
+    def discard_all(self, *, include_unknown: bool = False) -> None:
+        """Recovery only: retain generations/routes as reject custody until EXIT.
+
+        Unknown empty positions receive a generation too. No occupancy is erased
+        by this operation, and no ordinary recognition result can undo it.
+        """
+        if self._pending is not None:
+            raise RuntimeError("finish the owned index before starting recovery")
+        for pocket in self._pockets:
+            if pocket.state is not PocketState.EMPTY:
+                self._pockets[pocket.pocket_id] = replace(
+                    pocket, state=PocketState.DISCARD, destination=None)
+            elif include_unknown:
+                self._pockets[pocket.pocket_id] = Pocket(
+                    pocket.pocket_id, pocket.generation + 1, PocketState.DISCARD,
+                    deposited_boundary=self._boundary,
+                    metadata=(("recovery", "unknown"),))
+
+    def reestablish_for_recovery(self, boundary: int) -> None:
+        """Exclusive recovery after stopped motor + a fresh ConfirmedIndex.
+
+        This records observed geometry, never a normal discharge. Interrupted
+        custody is conservatively swept again. Generations remain unchanged.
+        """
+        _integer(boundary, "boundary")
+        if boundary < self._boundary:
+            raise ValueError("recovery boundary must be monotonic")
+        self._boundary = boundary
+        self._pending = None
+        self.discard_all(include_unknown=True)
+
     def target_for(self, boundary: int) -> IndexTarget:
         _integer(boundary, "boundary")
         if boundary < 0:
@@ -200,8 +234,8 @@ class PhysicalC4FIFO:
         self._pending = None
         exited = []
         for pocket in self._pockets:
-            if (pocket.deposited_boundary is not None
-                    and self._boundary - pocket.deposited_boundary == DISCHARGE_ADVANCES):
+            if (pocket.state is not PocketState.EMPTY
+                    and self.station_of(pocket.pocket_id) == 9):
                 exited.append(Discharge(pocket, self._boundary))
                 self._pockets[pocket.pocket_id] = Pocket(pocket.pocket_id, pocket.generation)
         return tuple(exited)

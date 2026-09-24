@@ -88,3 +88,65 @@ class CameraRingBufferTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_received_telemetry_does_not_confuse_reported_or_stale_frames(monkeypatch):
+    import cv2
+    from types import SimpleNamespace
+    capture = CaptureThread("test_cam", mkCameraConfig(device_index=-1))
+    monkeypatch.setattr("vision.camera.time.time", lambda: 100.0)
+    capture._cap = SimpleNamespace(get=lambda key: {
+        cv2.CAP_PROP_FRAME_WIDTH: 1920, cv2.CAP_PROP_FRAME_HEIGHT: 1440,
+        cv2.CAP_PROP_FPS: 30,
+    }.get(key, 0))
+    capture._received_resolution = (3840, 2160)
+    for stamp in (99.8, 99.9, 100.0):
+        frame = _make_frame(0)
+        frame.timestamp = stamp
+        capture._ring_buffer.append(frame)
+    snapshot = capture.getTelemetrySnapshot()
+    assert snapshot["resolution"] == (3840, 2160)
+    assert abs(snapshot["fps"] - 10) < 0.001
+    assert snapshot["reported_fps"] == 30
+    monkeypatch.setattr("vision.camera.time.time", lambda: 103.0)
+    assert "resolution" not in capture.getTelemetrySnapshot()
+    assert "fps" not in capture.getTelemetrySnapshot()
+
+
+def test_capture_profile_uses_existing_profiler_and_received_raw_dimensions(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    capture = CaptureThread("classification_channel", mkCameraConfig(device_index=-1))
+    captured_at = 1_789_990_000.25
+    monkeypatch.setattr("vision.camera.time.time", lambda: captured_at)
+    # A single in-memory frame exercises the production loop; no camera opens.
+    capture._get_config_snapshot = lambda: ("http://camera.invalid/video", True, 1920, 1440, 24, "MJPG")
+    raw = np.zeros((8, 12, 3), dtype=np.uint8)
+    def grab():
+        return True
+    def retrieve():
+        capture._stop_event.set()
+        return True, raw
+    cap = SimpleNamespace(
+        isOpened=lambda: True,
+        grab=grab,
+        retrieve=retrieve,
+        release=lambda: None,
+    )
+    monkeypatch.setattr("vision.camera._open_capture_source", lambda *a, **k: cap)
+    capture.profiler = SimpleNamespace(enabled=True, observeDuration=Mock())
+    capture._captureLoop()
+    assert capture._received_resolution == (12, 8)
+    assert len(capture._ring_buffer) == 1
+    assert capture.latest_frame.timestamp == captured_at
+    names = [call.args[0] for call in capture.profiler.observeDuration.call_args_list]
+    assert names == [
+        "camera.classification_channel.opencv_grab_ms",
+        "camera.classification_channel.opencv_retrieve_ms",
+        "camera.classification_channel.read_decode",
+        "camera.classification_channel.settings",
+        "camera.classification_channel.picture_settings_ms",
+        "camera.classification_channel.color_profile_ms",
+        "camera.classification_channel.transform",
+        "camera.classification_channel.shared_publish_ms",
+    ]

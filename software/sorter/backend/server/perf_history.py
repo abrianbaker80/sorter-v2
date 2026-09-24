@@ -99,7 +99,9 @@ def extractRow(snapshot: dict[str, Any], captured_at: float) -> dict[str, Any]:
         # the headline "how stale is the data we decide on" metric
         "decision_frame_age_ms": _med(perf_ms, "classification.decision_frame_age_ms"),
         "perception_read_ms": _med(
-            perf_ms, "classification.rev01.idle.perception_read_ms"
+            perf_ms, "classification.indexed.perception_read_ms"
+            if "classification.indexed.perception_read_ms" in perf_ms
+            else "classification.rev01.idle.perception_read_ms"
         ),
         "cameras": cameras,
         "counts": row_counts,

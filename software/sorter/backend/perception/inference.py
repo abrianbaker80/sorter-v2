@@ -34,7 +34,7 @@ from .arcs import (
     exitComForwardDeg,
     exitComForwardToCenterDeg,
     forwardClearanceToExitDeg,
-    mergeNearbyBboxes,
+    mergeC4BboxesPreservingIntake,
     orderedPieceObservations,
 )
 from .capture import CaptureWorker, PerceptionFrame
@@ -84,7 +84,7 @@ _BBOX_SIZE_LOG_THROTTLE_S = 5.0
 # colour region of a multi-coloured brick, or a momentary split — which the C4
 # flow otherwise reads as several pieces / a false multi-drop. Merge on-channel
 # boxes that overlap or sit within this many pixels of each other into one piece
-# BEFORE tracking + zone attribution. C4 ONLY: the C2/C3 feeder logic counts raw
+# BEFORE tracking, preserving raw COM intake attribution. C4 ONLY: the C2/C3 feeder logic counts raw
 # boxes per zone and would break if merged. Override via env for tuning.
 _CLASSIFICATION_CHANNEL_ID = 4
 _C4_BBOX_MERGE_GAP_PX = float(os.environ.get("SORTER_C4_BBOX_MERGE_GAP_PX", "14"))
@@ -318,6 +318,8 @@ class InferenceWorker:
         # Advisory — the slot/state machine read positions and zones, not
         # identity; the id rides along on pieces/detections/overlay.
         self._tracker = TrackerManager()
+        from .journey_scenes import JourneyScenes
+        self.journey_scenes = JourneyScenes(self._channel_def.channel_id)
 
         # On-demand full-frame debug inference. When a request bumps this
         # timestamp, the loop ALSO runs the model on the WHOLE frame (no crop)
@@ -608,6 +610,9 @@ class InferenceWorker:
             pass
 
     def _loop(self) -> None:
+        # Monotonic elapsed time spent waiting for the next distinct capture
+        # timestamp, separate from model execution and wall-clock frame age.
+        input_wait_started = time.perf_counter()
         while not self._stop.is_set():
             self.iterations += 1
             _hit(self._profiler, f"perception.{self.source_id}.iterations")
@@ -619,6 +624,21 @@ class InferenceWorker:
                 if frame.timestamp == self._last_frame_ts:
                     self._stop.wait(_IDLE_SLEEP_S)
                     continue
+                consumed_wall_s = time.time()
+                if (
+                    self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID
+                    and self._profiler is not None
+                ):
+                    self._profiler.observeDuration(
+                        f"perception.{self.source_id}.wait_for_input_ms",
+                        (time.perf_counter() - input_wait_started) * 1000.0,
+                    )
+                    # CameraFrame.timestamp is POSIX wall-clock seconds from
+                    # capture publication; keep that timestamp unchanged.
+                    self._profiler.observeDuration(
+                        f"perception.{self.source_id}.frame_age_at_consume_ms",
+                        (consumed_wall_s - frame.timestamp) * 1000.0,
+                    )
                 if not self._check_source_id(frame):
                     # Hard fail to a safe state — write a neutral slot and
                     # keep retrying. A future change that flips the
@@ -631,6 +651,7 @@ class InferenceWorker:
                         )
                     )
                     self._last_frame_ts = frame.timestamp
+                    input_wait_started = time.perf_counter()
                     self._stop.wait(_IDLE_SLEEP_S)
                     continue
 
@@ -722,13 +743,17 @@ class InferenceWorker:
                 # over-segmentation (one piece drawn as several overlapping /
                 # adjacent boxes) into one box per physical piece, so tracking,
                 # the piece count and multi-drop detection all see one piece.
+                # Preserve the calibrated intake edge: adjacent occupied pockets
+                # may have overlapping rectangles across a diagonal divider.
                 # ``pre_merge_bboxes`` keeps the originals for the overlay;
                 # ``merged_multi`` is the boxes that were actually fused (>1
                 # source), drawn distinctly. C2/C3 are left untouched.
                 pre_merge_bboxes = list(bboxes)
                 merged_multi: list = []
                 if self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID:
-                    clusters = mergeNearbyBboxes(bboxes, _C4_BBOX_MERGE_GAP_PX)
+                    clusters = mergeC4BboxesPreservingIntake(
+                        bboxes, _C4_BBOX_MERGE_GAP_PX, self._channel_def
+                    )
                     bboxes = [merged for merged, _members in clusters]
                     merged_multi = [
                         merged for merged, members in clusters if len(members) > 1
@@ -793,9 +818,30 @@ class InferenceWorker:
                     exit_com_in_precise=exit_com_in_precise,
                     pieces=pieces,
                 )
+                result_publish_started = time.perf_counter()
                 self._slot.write(state)
+                if (
+                    self._channel_def.channel_id == _CLASSIFICATION_CHANNEL_ID
+                    and self._profiler is not None
+                ):
+                    self._profiler.observeDuration(
+                        f"perception.{self.source_id}.result_publish_ms",
+                        (time.perf_counter() - result_publish_started) * 1000.0,
+                    )
                 self._latest_raw = (list(bboxes), frame)
                 self._latest_pieces_frame = (pieces, frame)
+                # Complete original inference scene, including foreign detections.
+                camera = getattr(self._capture.capture_thread, "_cap", self._capture.capture_thread)
+                if self._channel_def.channel_id == 4:
+                    self.journey_scenes.publish_c4(
+                        frame, raw_bboxes_full,
+                        [score_by_bbox.get(b, 1.0) for b in raw_bboxes_full],
+                        camera=camera, channel=self._channel_def)
+                else:
+                    self.journey_scenes.publish(
+                        frame, raw_bboxes_full, track_id_by_bbox,
+                        camera=camera, tracker=self._tracker._tracker)
+
                 # Tag ALL in-crop detections (not just on-channel) with zone
                 # provenance so the overlay can show foreign-zone hits and future
                 # consumers can ask which zone a piece is in. Off the hot read
@@ -880,6 +926,7 @@ class InferenceWorker:
                     max(0.0, (time.time() - frame.timestamp) * 1000.0),
                 )
                 _hit(self._profiler, f"perception.{self.source_id}.inferred")
+                input_wait_started = time.perf_counter()
 
             except Exception as exc:
                 self.errors += 1

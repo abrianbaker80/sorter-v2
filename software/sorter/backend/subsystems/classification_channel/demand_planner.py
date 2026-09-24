@@ -155,6 +155,7 @@ class C4DemandPlanner:
     def plan(
         self, now: float, chute: ChuteObservation, *, drain: bool = False,
         deadlines: tuple[RouteDeadline, ...] = (),
+        sweep_empty: bool = False,
     ) -> Decision:
         self._time(now)
         if self._active is not None:
@@ -177,7 +178,7 @@ class C4DemandPlanner:
         intake = self.fifo.pockets[self.fifo.intake_pocket_id]
         if intake.state is not PocketState.EMPTY:
             kind = AdvanceKind.FEED
-        elif drain and loads:
+        elif drain and (loads or sweep_empty):
             kind = AdvanceKind.DRAIN
         else:
             return Decision(AdvanceKind.HOLD, "no demand", chute_move=move)

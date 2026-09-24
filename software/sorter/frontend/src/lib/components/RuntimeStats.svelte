@@ -37,17 +37,19 @@
 	const multi_drop_n = $derived(counts.multi_drop_fail ?? 0);
 	const unknown_n = $derived((counts.unknown ?? 0) + (counts.not_found ?? 0));
 
-	// Classified-and-distributed rate — the goal-line KPI: pieces that
-	// passed Brickognize as Single (not Unknown / Not-Found / Multi-Drop
-	// Reject) AND were physically distributed. Backend publishes this as
-	// `distributed_success.overall_ppm` on the classification_channel
-	// throughput. `overall_ppm` divides by total running_time_s so it
-	// reflects steady-state throughput rather than peak active periods.
-	const goal_rate_ppm = $derived.by(() => {
-		const outcomes = c4.outcomes ?? {};
-		const v = outcomes.distributed_success?.overall_ppm;
-		return typeof v === 'number' && Number.isFinite(v) ? v : 0;
-	});
+	const harvest = $derived((runtime_stats.harvest_throughput ?? {}) as {
+        activation_id?: string | null; bag_ppm?: number | null; distributed_ppm?: number | null;
+        window_s?: number; window_started_at?: number; window_ended_at?: number;
+    });
+    const intakeGate = $derived((state_machines['classification.intake_gate'] ?? {}) as {
+        state_time_s?: Record<string, number>;
+    });
+    const intakeClosedPct = $derived.by(() => {
+        const entries = Object.entries(intakeGate.state_time_s ?? {});
+        const total = entries.reduce((n, [, seconds]) => n + seconds, 0);
+        const closed = entries.filter(([name]) => name.startsWith('closed:')).reduce((n, [, seconds]) => n + seconds, 0);
+        return total > 0 ? closed * 100 / total : null;
+    });
 
 	// Classification success rate (classified vs. total finished classifications).
 	const classification_success_pct = $derived.by(() => {
@@ -62,7 +64,7 @@
 		return (multi_drop_n / pieces_seen) * 100;
 	});
 
-	const c4_active_ppm = $derived(typeof c4.active_ppm === 'number' ? c4.active_ppm : 0);
+	const c4_active_ppm = $derived(typeof c4.active_ppm === 'number' ? c4.active_ppm : null);
 
 	// Rolling 5-minute distributed ppm — all pieces physically distributed in
 	// the last 300 s, regardless of classification outcome.
@@ -220,6 +222,17 @@
 					</div>
 				</div>
 			</div>
+
+            <div class="mt-2 grid grid-cols-2 gap-2 border border-border bg-bg p-2">
+                <div><div class="text-xs text-text-muted">Harvest bags / min</div><div class="text-2xl tabular-nums">{fmtPpm(harvest.bag_ppm)}</div></div>
+                <div><div class="text-xs text-text-muted">Harvest distributions / min</div><div class="text-2xl tabular-nums">{fmtPpm(harvest.distributed_ppm)}</div></div>
+                <div class="col-span-2 text-xs text-text-muted" title={harvest.activation_id ?? ''}>
+                    {#if harvest.activation_id}
+                        Same {Math.round(harvest.window_s ?? 0)}s window, up to 5 min, for the last observed live activation.
+                    {:else}No live Harvest confirmations observed.{/if}
+                </div>
+                <div class="col-span-2 text-xs text-text-muted">C4 intake closed: {fmtPct(intakeClosedPct, 1)} of measured running time (includes required capture and motion).</div>
+            </div>
 
 			<!-- 60 s sparkline of classifications in 10 s buckets -->
 			<div class="mt-2 border border-border bg-bg p-2">

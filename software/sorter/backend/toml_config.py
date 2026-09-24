@@ -179,26 +179,31 @@ def setProfilerConfig(updates: dict[str, Any]) -> dict[str, Any]:
 
 def getGoToAngleConfig() -> dict[str, Any]:
     from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict,
+        GoToAngleConfig, configToDict, withC3ReleaseMargin,
     )
     config = _read_toml()
     section = config.get("feeder_go_to_angle")
     defaults = configToDict(GoToAngleConfig())
     if isinstance(section, dict):
-        return {**defaults, **{k: v for k, v in section.items() if k in defaults}}
+        return {**defaults, **{k: v for k, v in withC3ReleaseMargin(section).items() if k in defaults}}
     return defaults
 
 
 def setGoToAngleConfig(updates: dict[str, Any]) -> dict[str, Any]:
     from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict,
+        GoToAngleConfig, configToDict, withC3ReleaseMargin, validateC3ReleaseMargin,
     )
     defaults = configToDict(GoToAngleConfig())
     valid = {k: v for k, v in updates.items() if k in defaults}
 
+    if "ch3_release_margin_output_deg" in valid:
+        valid["ch3_release_margin_output_deg"] = validateC3ReleaseMargin(
+            valid["ch3_release_margin_output_deg"]
+        )
+
     def updater(config: dict[str, Any]) -> None:
         existing = config.get("feeder_go_to_angle")
-        base = dict(existing) if isinstance(existing, dict) else {}
+        base = withC3ReleaseMargin(existing if isinstance(existing, dict) else {})
         base.update(valid)
         config["feeder_go_to_angle"] = base
 

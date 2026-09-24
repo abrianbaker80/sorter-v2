@@ -8,7 +8,7 @@ from .states import DistributionState
 from irl.config import IRLInterface
 from global_config import GlobalConfig
 from utils.event import knownObjectToEvent
-from defs.known_object import PieceStage
+from defs.known_object import PieceStage, UNVERIFIED_C4_HANDOFF
 from defs.events import PauseCommandData, PauseCommandEvent
 from subsystems.classification_channel.incidents import (
     CLASSIFICATION_TRACK_LOST_INCIDENT_KIND,
@@ -82,10 +82,14 @@ class Sending(BaseState):
                     return DistributionState.IDLE
                 return None
 
+        # An orphaned positioning slot can enter SENDING without a new physical
+        # index. A previously completed drop must never be credited twice.
+        if self.piece is not None and self.piece.stage == PieceStage.distributed:
+            self._committed = True
         elapsed_ms = (now - self.start_time) * 1000
         settle_ms = self._settleMs()
-        self._setOccupancyState("sending.wait_chute_settle")
         if elapsed_ms < settle_ms:
+            self._setOccupancyState("sending.wait_chute_settle")
             return None
 
         # Commit the piece once (stats, event, recorder) — must not repeat
@@ -97,7 +101,8 @@ class Sending(BaseState):
                 try:
                     from project_harvest_runtime import confirm_piece_drop
 
-                    harvest_result = confirm_piece_drop(self.gc, self.piece)
+                    unverified = self.piece.transport_failure_reason == UNVERIFIED_C4_HANDOFF
+                    harvest_result = None if unverified else confirm_piece_drop(self.gc, self.piece)
                 except Exception as exc:
                     self.logger.exception("Sending: Harvest physical confirmation failed")
                     self._pauseForHarvestFailure(str(exc))
@@ -107,8 +112,9 @@ class Sending(BaseState):
                 self.piece.distributed_at = time.time()
                 self.piece.updated_at = time.time()
                 self.event_queue.put(knownObjectToEvent(self.piece))
-                self.gc.run_recorder.recordPiece(self.piece)
-                tracker = getattr(self.gc, 'set_progress_tracker', None)
+                if not unverified:
+                    self.gc.run_recorder.recordPiece(self.piece)
+                tracker = None if unverified else getattr(self.gc, 'set_progress_tracker', None)
                 if tracker is not None:
                     tracker.record(
                         self.piece.part_id,
@@ -122,6 +128,7 @@ class Sending(BaseState):
                     except Exception:
                         pass
                 if isinstance(harvest_result, dict):
+                    self.gc.runtime_stats.observeHarvestConfirmation(harvest_result)
                     if harvest_result.get("project_completed"):
                         self.logger.info(
                             "Sending: Harvest project quantities are complete; pausing sorter"
@@ -179,6 +186,8 @@ class Sending(BaseState):
         self._enqueuePause()
 
     def _shouldReopenGate(self) -> bool:
+        if self.piece is not None and self.piece.c4_marker_exit_boundary is not None:
+            return time.time() - self.start_time >= self._settleMs() / 1000.0
         if bool(getattr(self.shared, "sample_collection_mode", False)):
             return True
 
@@ -299,6 +308,8 @@ class Sending(BaseState):
 
     def cleanup(self) -> None:
         super().cleanup()
+        self._occupancy_state = None
+        self.gc.runtime_stats.endState("distribution.occupancy")
         self.piece = None
         self.start_time = 0.0
         self._committed = False
