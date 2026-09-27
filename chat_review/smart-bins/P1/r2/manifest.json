@@ -1,0 +1,56 @@
+{
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "uncommitted": true
+  },
+  "package": "chat_review/smart-bins/P1/r2",
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P1/r2/P1-r1-to-r2.patch": "287cc5934d665ee02d1ab5a5609b8bccdd5dde32e280d2440c77398863531200",
+    "chat_review/smart-bins/P1/r2/P1.patch": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48",
+    "chat_review/smart-bins/P1/r2/REVIEW.md": "a074e5a726a35425361607d7c5ec04a023f7924a79925dfb9f64337816c6b43d"
+  },
+  "patches": {
+    "P1-r1-to-r2.patch": {
+      "base_package": "chat_review/smart-bins/P1/r1",
+      "base_review_commit": "a42151f26e15774713fd483e2b3a0cf6bf841001",
+      "base_source_test_sha256": {
+        "software/sorter/backend/subsystems/distribution/positioning.py": "c2a372856e1b1ff1203c6f2f66e914b0e6cf55f774e455f7f20dd21370d4c1ef",
+        "software/sorter/backend/tests/test_bin_eligibility.py": "7ae3875ba6932b9530a14370f9eec0c79d856a09d546485585b76df024f30786"
+      },
+      "paths": [
+        "software/sorter/backend/subsystems/distribution/positioning.py",
+        "software/sorter/backend/tests/test_bin_eligibility.py"
+      ],
+      "scope": "r2 correction only"
+    },
+    "P1.patch": {
+      "base_commit": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+      "base_ref": "origin/sorting-flow-candidate",
+      "paths": [
+        "software/sorter/backend/local_state.py",
+        "software/sorter/backend/subsystems/distribution/positioning.py",
+        "software/sorter/backend/tests/test_bin_eligibility.py",
+        "software/sorter/backend/tests/test_local_state.py"
+      ],
+      "scope": "cumulative P1 source/test changes"
+    }
+  },
+  "predecessor_review": {
+    "commit": "a42151f26e15774713fd483e2b3a0cf6bf841001",
+    "package": "chat_review/smart-bins/P1/r1"
+  },
+  "repository": "abrianbaker80/sorter-v2",
+  "schema_version": 1,
+  "slice": "P1 review correction",
+  "source_test_sha256": {
+    "software/sorter/backend/local_state.py": "005c097bc152858c2fa3178936a5190cc3adf02006467a335cf2731276af7534",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_bin_eligibility.py": "64ac552e1912fe64135fbb9b2c19644b976ca92a6f1a3d56a74b93e719162a94",
+    "software/sorter/backend/tests/test_local_state.py": "017cfc954f6dc19024558002e36692248c564e96b4dbc89ce9a9a8319bc12cae"
+  },
+  "unchanged_contract_reference": {
+    "path": "chat_review/smart-bins/P1/r1/P0-CONTRACTS.md",
+    "sha256": "f3f0c395237597a80c39ee48e1a7759bfa0c77bb33102f22651449beaca91c84"
+  }
+}

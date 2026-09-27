@@ -1,0 +1,229 @@
+diff --git a/software/sorter/backend/subsystems/distribution/positioning.py b/software/sorter/backend/subsystems/distribution/positioning.py
+index 6a660be..0799135 100644
+--- a/software/sorter/backend/subsystems/distribution/positioning.py
++++ b/software/sorter/backend/subsystems/distribution/positioning.py
+@@ -1030,14 +1030,15 @@ class Positioning(BaseState):
+         # load by picking uniformly at random among every reachable, non-full bin
+         # holding it — so N bins each take ~1/N of the pieces. Collected across
+         # the whole scan; the pick happens after the loop.
+-        matching_candidates: list[BinAddress] = []
++        matching_candidates: list[BinAddress] = []
++        first_occupied_match: Optional[tuple[BinAddress, "Bin", list[str]]] = None
+         first_unassigned: Optional[tuple[BinAddress, "Bin", list[str]]] = None
+-        # Least-loaded shared-bin candidate, used only when every bin is
+-        # already assigned and multi-category bins are enabled: (num_categories,
+-        # piece_count, address, bin). Picking the bin with the fewest categories
+-        # (tie-break: fewest pieces) spreads new categories evenly.
+-        best_combine: Optional[tuple[int, int, BinAddress, "Bin"]] = None
++        # Occupied unlabeled bins join the shared fallback under the same
++        # policy as labeled bins; their recorded categories remain assigned.
++        # (num_categories, piece_count, address, bin, existing_categories)
++        best_combine: Optional[tuple[int, int, BinAddress, "Bin", list[str]]] = None
+         no_fit_matching: Optional[int] = None
++        no_fit_occupied_match: Optional[int] = None
+         no_fit_unassigned: Optional[int] = None
+         no_fit_combine: Optional[int] = None
+         has_usable_layers = False
+@@ -1089,24 +1090,21 @@ class Positioning(BaseState):
+                     # All recorded quantities must be accounted for, and all
+                     # recorded categories must be known before reuse.
+                     recorded_categories = set(recorded)
+-                    if (
++                    if (
+                         count < 0
+                         or sum(recorded.values()) != count
+                         or any(qty <= 0 or not isinstance(cat, str) or not cat for cat, qty in recorded.items())
+-                    ):
++                    ):
+                         skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=uncertain_contents")
+-                        continue
+-                    if b.category_ids:
+-                        bins_with_cats += 1
++                        continue
++                    if MISC_CATEGORY in recorded_categories:
++                        skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=recorded_misc")
++                        continue
++                    if b.category_ids:
++                        bins_with_cats += 1
+                         if not recorded_categories.issubset(set(b.category_ids)):
+                             skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=incompatible_contents")
+                             continue
+-                    elif recorded_categories and (
+-                        category_id not in recorded_categories
+-                        or (len(recorded_categories) > 1 and not can_share())
+-                    ):
+-                        skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=incompatible_contents")
+-                        continue
+ 
+                     fits = not self._exceedsLayerMaxDimension(piece, layer_idx)
+                     if category_id != MISC_CATEGORY and category_id in b.category_ids:
+@@ -1119,21 +1117,35 @@ class Positioning(BaseState):
+                         if category_id == MISC_CATEGORY or MISC_CATEGORY in b.category_ids or not can_share():
+                             continue
+                         if fits:
+-                            candidate = (len(b.category_ids), count, address, b)
++                            candidate = (len(b.category_ids), count, address, b, list(b.category_ids))
+                             if best_combine is None or candidate[:2] < best_combine[:2]:
+                                 best_combine = candidate
+                         elif no_fit_combine is None:
+                             no_fit_combine = layer_idx
+                         continue
+-                    if (
+-                        category_id != MISC_CATEGORY
+-                        and not b.category_ids
+-                    ):
+-                        if fits and first_unassigned is None:
+-                            categories = sorted(recorded_categories) if recorded_categories else []
+-                            first_unassigned = (address, b, categories + ([category_id] if category_id not in categories else []))
+-                        elif not fits and no_fit_unassigned is None:
+-                            no_fit_unassigned = layer_idx
++                    if category_id == MISC_CATEGORY:
++                        continue
++                    if recorded_categories:
++                        categories = sorted(recorded_categories)
++                        if category_id in recorded_categories:
++                            if len(recorded_categories) > 1 and not can_share():
++                                continue
++                            if fits and first_occupied_match is None:
++                                first_occupied_match = (address, b, categories)
++                            elif not fits and no_fit_occupied_match is None:
++                                no_fit_occupied_match = layer_idx
++                        elif can_share():
++                            if fits:
++                                candidate = (len(categories), count, address, b, categories)
++                                if best_combine is None or candidate[:2] < best_combine[:2]:
++                                    best_combine = candidate
++                            elif no_fit_combine is None:
++                                no_fit_combine = layer_idx
++                        continue
++                    if fits and first_unassigned is None:
++                        first_unassigned = (address, b, [category_id])
++                    elif not fits and no_fit_unassigned is None:
++                        no_fit_unassigned = layer_idx
+ 
+         if not has_usable_layers:
+             self.logger.warning(
+@@ -1154,14 +1166,26 @@ class Positioning(BaseState):
+         # Category is assigned to one or more bins: route to one of them. With a
+         # single bin this is just that bin; with several it is a uniform random
+         # choice, so a category spanning N bins fills them at an even ~1/N rate.
+-        if matching_candidates:
+-            return random.choice(matching_candidates), False
+-
+-        # MISC must never claim or use a real bin. The discard bucket below
++        if matching_candidates:
++            return random.choice(matching_candidates), False
++
++        # MISC must never claim or use a real bin. The discard bucket below
+         # the chute (rendered in the UI as the virtual Discard Bin) is what
+-        # catches misc passthrough; treating MISC as a physical bin category
+-        # silently swaps that behavior.
+-        if first_unassigned is not None and category_id != MISC_CATEGORY:
++        # catches misc passthrough; treating MISC as a physical bin category
++        # silently swaps that behavior.
++        if first_occupied_match is not None and category_id != MISC_CATEGORY:
++            address, b, categories = first_occupied_match
++            new_assignments = extractCategories(self.layout)
++            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
++            setBinCategories(new_assignments)
++            b.category_ids = categories
++            self.logger.info(
++                f"Positioning: restored category {category_id} for occupied bin at "
++                f"layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
++            )
++            return address, True
++
++        if first_unassigned is not None and category_id != MISC_CATEGORY:
+             address, b, categories = first_unassigned
+             new_assignments = extractCategories(self.layout)
+             new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
+@@ -1181,8 +1205,8 @@ class Positioning(BaseState):
+             category_id != MISC_CATEGORY
+             and best_combine is not None
+         ):
+-            _, _, address, b = best_combine
+-            categories = [*b.category_ids, category_id]
++            _, _, address, b, existing_categories = best_combine
++            categories = [*existing_categories, category_id]
+             new_assignments = extractCategories(self.layout)
+             new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
+             setBinCategories(new_assignments)
+@@ -1196,7 +1220,7 @@ class Positioning(BaseState):
+ 
+         if category_id != MISC_CATEGORY:
+             self._no_fit_layer_index = next(
+-                (layer for layer in (no_fit_matching, no_fit_unassigned, no_fit_combine) if layer is not None),
++                (layer for layer in (no_fit_matching, no_fit_occupied_match, no_fit_unassigned, no_fit_combine) if layer is not None),
+                 None,
+             )
+ 
+diff --git a/software/sorter/backend/tests/test_bin_eligibility.py b/software/sorter/backend/tests/test_bin_eligibility.py
+index 46b16c8..29983bc 100644
+--- a/software/sorter/backend/tests/test_bin_eligibility.py
++++ b/software/sorter/backend/tests/test_bin_eligibility.py
+@@ -95,6 +95,65 @@ def test_unlabeled_occupied_requires_complete_compatible_evidence(selection, mon
+     assert len(saved) == int(allowed)
+ 
+ 
++@pytest.mark.parametrize("pool,normal_sharing,allowed", [
++    (False, False, False),
++    (False, True, True),
++    (True, False, True),
++])
++def test_unlabeled_other_category_uses_existing_sharing_policy(
++    selection, monkeypatch, pool, normal_sharing, allowed
++):
++    state, saved = selection
++    b = _bin(pool=pool)
++    state.layout.layers = [_layer(b)]
++    evidence = {(0, 0, 0): (1, {"B": 1})}
++    before = {(0, 0, 0): (1, {"B": 1})}
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: evidence)
++    monkeypatch.setattr(
++        "subsystems.distribution.positioning._allowMultiCategoryBins",
++        lambda: normal_sharing,
++    )
++
++    expected = (BinAddress(0, 0, 0), True) if allowed else (None, False)
++    assert _select(state, pool=pool) == expected
++    assert b.category_ids == (["B", "A"] if allowed else [])
++    assert len(saved) == int(allowed)
++    if allowed:
++        assert saved[0][0][0][0] == ["B", "A"]
++    assert evidence == before
++
++
++def test_genuinely_empty_bin_precedes_unlabeled_occupied_sharing(selection, monkeypatch):
++    state, saved = selection
++    occupied, empty = _bin(), _bin()
++    state.layout.layers = [_layer(occupied, empty)]
++    evidence = {(0, 0, 0): (1, {"B": 1})}
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: evidence)
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: True)
++
++    assert _select(state) == (BinAddress(0, 0, 1), True)
++    assert occupied.category_ids == []
++    assert empty.category_ids == ["A"]
++    assert saved == [[[[[], ["A"]]]]]
++    assert evidence == {(0, 0, 0): (1, {"B": 1})}
++
++
++@pytest.mark.parametrize("pool", [False, True])
++def test_recorded_misc_never_restores_physical_assignment(selection, monkeypatch, pool):
++    state, saved = selection
++    b = _bin(pool=pool)
++    state.layout.layers = [_layer(b, limit=3)]
++    evidence = {(0, 0, 0): (2, {"A": 1, MISC_CATEGORY: 1})}
++    before = {(0, 0, 0): (2, {"A": 1, MISC_CATEGORY: 1})}
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: evidence)
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: True)
++
++    assert _select(state, pool=pool) == (None, False)
++    assert b.category_ids == []
++    assert saved == []
++    assert evidence == before
++
++
+ def test_no_fit_then_later_fit_and_no_fit_metadata_without_assignment(selection):
+     state, saved = selection
+     state.layout.layers = [_layer(_bin(), dimension=40), _layer(_bin(), dimension=80)]
