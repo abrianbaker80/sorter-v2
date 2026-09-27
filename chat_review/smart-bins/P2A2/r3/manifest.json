@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2A2 explicit inactive legacy backfill r3",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "uncommitted": true
+  },
+  "ledger_schema": {
+    "core_version": 2,
+    "migration_extension_version": 2,
+    "rejects_extension_version": 1
+  },
+  "predecessor_review": {
+    "commit": "4089e454858a60f312b1826526884bf7c5c65311",
+    "package": "chat_review/smart-bins/P2A2/r2"
+  },
+  "reconstruction_order": [
+    {
+      "commit": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+      "role": "original implementation base"
+    },
+    {
+      "review_commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch",
+      "sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48"
+    },
+    {
+      "review_commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch",
+      "sha256": "c5fa8560d32b35ddcff00c667d9155ef863c64dac83d932f5e630859fde544cf"
+    },
+    {
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch",
+      "base_tree": "0038a45ec140ae34ae05feda254480bd01ec1d45",
+      "result_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899",
+      "scope": "complete P2A2 slice from accepted P1 r2 plus P2A1 r2",
+      "paths": [
+        "software/sorter/backend/smart_bins_migration.py",
+        "software/sorter/backend/tests/test_smart_bins_migration.py"
+      ]
+    }
+  ],
+  "correction_patch": {
+    "patch": "P2A2-r2-to-r3.patch",
+    "base_review_commit": "4089e454858a60f312b1826526884bf7c5c65311",
+    "base_tree": "41338bf1b40d19f1d25c44e85f68122ab04e228c",
+    "result_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899",
+    "paths": [
+      "software/sorter/backend/smart_bins_migration.py",
+      "software/sorter/backend/tests/test_smart_bins_migration.py"
+    ]
+  },
+  "predecessor_source_test_sha256": {
+    "software/sorter/backend/local_state.py": "005c097bc152858c2fa3178936a5190cc3adf02006467a335cf2731276af7534",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_bin_eligibility.py": "64ac552e1912fe64135fbb9b2c19644b976ca92a6f1a3d56a74b93e719162a94",
+    "software/sorter/backend/tests/test_local_state.py": "f098ddfabb5f6051307c5b40d24166ebae3059430a1e9d67394293e93ef047ba",
+    "software/sorter/backend/piece_records.py": "e8e4c6f7540deb5985425f895dff582d6ca392c37ef7bd9590b8f4ddae467c28",
+    "software/sorter/backend/smart_bins_storage.py": "923b07906a19c9e730cb9511aaa51b9a774caaff2fb6b299a2bd4ccb07514373",
+    "software/sorter/backend/tests/test_smart_bins_storage.py": "95a7e8ad06022b8bd870a6c9d0415c8ef9434ca4bf3d0d688e9f8fc792694624"
+  },
+  "p2a2_r2_source_test_sha256": {
+    "software/sorter/backend/smart_bins_migration.py": "2bf24040d5fc790ead2f8568b4eea2f8e9db56d83c26ae302c211c983a27cf97",
+    "software/sorter/backend/tests/test_smart_bins_migration.py": "b9753afd473a190ac9308e199c36678efa667b75a99123d64df2acbc1da951ce"
+  },
+  "p2a2_r3_source_test_sha256": {
+    "software/sorter/backend/smart_bins_migration.py": "b6da623a36d9cb0a9391003f92dd521e594398b678a2ddb87b332eab049d9cb4",
+    "software/sorter/backend/tests/test_smart_bins_migration.py": "6b15d5ad5965d131b66e2b2d401acf6639bf7fd771c4a1dacfc9b62c89df32f6"
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2A2/r3/REVIEW.md": "2db2e8c63418ab79dd3181fd5708a1629b4fe9f283239c0b705bd7613309a37e",
+    "chat_review/smart-bins/P2A2/r3/P2A2.patch": "66c10674daf771cd6150cb00875f0adbc8528d03bd9e06e651e3bb906d437ca9",
+    "chat_review/smart-bins/P2A2/r3/P2A2-r2-to-r3.patch": "ac27101d6c38d5d30a45c95e64627db8daf825b66094c135711186f3164856f4"
+  }
+}

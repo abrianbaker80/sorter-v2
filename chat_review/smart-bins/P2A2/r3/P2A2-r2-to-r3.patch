@@ -1,0 +1,171 @@
+diff --git a/software/sorter/backend/smart_bins_migration.py b/software/sorter/backend/smart_bins_migration.py
+index ed122f8a026e1e86ab64ced2ee31d25ccfb6c627..77d4c1f39c485cbed1f385abdadf0e175b65914c 100644
+--- a/software/sorter/backend/smart_bins_migration.py
++++ b/software/sorter/backend/smart_bins_migration.py
+@@ -477,6 +477,7 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+             problem(anchor, "imported_aggregate_lineage_uncertain", anchor["session_id"])
+         linked_counts: Counter[tuple[Any, ...]] = Counter()
+         candidate_contributions: list[dict[str, Any]] = []
++        checked_native_duplicates: set[str] = set()
+         for (machine_id, uuid), occurrences in sorted(events_by_uuid.items()):
+             own = [(ref, event) for ref, event in occurrences if ref == anchor["source_ref"]]
+             if not own:
+@@ -494,6 +495,7 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+                 continue
+             if (machine_id, uuid) in native:
+                 problem(anchor, "native_delivery_duplicate", uuid)
++                checked_native_duplicates.add(uuid)
+                 continue
+             if not any(_history_matches(row, history.get(uuid),
+                                         sessions[row["session_id"]]) for _, row in own):
+@@ -523,16 +525,16 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+             problem(anchor, "negative_total_residual", {"recorded": total,
+                     "linked": sum(linked_counts.values())})
+         if total > sum(linked_counts.values()):
+-            own_uuids = {event["piece_uuid"] for event in anchor["events"]}
+             for delivery in native_rows:
+                 if (delivery["machine_id"] != anchor["machine_id"]
+-                        or delivery["piece_uuid"] in own_uuids):
++                        or delivery["piece_uuid"] in checked_native_duplicates):
+                     continue
+-                prior_events = [event for _, event in events_by_uuid.get(
++                prior_occurrences = [(ref, event) for ref, event in events_by_uuid.get(
+                     (anchor["machine_id"], delivery["piece_uuid"]), [])
+                     if _coords(event) == tuple(anchor["coordinates"])
+                     and event["bin_epoch"] == anchor["epoch"]
+                     and event["distributed_at"] <= anchor["anchor_time"]]
++                prior_events = [event for _, event in prior_occurrences]
+                 same_destination = (
+                     delivery["actual_kind"] == "BIN"
+                     and (delivery["layer_index"], delivery["section_index"],
+@@ -540,10 +542,13 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+                     and delivery["delivered_at"] <= anchor["anchor_time"]
+                     and not _clear_between(source, sessions, anchor, delivery["delivered_at"]))
+                 if prior_events or same_destination:
++                    basis = ("unverified_anchor_event"
++                             if any(ref == anchor["source_ref"] for ref, _ in prior_occurrences)
++                             else "unlinked_event" if prior_events else "same_bin_before_anchor")
+                     problem(anchor, "potential_native_balance_overlap",
+                             {"native_delivery_id": delivery["id"],
+                              "legacy_event_ids": sorted(row["id"] for row in prior_events),
+-                             "basis": "unlinked_event" if prior_events else "same_bin_before_anchor"})
++                             "basis": basis})
+         hard_blockers = {"conflicting_repeated_snapshot", "missing_clear_evidence",
+                          "unknown_or_negative_quantity", "unknown_or_negative_group_quantity",
+                          "count_group_conflict", "unknown_machine_identity",
+diff --git a/software/sorter/backend/tests/test_smart_bins_migration.py b/software/sorter/backend/tests/test_smart_bins_migration.py
+index b75b732c915a8f30371af1a95d2548a57a84f00b..839c379b6869ad17478e5402bbcc36728c3d32a0 100644
+--- a/software/sorter/backend/tests/test_smart_bins_migration.py
++++ b/software/sorter/backend/tests/test_smart_bins_migration.py
+@@ -210,6 +210,91 @@ def test_imported_synthetic_identity_stays_opening_balance(db):
+     assert contents["breakdown"][0]["identity"]["part_namespace"] is None
+ 
+ 
++def import_one_with_supplied_uuid():
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    imported = local_state.import_bin_contents_snapshot({"bins": [{
++        "layer_index": 0, "section_index": 0, "bin_index": 0,
++        "piece_count": 1, "unique_item_count": 1,
++        "items": [{"key": "3001|2|A|classified", "part_id": "3001", "color_id": "2",
++                   "category_id": "A", "classification_status": "classified", "count": 1}],
++        "recent_pieces": [{"uuid": "one", "part_id": "3001", "color_id": "2",
++                           "category_id": "A", "classification_status": "classified"}],
++    }]})
++    assert imported["session_id"] == session["id"] and imported["imported_bins"] == 1
++    return session
++
++
++def test_imported_event_native_overlap_withholds_opening_balance(db):
++    session = import_one_with_supplied_uuid()
++    native_delivery(session, uuid="one")
++    legacy_tables = ("sorting_sessions", "bin_state_current", "bin_item_aggregates",
++                     "piece_events", "bin_events", "piece_records")
++    with connect(db) as conn:
++        before = {table: conn.execute(f"SELECT * FROM {table}").fetchall()
++                  for table in legacy_tables}
++        native_before = conn.execute(
++            "SELECT * FROM smart_bin_deliveries WHERE piece_uuid='one'"
++        ).fetchall()
++    plan = migration.plan_legacy_backfill(db)
++    assert len(plan["anchors"]) == 1 and plan["anchors"][0]["blocked"]
++    assert not plan["contributions"] and not plan["balances"]
++    kinds = {issue["kind"] for issue in plan["discrepancies"]}
++    assert "import_generated_or_unverified_piece" in kinds
++    assert "potential_native_balance_overlap" in kinds
++    install_and_apply(db, plan)
++    with connect(db) as conn:
++        assert {table: conn.execute(f"SELECT * FROM {table}").fetchall()
++                for table in legacy_tables} == before
++        assert conn.execute("SELECT * FROM smart_bin_deliveries WHERE piece_uuid='one'").fetchall() == native_before
++    historical = migration.read_recorded_contents(plan["anchors"][0]["cycle_id"], db)
++    assert historical["total"] == 0 and historical["blocked"]
++    assert any(issue["kind"] == "potential_native_balance_overlap"
++               for issue in historical["discrepancies"])
++    assert migration.read_recorded_contents("native-cycle", db)["total"] == 1
++
++
++def test_imported_supplied_uuid_without_overlap_retains_unknown_balance(db):
++    import_one_with_supplied_uuid()
++    plan = migration.plan_legacy_backfill(db)
++    assert not plan["contributions"]
++    assert len(plan["balances"]) == 1 and plan["balances"][0]["quantity"] == 1
++    assert plan["balances"][0]["coverage"] == "historical_unknown"
++    assert any(issue["kind"] == "import_generated_or_unverified_piece"
++               for issue in plan["discrepancies"])
++    assert not any(issue["kind"] == "potential_native_balance_overlap"
++                   for issue in plan["discrepancies"])
++    install_and_apply(db, plan)
++    contents = migration.read_recorded_contents(plan["anchors"][0]["cycle_id"], db)
++    assert contents["total"] == 1 and contents["blocked"]
++    assert contents["breakdown"][0]["opening_balance"] == 1
++    assert contents["coverage"] == "historical_unknown"
++
++
++def test_pre_native_import_plan_rejected_after_overlap_appears(db):
++    session = import_one_with_supplied_uuid()
++    unsafe_plan = migration.plan_legacy_backfill(db)
++    assert len(unsafe_plan["balances"]) == 1
++    migration.initialize_migration_schema()
++    native_delivery(session, uuid="one")
++    with pytest.raises(migration.MigrationConflict, match="stale or modified"):
++        migration.apply_legacy_backfill(unsafe_plan)
++    with connect(db) as conn:
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_migration_imports").fetchone()[0] == 0
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_opening_balances").fetchone()[0] == 0
++
++
++def test_pre_native_import_plan_cannot_replay_after_overlap_appears(db):
++    session = import_one_with_supplied_uuid()
++    old_plan = migration.plan_legacy_backfill(db)
++    install_and_apply(db, old_plan)
++    native_delivery(session, uuid="one")
++    with pytest.raises(migration.MigrationConflict, match="stale or modified"):
++        migration.apply_legacy_backfill(old_plan)
++    with connect(db) as conn:
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_migration_imports").fetchone()[0] == 1
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_opening_balances").fetchone()[0] == 1
++
++
+ def test_aggregate_only_unknown_group_is_explicit(db):
+     local_state.start_new_sorting_session(reason="profile_activated")
+     local_state.import_bin_contents_snapshot({"bins": [{"layer_index": 0, "section_index": 0,
+@@ -394,6 +479,19 @@ def test_unlinked_residual_with_later_nonoverlapping_native_delivery(db):
+     assert not contents["blocked"]
+ 
+ 
++def test_conflicting_own_event_still_reports_native_overlap(db):
++    first = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("same", first)
++    second = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("same", second, part="3002")
++    native_delivery(second, uuid="same")
++    plan = migration.plan_legacy_backfill(db)
++    kinds = {issue["kind"] for issue in plan["discrepancies"]}
++    assert "conflicting_piece_identity" in kinds
++    assert "potential_native_balance_overlap" in kinds
++    assert not plan["contributions"] and not plan["balances"]
++
++
+ def test_proven_clear_separates_earlier_native_from_current_balance(db):
+     session = local_state.start_new_sorting_session(reason="profile_activated")
+     piece("before-clear", session)
