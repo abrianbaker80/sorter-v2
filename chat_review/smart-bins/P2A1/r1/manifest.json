@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2A1 inactive storage and transaction foundations",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "uncommitted": true
+  },
+  "predecessor_review": {
+    "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+    "package": "chat_review/smart-bins/P1/r2",
+    "cumulative_patch_sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48"
+  },
+  "patch": {
+    "path": "chat_review/smart-bins/P2A1/r1/P2A1.patch",
+    "scope": "P2A1 slice only",
+    "base": "accepted P1 r2 applied to c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "changed_paths": [
+      "software/sorter/backend/piece_records.py",
+      "software/sorter/backend/smart_bins_storage.py",
+      "software/sorter/backend/tests/test_smart_bins_storage.py"
+    ]
+  },
+  "accepted_p1_source_test_sha256": {
+    "software/sorter/backend/local_state.py": "005c097bc152858c2fa3178936a5190cc3adf02006467a335cf2731276af7534",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_bin_eligibility.py": "64ac552e1912fe64135fbb9b2c19644b976ca92a6f1a3d56a74b93e719162a94",
+    "software/sorter/backend/tests/test_local_state.py": "017cfc954f6dc19024558002e36692248c564e96b4dbc89ce9a9a8319bc12cae"
+  },
+  "p2a1_source_test_sha256": {
+    "software/sorter/backend/piece_records.py": "e8e4c6f7540deb5985425f895dff582d6ca392c37ef7bd9590b8f4ddae467c28",
+    "software/sorter/backend/smart_bins_storage.py": "a1db0a420bca9ce17c291d3334a372aeb7185184529c63709ed189fd5bd1ea5f",
+    "software/sorter/backend/tests/test_smart_bins_storage.py": "20005a4b60f4cfe7147d12e48903438ff3caf3094f0efe7f404b97dc7b562720"
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2A1/r1/REVIEW.md": "863d0649d7d1da9e8d0afa5beed9c231746e796e6746001b29332edf1b412b12",
+    "chat_review/smart-bins/P2A1/r1/P2A1.patch": "033d8d5fd3b9bcb3a7629b8f33fdc2379c47ac04e31830fd2ed59c308b6f5ccc"
+  }
+}
