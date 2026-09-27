@@ -1,0 +1,374 @@
+diff --git a/software/sorter/backend/smart_bins_service.py b/software/sorter/backend/smart_bins_service.py
+index 1cd7b6f2466cb69a8acebb7f00439a3f5ee86fec..f1da0beb5cadea5d7e9fc920e24c3192721786d5 100644
+--- a/software/sorter/backend/smart_bins_service.py
++++ b/software/sorter/backend/smart_bins_service.py
+@@ -362,14 +362,36 @@ def _candidate(conn: sqlite3.Connection, request: ReservationRequest,
+     if any(row[1] != qualification.routing_revision or row[2] != "category"
+            or row[3] == misc or row[4] != "known" for row in labels):
+         return None
+-    held = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM smart_bin_reservations "
+-                        "WHERE machine_id=? AND intended_cycle_id=? AND state IN (?,?,?,?)",
+-                        (qualification.machine_id, slot.cycle_id, *HELD_STATES)).fetchone()[0]
++    # A held destination is occupied for compatibility as well as capacity.
++    # Policy/routing changes have no implicit cross-policy group mapping; an
++    # old hold must be explicitly reconciled before this cycle can be reused.
++    held_rows = conn.execute(
++        "SELECT r.quantity,r.group_key_id,r.policy_revision_id,r.routing_revision,"
++        "r.intended_kind,r.intended_slot_id,g.kind,g.namespace,g.part_id,g.provenance "
++        "FROM smart_bin_reservations r LEFT JOIN smart_bin_group_keys g ON g.id=r.group_key_id "
++        "WHERE r.machine_id=? AND r.intended_cycle_id=? AND r.state IN (?,?,?,?)",
++        (qualification.machine_id, slot.cycle_id, *HELD_STATES)).fetchall()
++    incoming_namespace = conn.execute("SELECT namespace FROM smart_bin_group_keys WHERE id=?",
++                                      (request.group_key_id,)).fetchone()[0]
++    held = 0
++    compatible_occupancy = dict(recorded)
++    for row in held_rows:
++        (quantity, group_id, policy_id, routing_revision, intended_kind,
++         intended_slot_id, group_kind, group_namespace, part_id, provenance) = row
++        if (policy_id != qualification.policy_revision_id
++            or routing_revision != qualification.routing_revision
++            or intended_kind != "BIN" or intended_slot_id != slot.slot_id
++            or group_kind != "category" or provenance != "known"
++            or not group_namespace or group_namespace != incoming_namespace
++            or part_id == misc):
++            return None
++        held += quantity
++        compatible_occupancy[group_id] = compatible_occupancy.get(group_id, 0) + quantity
+     used = projection["total"] + held
+     if used < 0 or (slot.count_limit is not None and used + request.quantity > slot.count_limit):
+         return None
+     label_ids = tuple(row[0] for row in labels)
+-    category = classify_bin(request.group_key_id, label_ids, projection["total"], recorded,
++    category = classify_bin(request.group_key_id, label_ids, used, compatible_occupancy,
+                             allow_sharing=slot.not_in_inventory or qualification.allow_normal_sharing,
+                             misc=misc)
+     if category.kind not in ("assigned_match", "recorded_match", "empty", "shared"):
+@@ -386,6 +408,9 @@ def _select(conn: sqlite3.Connection, request: ReservationRequest,
+     failure = _validate_context(conn, request, qualification)
+     if failure is not None:
+         return failure
++    conflict = _journey_conflict(conn, request, qualification.machine_id)
++    if conflict is not None:
++        return _refuse(conflict)
+     group = conn.execute("SELECT part_id FROM smart_bin_group_keys WHERE id=?",
+                          (request.group_key_id,)).fetchone()
+     if group[0] == "misc" or request.too_big:
+@@ -407,8 +432,9 @@ def preview(request: ReservationRequest, qualification: RoutingQualification) ->
+     with critical_transaction() as conn:
+         _check_service_schema(conn)
+         result = _select(conn, request, qualification)
+-        result = {**result, "state_revision": qualification.machine_state_revision,
+-                  "qualification_hash": qualification_digest(qualification)}
++        result = {**result, "qualification_hash": qualification_digest(qualification),
++                  "qualification_state_revision": qualification.machine_state_revision}
++        result.setdefault("state_revision", qualification.machine_state_revision)
+         conn.commit()
+         return result
+ 
+@@ -466,9 +492,6 @@ def reserve(request: ReservationRequest, qualification: RoutingQualification, *,
+             return _rollback_refusal(conn, "STALE_REVISION", state_revision=machine[0])
+         if qualification_digest(qualification) != expected_qualification_hash:
+             return _rollback_refusal(conn, "STALE_CONFIGURATION")
+-        conflict = _journey_conflict(conn, request, qualification.machine_id)
+-        if conflict is not None:
+-            return _rollback_refusal(conn, conflict)
+         selected = _select(conn, request, qualification)
+         if selected["code"] != "OK":
+             conn.rollback()
+diff --git a/software/sorter/backend/tests/test_smart_bins_reservations.py b/software/sorter/backend/tests/test_smart_bins_reservations.py
+index 7b91dfa2cff9643813623b2f2f5a2f7162ef3e97..8c66e331dec92d328a9a50e2860b97eb842a018e 100644
+--- a/software/sorter/backend/tests/test_smart_bins_reservations.py
++++ b/software/sorter/backend/tests/test_smart_bins_reservations.py
+@@ -71,14 +71,13 @@ def prepared(tmp_path, monkeypatch):
+             conn.execute("INSERT INTO smart_bin_cycles "
+                          "(id,machine_id,slot_id,opened_at,provenance) "
+                          "VALUES(?,'m',?,1,'qualified_synthetic')", (f"c{index}", f"s{index}"))
++    configure()
+     yield path
+     local_state.close_local_state_keeper()
+ 
+ 
+-def qualification(*, limit=2, two=False, sharing=False, pool=False,
+-                  dimension=None, external="reach-1"):
+-    # The service checks slot geometry/pool/limits against existing local-state
+-    # configuration, rather than accepting a free-standing second config copy.
++def configure(*, limit=2, pool=False, dimension=None):
++    """Explicit test configuration mutation; qualification itself only reads."""
+     layout = {"layers": [{"sections": [["medium", "medium"]], "enabled": True,
+                           "section_enabled": [True], "max_pieces_per_bin": limit,
+                           "max_dimension_mm": dimension}]}
+@@ -88,13 +87,18 @@ def qualification(*, limit=2, two=False, sharing=False, pool=False,
+             conn.execute("INSERT INTO state_entries(key,json_value,updated_at) VALUES(?,?,1) "
+                          "ON CONFLICT(key) DO UPDATE SET json_value=excluded.json_value",
+                          (key, json.dumps(value, sort_keys=True)))
++
++
++def qualification(*, limit=2, two=False, sharing=False, pool=False,
++                  dimension=None, external="reach-1", policy="p", artifact="artifact"):
++    # The service checks these values against existing local-state configuration.
+     slots = tuple(service.SlotQualification(
+         slot_id=f"s{index}", cycle_id=f"c{index}", layout_revision="layout",
+         enabled=True, reachable=True, not_in_inventory=pool,
+         count_limit=limit, layer_max_dimension_mm=dimension,
+         cycle_evidence_ref=f"qualified-c{index}") for index in range(2 if two else 1))
+     return service.RoutingQualification(
+-        machine_id="m", policy_revision_id="p", policy_artifact_hash="artifact",
++        machine_id="m", policy_revision_id=policy, policy_artifact_hash=artifact,
+         routing_revision=0, machine_state_revision=_machine_revision(),
+         config_digest=service.configuration_digest(), external_revision=external,
+         allow_normal_sharing=sharing, slots=slots)
+@@ -161,6 +165,7 @@ def test_service_extension_rejects_old_version_and_facts_are_immutable(prepared)
+ 
+ 
+ def test_exact_replay_after_reconnect_and_conflicts(prepared):
++    configure(limit=1)
+     q = qualification(limit=1)
+     req = request()
+     preview = service.preview(req, q)
+@@ -182,6 +187,59 @@ def test_exact_replay_after_reconnect_and_conflicts(prepared):
+     assert service.lookup_reservation("m", first["reservation_id"])["piece_uuid"] == "one"
+ 
+ 
++def test_r2_preview_and_new_reserve_agree_for_in_flight_piece(prepared):
++    req = request("held")
++    first = claim(req, qualification(), "first")
++    fresh = qualification()
++    before = (counts(prepared), _machine_revision())
++    assert service.preview(req, fresh)["code"] == "IN_FLIGHT"
++    assert service.reserve(req, fresh, expected_state_revision=fresh.machine_state_revision,
++                           expected_qualification_hash=service.qualification_digest(fresh),
++                           request_key="new-key")["code"] == "IN_FLIGHT"
++    # Repeating the committed key still returns the original result, even with
++    # its stale preview revision and an in-flight journey.
++    original = replace(fresh, machine_state_revision=0)
++    assert service.reserve(req, original, expected_state_revision=0,
++                           expected_qualification_hash=service.qualification_digest(original),
++                           request_key="first") == first
++    assert (counts(prepared), _machine_revision()) == before
++
++
++def test_r2_preview_and_new_reserve_agree_for_cancelled_attempts(prepared):
++    first = claim(request("piece"), qualification(), "first")
++    proof = service.NonDispatchEvidence("owner", "episode", 0, 1, True, True, "no-dispatch")
++    assert service.cancel_reserved("m", first["reservation_id"],
++                                   expected_reservation_revision=0,
++                                   request_key="cancel", evidence=proof)["code"] == "OK"
++    fresh = qualification()
++    before = (counts(prepared), _machine_revision())
++    invalid = (
++        request("piece"),
++        request("piece", attempt="second"),
++        request("piece", attempt="second", predecessor="wrong"),
++    )
++    for index, req in enumerate(invalid):
++        assert service.preview(req, fresh)["code"] == "ROUTE_ATTEMPT_CONFLICT"
++        assert service.reserve(req, fresh,
++                               expected_state_revision=fresh.machine_state_revision,
++                               expected_qualification_hash=service.qualification_digest(fresh),
++                               request_key=f"bad-{index}")["code"] == "ROUTE_ATTEMPT_CONFLICT"
++    assert (counts(prepared), _machine_revision()) == before
++    linked = request("piece", attempt="second", predecessor=first["reservation_id"])
++    assert service.preview(linked, fresh)["code"] == "OK"
++    assert claim(linked, fresh, "linked")["code"] == "OK"
++
++
++def test_r2_preview_returns_authoritative_revision_on_stale_qualification(prepared):
++    stale = qualification()
++    with connect(prepared) as conn:
++        conn.execute("UPDATE smart_bin_machines SET state_revision=1 WHERE machine_id='m'")
++    preview = service.preview(request(), stale)
++    assert preview["code"] == "STALE_REVISION"
++    assert preview["state_revision"] == 1
++    assert preview["qualification_state_revision"] == 0
++
++
+ def test_exact_boundary_quantity_unlimited_and_positive_integer(prepared):
+     q = qualification(limit=2)
+     assert claim(request(quantity=2), q, "full")["code"] == "OK"
+@@ -192,11 +250,13 @@ def test_exact_boundary_quantity_unlimited_and_positive_integer(prepared):
+         service.preview(request("bad", quantity=True), qualification())
+     with connect(prepared) as conn:
+         conn.execute("UPDATE smart_bin_reservations SET state='CANCELLED' WHERE piece_uuid='one'")
++    configure(limit=None)
+     assert claim(request("other", quantity=30), qualification(limit=None), "unlimited")["code"] == "OK"
+ 
+ 
+ @pytest.mark.parametrize("state", service.HELD_STATES)
+ def test_each_held_state_consumes_capacity(prepared, state):
++    configure(limit=1)
+     with connect(prepared) as conn:
+         _direct_reservation(conn, "old", "old", state)
+     assert service.preview(request("new"), qualification(limit=1))["code"] == "NO_ELIGIBLE_BIN"
+@@ -204,6 +264,7 @@ def test_each_held_state_consumes_capacity(prepared, state):
+ 
+ @pytest.mark.parametrize("state", ("COMPLETED", "CANCELLED"))
+ def test_terminal_state_does_not_hold_capacity(prepared, state):
++    configure(limit=1)
+     with connect(prepared) as conn:
+         _direct_reservation(conn, "old", "old", state)
+     assert service.preview(request("new"), qualification(limit=1))["code"] == "OK"
+@@ -236,20 +297,119 @@ def test_recorded_native_historical_and_opening_balance_count_once(prepared):
+     projection = migration.read_recorded_contents("c0", prepared)
+     assert projection["total"] == 3
+     assert projection["breakdown"][0]["total"] == 3
++    configure(limit=3)
+     assert service.preview(request("new"), qualification(limit=3))["code"] == "NO_ELIGIBLE_BIN"
++    configure(limit=4)
+     assert service.preview(request("new"), qualification(limit=4))["code"] == "OK"
+-    assert service.preview(request("historical"), qualification(limit=4))["code"] == "OK"
++    assert service.preview(request("native"), qualification(limit=4))["code"] == "ALREADY_CREDITED"
++    assert service.preview(request("historical"), qualification(limit=4))["code"] == "ALREADY_CREDITED"
+     assert service.reserve(request("historical"), qualification(limit=4),
+                            expected_state_revision=0,
+                            expected_qualification_hash=service.qualification_digest(qualification(limit=4)),
+                            request_key="reuse")["code"] == "ALREADY_CREDITED"
+ 
+ 
++def test_r2_preview_rejects_historical_credit_without_mutation(prepared):
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO smart_bin_migration_imports VALUES('imp','fp','scope','plan',1,'{}')")
++        conn.execute("INSERT INTO smart_bin_historical_contributions VALUES "
++                     "('hist','imp','c0','m','already','A',1,'[]','runtime','session',1,'source','observed')")
++    q = qualification()
++    req = request("already")
++    before = (counts(prepared), migration.read_recorded_contents("c0", prepared),
++              _machine_revision())
++    assert service.preview(req, q)["code"] == "ALREADY_CREDITED"
++    assert service.reserve(req, q, expected_state_revision=q.machine_state_revision,
++                           expected_qualification_hash=service.qualification_digest(q),
++                           request_key="already-new")["code"] == "ALREADY_CREDITED"
++    assert (counts(prepared), migration.read_recorded_contents("c0", prepared),
++            _machine_revision()) == before
++
++
++def seed_second_policy(path):
++    with connect(path) as conn:
++        conn.execute("INSERT INTO smart_bin_policy_revisions VALUES('q','m','artifact-q','{}',2)")
++
++
++def test_r2_cross_policy_hold_cannot_look_empty_or_mix(prepared):
++    seed_second_policy(prepared)
++    first = claim(request("held", group="B"), qualification(), "held")
++    assert first["cycle_id"] == "c0"
++    current = qualification(policy="q", artifact="artifact-q")
++    req = request("incoming", group="A")
++    before = (counts(prepared), migration.read_recorded_contents("c0", prepared),
++              _machine_revision())
++    assert service.preview(req, current)["code"] == "NO_ELIGIBLE_BIN"
++    assert service.reserve(req, current,
++                           expected_state_revision=current.machine_state_revision,
++                           expected_qualification_hash=service.qualification_digest(current),
++                           request_key="cross-policy")["code"] == "NO_ELIGIBLE_BIN"
++    # Sharing under Q cannot establish a mapping to P's held B.
++    assert service.preview(req, replace(current, allow_normal_sharing=True))["code"] == "NO_ELIGIBLE_BIN"
++    assert (counts(prepared), migration.read_recorded_contents("c0", prepared),
++            _machine_revision()) == before
++
++
++def test_r2_cross_policy_hold_allows_alternative_eligible_cycle(prepared):
++    seed_second_policy(prepared)
++    claim(request("held", group="B"), qualification(), "held")
++    current = qualification(policy="q", artifact="artifact-q", two=True)
++    req = request("incoming", group="A")
++    preview = service.preview(req, current)
++    assert preview["code"] == "OK" and preview["slot_id"] == "s1"
++    result = claim(req, current, "alternative")
++    assert result["code"] == "OK" and result["cycle_id"] == "c1"
++
++
++def test_r2_unlabeled_same_policy_hold_requires_match_or_explicit_sharing(prepared):
++    first = claim(request("held", group="B"), qualification(), "held")
++    with connect(prepared) as conn:
++        conn.execute("DELETE FROM smart_bin_assignments WHERE slot_id='s0'")
++    fresh = qualification()
++    req = request("incoming", group="A")
++    before = (counts(prepared), migration.read_recorded_contents("c0", prepared),
++              _machine_revision())
++    assert service.preview(req, fresh)["code"] == "NO_ELIGIBLE_BIN"
++    assert service.reserve(req, fresh,
++                           expected_state_revision=fresh.machine_state_revision,
++                           expected_qualification_hash=service.qualification_digest(fresh),
++                           request_key="unlabeled-no-share")["code"] == "NO_ELIGIBLE_BIN"
++    assert (counts(prepared), migration.read_recorded_contents("c0", prepared),
++            _machine_revision()) == before
++    same_group = request("another", group="B")
++    assert service.preview(same_group, fresh)["preference"] == "recorded_match"
++    sharing = replace(fresh, allow_normal_sharing=True)
++    assert service.preview(req, sharing)["preference"] == "shared"
++    assert claim(req, sharing, "explicit-share")["code"] == "OK"
++    with connect(prepared) as conn:
++        labels = {row[0] for row in conn.execute(
++            "SELECT group_key_id FROM smart_bin_assignments WHERE slot_id='s0'")}
++        assert labels == {"A", "B"}
++        assert conn.execute("SELECT state FROM smart_bin_reservations WHERE id=?",
++                            (first["reservation_id"],)).fetchone()[0] == "RESERVED"
++
++
++def test_r2_compatible_unlabeled_hold_can_reserve_same_group(prepared):
++    first = claim(request("held", group="B"), qualification(), "held")
++    with connect(prepared) as conn:
++        conn.execute("DELETE FROM smart_bin_assignments WHERE slot_id='s0'")
++    current = qualification()
++    same_group = request("another", group="B")
++    preview = service.preview(same_group, current)
++    assert preview["code"] == "OK" and preview["preference"] == "recorded_match"
++    second = claim(same_group, current, "same-group")
++    assert second["code"] == "OK" and second["cycle_id"] == first["cycle_id"]
++    with connect(prepared) as conn:
++        assert {row[0] for row in conn.execute(
++            "SELECT group_key_id FROM smart_bin_assignments WHERE slot_id='s0'")} == {"B"}
++
++
+ def test_pool_sharing_preference_and_incompatible_contents(prepared):
+     with connect(prepared) as conn:
+         conn.execute("INSERT INTO smart_bin_opening_balances "
+                      "(id,cycle_id,group_key_id,quantity,provenance,coverage,created_at) "
+                      "VALUES('opening','c0','B',1,'qualified_synthetic','complete',1)")
++    configure(limit=3)
+     q = qualification(limit=3, two=True, sharing=True)
+     selected = service.preview(request(), q)
+     assert selected["slot_id"] == "s1" and selected["preference"] == "empty"
+@@ -258,9 +418,11 @@ def test_pool_sharing_preference_and_incompatible_contents(prepared):
+     q_share = qualification(limit=3, sharing=True)
+     assert service.preview(request(), q_share)["preference"] == "shared"
+     assert service.preview(request(pool=True), q_share)["code"] == "NO_ELIGIBLE_BIN"
++    configure(limit=3, pool=True)
+     assert service.preview(request(pool=True), qualification(limit=3, pool=True))["preference"] == "shared"
+     with connect(prepared) as conn:
+         conn.execute("INSERT INTO smart_bin_assignments VALUES('label','m','s0','p','A',0,1)")
++    configure(limit=3)
+     assert service.preview(request(), qualification(limit=3, sharing=True))["code"] == "NO_ELIGIBLE_BIN"
+     assert counts(prepared) == (1, 0, 0, 0)
+ 
+@@ -271,6 +433,7 @@ def test_assigned_match_first_and_shared_selection_preserves_evidence(prepared):
+                      "(id,cycle_id,group_key_id,quantity,provenance,coverage,created_at) "
+                      "VALUES('opening','c0','B',1,'qualified_synthetic','complete',1)")
+         conn.execute("INSERT INTO smart_bin_assignments VALUES('label','m','s1','p','A',0,1)")
++    configure(limit=3)
+     q = qualification(limit=3, two=True, sharing=True)
+     assert service.preview(request(), q)["slot_id"] == "s1"
+     with connect(prepared) as conn:
+@@ -287,6 +450,7 @@ def test_assigned_match_first_and_shared_selection_preserves_evidence(prepared):
+ 
+ 
+ def test_misc_reject_fit_and_disabled_reachability(prepared):
++    configure(limit=2, dimension=40)
+     q = qualification(limit=2, dimension=40)
+     misc = claim(request(group="misc"), q, "misc")
+     assert misc["destination_kind"] == "REJECT" and misc["slot_id"] is None
+@@ -368,6 +532,7 @@ def test_unresolved_native_delivery_blocks_receiving_cycle(prepared):
+                      "actual_slot_id,actual_cycle_id,evidence_ref,delivered_at) "
+                      "VALUES('d','old','m','old','session','p','A',1,'BIN','s0','c0',"
+                      "'BIN','s0','c0','exit',2)")
++    configure(limit=10)
+     assert service.preview(request(), qualification(limit=10))["code"] == "NO_ELIGIBLE_BIN"
+ 
+ 
+@@ -423,6 +588,7 @@ def test_unsafe_cancellation_states_refuse(prepared, state):
+ 
+ 
+ def test_last_unit_race_and_retry_with_current_revision(prepared):
++    configure(limit=1)
+     q = qualification(limit=1)
+     first = request("first")
+     second = request("second")
