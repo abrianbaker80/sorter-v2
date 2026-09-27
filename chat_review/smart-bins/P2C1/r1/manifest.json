@@ -1,0 +1,62 @@
+{
+  "accepted_predecessors": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2"
+    }
+  ],
+  "core_ledger_version": 2,
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true,
+    "uncommitted": true
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2C1/r1/P2C1.patch": "4373d31a2c9b1998e6cfb59c713745a7fb618d9de07bda0b23d33f9a8311505f",
+    "chat_review/smart-bins/P2C1/r1/REVIEW.md": "ff903d734c0aa9ec882b120ddb7e63979f9b952883927bb45ca40139d58363cb"
+  },
+  "patch": {
+    "base_tree": "33f4b7e6b15709fda640a660ef65475c661a96fe",
+    "file": "chat_review/smart-bins/P2C1/r1/P2C1.patch",
+    "paths": [
+      "software/sorter/backend/smart_bins_service.py",
+      "software/sorter/backend/smart_bins_delivery.py",
+      "software/sorter/backend/tests/test_smart_bins_delivery.py"
+    ],
+    "reconstruction_verified": true,
+    "result_tree": "e37a362161ec159278e17f8e7b4341ab312d1250",
+    "scope": "P2C1 slice only"
+  },
+  "repository": "abrianbaker80/sorter-v2",
+  "schema_version": 1,
+  "service_extension_version": 2,
+  "slice": "P2C1 r1 inactive native delivery lifecycle",
+  "source_test_sha256": {
+    "software/sorter/backend/smart_bins_delivery.py": "367a92bb30ca929940f43939decc5824c9db6fe6b989563cc0ba8065394fcff3",
+    "software/sorter/backend/smart_bins_service.py": "2d2200c4f62cbd2cd501dc61fe1c3ec25f3b6f882821d56dfd294a92127fd4f8",
+    "software/sorter/backend/tests/test_smart_bins_delivery.py": "93c273ca72d154773e810869a6b782ff709e84c0298a058f55ecdbc794a1b4d1"
+  },
+  "tests": [
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_delivery.py -q",
+      "result": "19 passed"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_delivery.py tests/test_smart_bins_reservations.py tests/test_smart_bins_storage.py tests/test_smart_bins_migration.py -q",
+      "result": "117 passed"
+    }
+  ]
+}

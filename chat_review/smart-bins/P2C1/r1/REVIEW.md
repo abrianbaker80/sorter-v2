@@ -1,0 +1,27 @@
+# P2C1 r1 — inactive native delivery lifecycle
+
+**Review pending. Implementation remains uncommitted and inactive.** `P2C1.patch` is the slice-only delta from the exact P2B r2 result tree. It changes `software/sorter/backend/smart_bins_service.py` and adds `smart_bins_delivery.py` and `tests/test_smart_bins_delivery.py`. No runtime hook, production initialization, configuration, migration, or legacy history helper changed.
+
+## Behavior and evidence
+
+`prepare_release` requires a current `RESERVED` row revision, complete matching custody, a fresh owner/route observation, current policy/configuration/slot/cycle qualification, no unresolved reservation discrepancy, and an exact target boundary. It reevaluates the existing held destination with a zero *additional* quantity, so the reservation is not counted twice. The transaction creates a durable `RELEASE_INTENT`, immutable release attempt, unique owner/boundary claim, evidence, revisions, audit and shared receipt. Its result is intent identity, **not a motor permit**; exact replay cannot dispatch again.
+
+`confirm_exit` requires the same attempt, custody and target plus attributable marker confirmation, then persists `EXIT_CONFIRMED` without releasing capacity. `complete_native` requires matching post-exit completion evidence. One `FULL`/`BEGIN IMMEDIATE` transaction writes an authoritative delivery, changes the reservation to `COMPLETED`, upserts `piece_records` on that connection, and commits audit, revisions and receipt. The sorting-session ID remains on the ledger; the separately supplied runtime run ID remains in history. The history part ID comes from the piece record, never from the category group key. Correction/feedback columns survive the upsert. Canonical cycle contents derive from the delivery; no legacy session counter is written. Normal completion only credits the reserved destination. A reported different destination becomes a durable discrepancy and `UNCERTAIN` hold without a delivery credit.
+
+`mark_uncertain` retains a nonterminal claim and records its reason. `record_contradiction` retains later evidence on a terminal reservation without rewriting its outcome; unresolved destination discrepancies block affected cycles. `inspect_recovery` and `lookup_request` use read-only SQLite connections. Every mutation uses a request key, material-evidence hash and expected reservation revision; committed exact replay precedes stale/state checks. A changed payload returns `IDEMPOTENCY_CONFLICT`. Native entry refuses supplied Harvest allocation metadata.
+
+The explicitly initialized service extension is **v2**. It extends the shared receipt actions and adds release evidence plus attempt/evidence immutability and one-attempt-per-reservation guards. Earlier v1 service databases are rejected; this slice provides no operational conversion or backfill. The core ledger stays v2. History schema preparation occurs before completion's write transaction; receipt replay and Harvest refusal perform no history schema write.
+
+## Validation
+
+- Development: `uv run --frozen python -m pytest tests/test_smart_bins_delivery.py -q` → **19 passed**.
+- Final affected group: `uv run --frozen python -m pytest tests/test_smart_bins_delivery.py tests/test_smart_bins_reservations.py tests/test_smart_bins_storage.py tests/test_smart_bins_migration.py -q` → **117 passed**.
+- Python: **3.12.12** in the frozen environment. Fixtures set temporary database/configuration paths before imports, use real SQLite transactions and close connections. They cover replay after lost acknowledgement, stale/mismatched custody/target/attempt, duplicate target, capacity conversion, historical cycle detachment, correction fields, distinct IDs, reject destination, Harvest refusal, uncertainty, late contradiction, and read-only inspection. Trigger-injected intent, exit, history and receipt failures roll back state, delivery, history, audit and receipt together.
+
+Earlier focused runs had **5 failed/6 passed**, then **3 failed/8 passed**. The replay tests had regenerated timestamps and qualification revisions instead of replaying the original payload; they now reuse the exact inputs. The Harvest refusal also initially initialized history before refusing; completion now checks its existing receipt and Harvest metadata without a schema write. Later focused runs passed. No history/local-state helper changed, so their predecessor evidence was reused. No full backend, frontend or physical test ran.
+
+## Later adapter hooks and limits
+
+`PhysicalC4Runtime.tick` would commit intent before setting `_pending` and calling `MarkerPositioner.request_index`. `MarkerPositioner._move` needs the later owner-bound, single-use dispatch permit, retaining one attempt through trims. The owner must retain `MarkerPositioner.poll` confirmation until `confirm_exit` commits, before `planner.complete_index` removes custody. `PhysicalDistribution.discharge` remains the physical handoff; `Sending.step` is the later completion hook after settling, with notifications/statistics after commit. If locks are jointly acquired, the required order is lifecycle → controller operation → service/database. No such wiring is in this patch.
+
+The code records marker-confirmed exit and software completion, not sensor-confirmed bin entry. Physical-owner wiring, dispatch enforcement, operator reconciliation, legacy writer fencing, Harvest's separate-store bridge, recovery motion, deployment and physical qualification remain pending. Publication is review evidence, not source acceptance.
