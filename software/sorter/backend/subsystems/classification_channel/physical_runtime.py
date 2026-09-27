@@ -177,7 +177,9 @@ class PhysicalC4Runtime:
             self.positioner.motor.check_token(self._verify_token)
             if now - self._verify_started > self.positioner.limits.timeout_s:
                 raise PositionError("resume marker verification timed out")
-            sample = self._verify.add(self.positioner.source.sample(), now)
+            raw_sample = self.positioner.source.sample()
+            validated_at = self.positioner.clock()
+            sample = self._verify.add(raw_sample, validated_at)
             self.positioner.motor.check_token(self._verify_token)
             if sample is None:
                 return

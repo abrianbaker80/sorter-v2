@@ -265,6 +265,34 @@ def test_pause_preserves_journeys_and_resume_verifies_marker_boundary():
     assert b.runtime.fifo.boundary == 1
 
 
+def test_resume_verifies_sample_completed_after_tick_entry():
+    b = Bench()
+    b.runtime.pause()
+    b.runtime.resume(b.rig.clock())
+    boundary = b.runtime.fifo.boundary
+    original_sample = b.rig.sample
+    receipt_pairs = []
+
+    def sample_after_processing():
+        b.rig.clock.advance(0.02)
+        sample = original_sample()
+        receipt_pairs.append(sample.received_mono)
+        return sample
+
+    b.rig.sample = sample_after_processing
+    for _ in range(8):
+        b.rig.clock.advance()
+        tick_entry = b.rig.clock()
+        b.runtime.tick(tick_entry, allow_motion=False)
+        assert receipt_pairs[-1] > tick_entry
+        assert not b.rig.commands
+        assert b.runtime.fifo.boundary == boundary
+        if b.runtime._verify is None:
+            break
+
+    assert b.runtime._verify is None
+
+
 def test_resume_displaced_marker_does_not_guess():
     b = Bench()
     b.admit("a")

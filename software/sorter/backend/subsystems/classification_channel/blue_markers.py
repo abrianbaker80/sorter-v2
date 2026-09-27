@@ -1,17 +1,26 @@
 # Extracted from the installed passive blue-marker estimator.
 import math
+from functools import lru_cache
+
+
+@lru_cache(maxsize=8)
+def _radius_map(height, width, cx, cy):
+    import numpy as np
+
+    yy, xx = np.indices((height, width))
+    rr = np.hypot(xx - cx, yy - cy)
+    rr.flags.writeable = False
+    return rr
 
 
 def extract(image, center):
     import cv2
-    import numpy as np
 
     h, w = image.shape[:2]
     scale = 960.0 / w
     small = cv2.resize(image, (960, round(h * scale))) if w != 960 else image
     cx, cy = center[0] * scale, center[1] * scale
-    yy, xx = np.indices(small.shape[:2])
-    rr = np.hypot(xx - cx, yy - cy)
+    rr = _radius_map(*small.shape[:2], cx, cy)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     # Rotor hub annulus measured in the existing 960-wide view, not LEGO ROIs.
     mask = (
@@ -27,7 +36,10 @@ def extract(image, center):
         if stats[j, 4] < 12:
             continue
         x, y = centers[j]
-        radii = rr[labels == j]
+        left, top, width, height = stats[j, :4]
+        radii = rr[top : top + height, left : left + width][
+            labels[top : top + height, left : left + width] == j
+        ]
         components.append(
             (
                 math.degrees(math.atan2(y - cy, x - cx)) % 360,

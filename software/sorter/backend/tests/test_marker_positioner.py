@@ -108,6 +108,171 @@ class Rig:
         return self.finish()
 
 
+def test_diagnostic_sample_timing_is_passive_during_normal_index():
+    rig = Rig()
+    rig.bind()
+    events = []
+    rig.p._diagnostic_sink = events.append
+    original_sample = rig.sample
+
+    def sampled():
+        result = original_sample()
+        rig.last_sample_timing = {"source_sequence": result.sequence, "total_sample_duration_s": 0.01}
+        return result
+
+    rig.sample = sampled
+    rig.p.request_index(1, 1000)
+    result = rig.finish()
+    observations = [event for event in events if event["event"] == "marker_observation"]
+    assert result.boundary == rig.p.boundary == 1
+    assert len(rig.commands) == 1 and not rig.failures
+    assert observations
+    assert all(event["poll_entry_monotonic_s"] is not None for event in observations)
+    assert all(event["sample_timing"]["total_sample_duration_s"] == 0.01 for event in observations)
+    assert any(event["prior_poll_interval_s"] is not None for event in observations)
+
+
+def test_each_confirmed_index_has_an_independent_complete_diagnostic_episode():
+    rig = Rig()
+    assert rig.bind().boundary == 0
+    events = []
+    rig.p._diagnostic_sink = events.append
+
+    for boundary in (1, 2):
+        rig.p.request_index(boundary, 1000)
+        result = rig.finish()
+        assert result.boundary == boundary
+        assert result.residual_deg == pytest.approx(0)
+
+    requests = [row for row in events if row["event"] == "index_requested"]
+    assert len(requests) == 2
+    assert requests[0]["attempt_id"] != requests[1]["attempt_id"]
+    for boundary, request in enumerate(requests, 1):
+        episode = [row for row in events if row.get("attempt_id") == request["attempt_id"]]
+        assert request["bound_boundary"] == boundary - 1
+        assert request["pending_boundary"] == boundary
+        assert request["operation_deadline_monotonic_s"] == pytest.approx(
+            request["request_start_monotonic_s"] + 8.0
+        )
+        assert request["target_phase_deg"] == rig.p.mapping.phase(boundary)
+        assert [row["event"] for row in episode].count("confirmed") == 1
+        completion = next(row for row in episode if row["event"] == "motor_completion_verified")
+        assert completion["stopped"] is True
+        assert completion["completion_monotonic_s"] is not None
+        fence = next(row for row in episode if row["event"] == "stopped_frame_fence"
+                     and row["stage"] == "post_motion")
+        assert fence["fence_request_monotonic_s"] is not None
+        assert set(fence["fence"]) == {"epoch", "sequence", "source_capture_monotonic_ns"}
+        observations = [row for row in episode if row["event"] == "marker_observation"]
+        assert observations
+        assert all(
+            row["target_phase_deg"] == rig.p.mapping.phase(
+                boundary - 1 if row["stage"] == "pre_motion" else boundary
+            ) for row in observations
+        )
+        assert all(row["history_count"] <= 32 for row in observations)
+        assert all(row["time_remaining_s"] == pytest.approx(
+            row["stage_deadline_monotonic_s"] - row["validation_monotonic_s"]
+        ) for row in observations)
+        assert all(row["stage_deadline_monotonic_s"] == pytest.approx(
+            request["operation_deadline_monotonic_s"]
+        ) for row in observations if row["stage"] == "pre_motion")
+        receipt = next(row for row in episode if row["event"] == "motor_receipt")
+        assert receipt["stage_deadline_monotonic_s"] == pytest.approx(
+            receipt["stage_started_monotonic_s"] + 8.0
+        )
+        assert all(row["stage_deadline_monotonic_s"] == pytest.approx(
+            receipt["stage_deadline_monotonic_s"]
+        ) for row in observations if row["stage"] == "post_motion")
+        assert any(row["window_reason"] == "stable_fresh_fit" for row in observations)
+        assert any(
+            row["stage"] == "post_motion"
+            and row["source_sequence"] is not None
+            and row["source_capture_monotonic_ns"] is not None
+            and row["retrieval_monotonic_s"] is not None
+            and row["validation_monotonic_s"] is not None
+            and row["age_s"] >= 0
+            and row["raw_phase_deg"] is not None
+            and row["residual_deg"] is not None
+            and row["stable_span_s"] is not None
+            and row["stable_spread_deg"] is not None
+            for row in observations
+        )
+    assert rig.p.boundary == 2 and not rig.failures and len(rig.commands) == 2
+
+
+def test_later_index_timeout_retains_its_observation_and_terminal_evidence():
+    rig = Rig()
+    rig.bind()
+    events = []
+    rig.p._diagnostic_sink = events.append
+    rig.p.request_index(1, 1000)
+    assert rig.finish().boundary == 1
+    rig.p.request_index(2, 1000)
+    while len(rig.commands) < 2:
+        rig.clock.advance()
+        assert rig.p.poll() is None
+    for _ in range(10):
+        rig.clock.advance()
+        assert rig.p.poll() is None
+        if rig.p._window and rig.p._window.samples:
+            break
+    assert rig.p._window.samples
+    rig.marker_missing = True
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        rig.finish()
+
+    requests = [row for row in events if row["event"] == "index_requested"]
+    assert len(requests) == 2
+    second = [row for row in events if row.get("attempt_id") == requests[1]["attempt_id"]]
+    assert [row["event"] for row in second].count("failure") == 1
+    observations = [row for row in second if row["event"] == "marker_observation"]
+    assert any(row["history_count"] > 0 for row in observations)
+    assert any(row["past_stopped_frame_fence"] for row in observations)
+    assert all("age_s" in row and "window_reason" in row and "time_remaining_s" in row
+               for row in observations)
+    failure = next(row for row in second if row["event"] == "failure")
+    assert failure["reason"] == "marker index deadline exceeded during observation"
+    assert all(
+        failure["last_observation_state"][key] == value
+        for key, value in observations[-1].items()
+        if key not in ("attempt_id", "event", "recorded_wall_s", "bound_boundary", "pending_boundary")
+    )
+    assert failure["last_usable_observation_state"]["stage"] == "pre_motion"
+    assert failure["last_usable_post_motion_observation_state"] is None
+    assert rig.p.boundary == 1 and rig.p.pending == 2
+    assert len(rig.commands) == 2 and rig.failures == [failure["reason"]]
+
+
+def test_per_index_correction_decision_does_not_change_trim_result():
+    rig = Rig(gains=(0.95, 1))
+    rig.bind()
+    events = []
+    rig.p._diagnostic_sink = events.append
+    rig.p.request_index(1, 1000)
+    result = rig.finish()
+    decisions = [row for row in events if row["event"] == "correction_decision"]
+    assert len(decisions) == 1 and decisions[0]["action"] == "dispatch_trim"
+    assert decisions[0]["correction_number"] == 1
+    assert result.boundary == 1 and result.corrections == 1
+    assert [command[0] for command in rig.commands] == pytest.approx([36, 1.8])
+    assert not rig.failures
+
+
+def test_source_identity_diagnostic_sink_remains_connected_after_confirmation():
+    rig = Rig()
+    events = []
+    source = SimpleNamespace(identity_diagnostic_sink=None)
+    positioner = MarkerPositioner(
+        rig, source, rig.p.mapping, rig.failures.append,
+        clock=rig.clock, diagnostic_sink=events.append,
+    )
+    assert source.identity_diagnostic_sink is positioner._diagnostic_sink
+    positioner._diagnostic_active = False
+    source.identity_diagnostic_sink({"event": "source_identity_validation", "rejection_conditions": ["epoch_mismatch"]})
+    assert events == [{"event": "source_identity_validation", "rejection_conditions": ["epoch_mismatch"]}]
+
+
 def test_ten_physical_indexes_wrap_and_results_are_consumed_once():
     r = Rig()
     assert r.bind().boundary == 0
@@ -259,16 +424,18 @@ def test_maintenance_target_trim_refuses_unattributable_position(offset):
     assert not r.commands and r.p.boundary is None
 
 
-def test_trim_does_not_extend_deadline_or_confirm_without_fresh_markers():
+def test_trim_stage_does_not_renew_without_fresh_markers():
     r = Rig(gains=(1.05, 1))
     r.bind()
     r.p.request_index(1, 1000)
     while len(r.commands) < 2:
         r.clock.advance()
         r.p.poll()
+    correction_started = r.p._started
     r.frozen = True
     with pytest.raises(PositionError, match='deadline'):
         r.finish()
+    assert r.p._started == correction_started
     assert r.p.boundary == 0 and len(r.commands) == 2
 
 
@@ -287,6 +454,153 @@ def _near_deadline_target_history(phase_offset=0):
         assert r.p.poll() is None
     assert len(r.p._window.samples) == 2
     return r
+
+
+def _dispatch_near_deadline_correction():
+    r = _near_deadline_target_history(phase_offset=-0.611686)
+    prior_stage_started = r.p._started
+    r.clock.value = prior_stage_started + 7.84
+    assert r.p.poll() is None
+    assert [command[0] for command in r.commands] == pytest.approx([36, 0.611686])
+    assert r.p._started == pytest.approx(prior_stage_started + 7.84)
+    assert r.p._started < prior_stage_started + 8.0
+    return r, prior_stage_started
+
+
+def test_predeadline_correction_gets_its_own_completion_and_confirmation_stage():
+    r, prior_stage_started = _dispatch_near_deadline_correction()
+    correction_started = r.p._started
+    r.clock.value = prior_stage_started + 8.185
+    assert r.p.poll() is None  # correction completes after the initial move's deadline
+    assert r.p._started == correction_started
+    assert r.p.boundary == 0 and r.p.pending == 1
+
+    result = r.finish()
+    assert result.boundary == r.p.boundary == 1
+    assert result.corrections == 1 and result.residual_deg == pytest.approx(0)
+    assert r.clock() < correction_started + 8.0
+    assert not r.failures and len(r.commands) == 2
+
+
+def test_correction_stage_uses_retrieval_deadline_after_slow_sample_completion():
+    r, _ = _dispatch_near_deadline_correction()
+    correction_started = r.p._started
+    r.clock.value = correction_started + 0.5
+    assert r.p.poll() is None  # establish the post-correction fence
+    for elapsed in (7.68, 7.76):
+        r.clock.value = correction_started + elapsed
+        assert r.p.poll() is None
+    assert len(r.p._window.samples) == 2
+    r.clock.value = correction_started + 7.84
+    original_sample = r.sample
+    completed = []
+
+    def slow_sample():
+        observation = original_sample()
+        retrieved = observation.received_mono
+        r.clock.advance(0.29547)
+        completed.append(replace(
+            observation, retrieved_mono=retrieved, received_mono=r.clock(),
+        ))
+        return completed[-1]
+
+    r.sample = slow_sample
+    result = r.p.poll()
+    deadline = correction_started + r.p.limits.timeout_s
+    assert completed[0].retrieved_mono < deadline < completed[0].received_mono
+    assert result.boundary == r.p.boundary == 1
+    assert result.corrections == 1 and result.residual_deg == pytest.approx(0)
+    assert not r.failures and len(r.commands) == 2
+
+
+def test_expired_move_stage_cannot_dispatch_needed_correction():
+    r = _near_deadline_target_history(phase_offset=-0.611686)
+    move_stage_started = r.p._started
+    r.clock.value = move_stage_started + 8.01
+
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    assert r.p._started == move_stage_started
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 1 and len(r.failures) == 1
+
+
+def test_rejected_motor_dispatch_does_not_start_another_stage():
+    r = Rig()
+    r.bind()
+    r.p.request_index(1, 1000)
+    pre_motion_started = r.p._started
+
+    def reject_start(_degrees, _speed, _token):
+        raise RuntimeError("motor refused command")
+
+    r.start = reject_start
+    with pytest.raises(RuntimeError, match="motor refused command"):
+        r.finish()
+    assert r.p._started == pre_motion_started
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert not r.commands and r.failures == ["motor refused command"]
+
+
+def test_correction_stage_faults_after_its_own_eight_seconds():
+    r, _ = _dispatch_near_deadline_correction()
+    correction_started = r.p._started
+    r.clock.value = correction_started + 0.5
+    assert r.p.poll() is None
+    r.marker_missing = True
+    r.clock.value = correction_started + 8.01
+
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    assert r.p._started == correction_started
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 2 and len(r.failures) == 1
+
+
+def test_second_legal_correction_gets_one_stage_but_cannot_exceed_correction_limit():
+    r = Rig(gains=(0.95, 0.5, 1))
+    r.bind()
+    events = []
+    r.p._diagnostic_sink = events.append
+    r.p.request_index(1, 1000)
+    result = r.finish()
+    receipts = [row for row in events if row["event"] == "motor_receipt"]
+    assert result.boundary == 1 and result.corrections == 2
+    assert [command[0] for command in r.commands] == pytest.approx([36, 1.8, 0.9])
+    assert len(receipts) == 3
+    assert all(row["stage_deadline_monotonic_s"] == pytest.approx(
+        row["stage_started_monotonic_s"] + 8.0
+    ) for row in receipts)
+    assert [row["stage_started_monotonic_s"] for row in receipts] == sorted(
+        row["stage_started_monotonic_s"] for row in receipts
+    )
+
+    limited = Rig(gains=(0.95, 0.5, 0.2))
+    limited.bind()
+    limited.p.request_index(1, 1000)
+    with pytest.raises(PositionError, match="not converged"):
+        limited.finish()
+    assert len(limited.commands) == 3  # no third correction or fifth stage
+    assert limited.p.boundary == 0 and limited.p._corrections == 2
+
+
+def test_polling_and_samples_do_not_renew_move_stage():
+    r = Rig()
+    r.bind()
+    r.p.request_index(1, 1000)
+    while not r.commands:
+        r.clock.advance()
+        assert r.p.poll() is None
+    move_stage_started = r.p._started
+    r.marker_missing = True
+    for elapsed in (1.0, 4.0, 7.9):
+        r.clock.value = move_stage_started + elapsed
+        assert r.p.poll() is None
+        assert r.p._started == move_stage_started
+    r.clock.value = move_stage_started + 8.01
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    assert len(r.commands) == 1 and r.p.boundary == 0
 
 
 def test_predeadline_target_capture_confirms_after_validation_crosses_deadline():
@@ -311,6 +625,45 @@ def test_predeadline_target_capture_confirms_after_validation_crosses_deadline()
     assert not r.failures and len(r.commands) == 1
 
 
+def test_predeadline_retrieval_confirms_when_sample_completes_after_deadline():
+    r = _near_deadline_target_history(phase_offset=-0.020165)
+    r.clock.value = r.p._started + 7.84
+    original_sample = r.sample
+    completed = []
+
+    def slow_sample():
+        observation = original_sample()
+        retrieved = observation.received_mono
+        r.clock.advance(0.29547)
+        completed.append(replace(
+            observation, retrieved_mono=retrieved, received_mono=r.clock(),
+        ))
+        return completed[-1]
+
+    r.sample = slow_sample
+    result = r.p.poll()
+    deadline = r.p._started + r.p.limits.timeout_s
+    assert completed[0].retrieved_mono < deadline < completed[0].received_mono
+    assert result.boundary == r.p.boundary == 1
+    assert result.residual_deg == pytest.approx(0.020165)
+    assert result.source_capture_ns == completed[0].captured_ns
+    assert not r.failures and len(r.commands) == 1
+
+
+def test_predeadline_received_target_can_confirm_when_poll_begins_after_deadline():
+    r = _near_deadline_target_history()
+    r.clock.value = r.p._started + 7.84
+    observation = r.sample()  # already received from the source before expiry
+    r.clock.value = r.p._started + 8.13547
+    r.sample = lambda: observation
+
+    result = r.p.poll()
+    assert observation.received_mono < r.p._started + r.p.limits.timeout_s
+    assert result.boundary == r.p.boundary == 1
+    assert result.source_capture_ns == observation.captured_ns
+    assert not r.failures and len(r.commands) == 1
+
+
 def test_postdeadline_target_capture_cannot_confirm():
     r = _near_deadline_target_history()
     r.clock.value = r.p._started + 7.99
@@ -327,6 +680,31 @@ def test_postdeadline_target_capture_cannot_confirm():
     with pytest.raises(PositionError, match="deadline exceeded during observation"):
         r.p.poll()
     assert captured[0].received_mono > r.p._started + r.p.limits.timeout_s
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 1 and len(r.failures) == 1
+
+
+def test_postdeadline_retrieval_cannot_confirm_even_with_fresh_completed_sample():
+    r = _near_deadline_target_history()
+    r.clock.value = r.p._started + 7.99
+    original_sample = r.sample
+    completed = []
+
+    def late_sample():
+        r.clock.advance(0.03)
+        observation = original_sample()
+        retrieved = observation.received_mono
+        r.clock.advance(0.10)
+        completed.append(replace(
+            observation, retrieved_mono=retrieved, received_mono=r.clock(),
+        ))
+        return completed[-1]
+
+    r.sample = late_sample
+    with pytest.raises(PositionError, match="deadline exceeded during observation"):
+        r.p.poll()
+    deadline = r.p._started + r.p.limits.timeout_s
+    assert deadline < completed[0].retrieved_mono < completed[0].received_mono
     assert r.p.boundary == 0 and r.p.pending == 1
     assert len(r.commands) == 1 and len(r.failures) == 1
 
@@ -356,6 +734,38 @@ def test_in_deadline_target_confirmation_still_succeeds():
     assert result.corrections == 0 and result.residual_deg == pytest.approx(0)
     assert r.clock() - r.p._started < r.p.limits.timeout_s
     assert not r.failures and len(r.commands) == 1
+
+
+def test_expired_motor_receipt_faults_without_another_move():
+    r = Rig()
+    r.bind()
+    r.p.request_index(1, 1000)
+    while not r.commands:
+        r.clock.advance()
+        assert r.p.poll() is None
+    r.complete_result = False
+    r.clock.value = r.p._started + 8.01
+
+    with pytest.raises(PositionError, match="marker index deadline exceeded"):
+        r.p.poll()
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert len(r.commands) == 1 and len(r.failures) == 1
+
+
+def test_expiry_during_pre_motion_diagnostic_cannot_dispatch_index():
+    r = Rig()
+    r.bind()
+
+    def slow_diagnostic(row):
+        if row["event"] == "pre_motion_fit":
+            r.clock.advance(8)
+
+    r.p._diagnostic_sink = slow_diagnostic
+    r.p.request_index(1, 1000)
+    with pytest.raises(PositionError, match="deadline exceeded"):
+        r.finish()
+    assert r.p.boundary == 0 and r.p.pending == 1
+    assert not r.commands and len(r.failures) == 1
 
 
 def test_idle_rotor_displacement_refuses_new_motion():
