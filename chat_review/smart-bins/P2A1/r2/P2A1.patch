@@ -1,0 +1,987 @@
+diff --git a/software/sorter/backend/piece_records.py b/software/sorter/backend/piece_records.py
+index d2c5bcc..9fb35e9 100644
+--- a/software/sorter/backend/piece_records.py
++++ b/software/sorter/backend/piece_records.py
+@@ -196,12 +196,19 @@ def _ensureInitialized() -> None:
+             conn.close()
+ 
+ 
+-def recordPiece(
++def initialize_piece_records() -> None:
++    """Prepare the legacy history schema before a caller-owned transaction."""
++    _ensureInitialized()
++
++
++def recordPieceOnConnection(
++    conn: sqlite3.Connection,
+     piece: dict[str, Any],
+     *,
+     run_id: Optional[str] = None,
+     machine_id: Optional[str] = None,
+ ) -> None:
++    """Upsert history on the caller's connection without owning its transaction."""
+     uuid_val = piece.get("uuid")
+     if not isinstance(uuid_val, str):
+         return
+@@ -212,80 +219,91 @@ def recordPiece(
+     seen_at = piece.get("created_at")
+     recorded_at = piece.get("distributed_at") or time.time()
+     dead = 1 if piece.get("dead") else 0
++    # Upsert (not INSERT OR IGNORE): a piece can be recorded early by the
++    # correction API straight from memory (so a just-classified piece is
++    # correctable before it distributes), then re-recorded at distribution
++    # with its bin. On conflict we refresh the classification/bin columns but
++    # NEVER touch the correction columns (part_correct, color_corrected_id,
++    # *_feedback_submitted, correction_updated_at) so a recorded correction
++    # survives the distribution write.
++    conn.execute(
++        "INSERT INTO piece_records "
++        "(uuid, run_id, machine_id, seen_at, recorded_at, classification_status, "
++        "part_id, part_name, color_id, color_name, category_id, confidence, "
++        "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
++        "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
++        "brickognize_color_rank, color_provider, mold_provider, color_confidence, "
++        "transfer_episode_id, transfer_first_pass, transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception) "
++        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
++        "ON CONFLICT(uuid) DO UPDATE SET "
++        "run_id=excluded.run_id, machine_id=excluded.machine_id, "
++        "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
++        "classification_status=excluded.classification_status, "
++        "part_id=excluded.part_id, part_name=excluded.part_name, "
++        "color_id=excluded.color_id, color_name=excluded.color_name, "
++        "category_id=excluded.category_id, confidence=excluded.confidence, "
++        "bin_x=excluded.bin_x, bin_y=excluded.bin_y, bin_z=excluded.bin_z, "
++        "dead=excluded.dead, brickognize_preview_url=excluded.brickognize_preview_url, "
++        "brickognize_listing_id=excluded.brickognize_listing_id, "
++        "brickognize_item_rank=excluded.brickognize_item_rank, "
++        "brickognize_item_type=excluded.brickognize_item_type, "
++        "brickognize_color_rank=excluded.brickognize_color_rank, "
++        "color_provider=excluded.color_provider, "
++        "mold_provider=excluded.mold_provider, "
++        "color_confidence=excluded.color_confidence, "
++        "transfer_episode_id=COALESCE(excluded.transfer_episode_id, piece_records.transfer_episode_id), "
++        "transfer_first_pass=COALESCE(excluded.transfer_first_pass, piece_records.transfer_first_pass), "
++        "transport_failure_reason=COALESCE(excluded.transport_failure_reason, piece_records.transport_failure_reason), "
++        "forced_reject_reason=COALESCE(excluded.forced_reject_reason, piece_records.forced_reject_reason), "
++        "reject_category=COALESCE(excluded.reject_category, piece_records.reject_category), "
++        "physical_group_size_unknown=COALESCE(excluded.physical_group_size_unknown, piece_records.physical_group_size_unknown), "
++        "harvest_exception=COALESCE(excluded.harvest_exception, piece_records.harvest_exception)",
++        (
++            uuid_val,
++            run_id,
++            machine_id,
++            float(seen_at) if isinstance(seen_at, (int, float)) else None,
++            float(recorded_at) if isinstance(recorded_at, (int, float)) else None,
++            piece.get("classification_status"),
++            piece.get("part_id"),
++            piece.get("part_name"),
++            piece.get("color_id"),
++            piece.get("color_name"),
++            piece.get("category_id"),
++            piece.get("confidence"),
++            bin_x,
++            bin_y,
++            bin_z,
++            dead,
++            piece.get("brickognize_preview_url"),
++            piece.get("brickognize_listing_id"),
++            piece.get("brickognize_item_rank"),
++            piece.get("brickognize_item_type"),
++            piece.get("brickognize_color_rank"),
++            piece.get("color_provider"),
++            piece.get("mold_provider"),
++            piece.get("color_confidence"),
++            piece.get("transfer_episode_id"),
++            piece.get("transfer_first_pass"),
++            piece.get("transport_failure_reason"),
++            piece.get("forced_reject_reason"),
++            piece.get("reject_category"),
++            piece.get("physical_group_size_unknown"),
++            piece.get("harvest_exception"),
++        ),
++    )
++
++
++def recordPiece(
++    piece: dict[str, Any],
++    *,
++    run_id: Optional[str] = None,
++    machine_id: Optional[str] = None,
++) -> None:
++    if not isinstance(piece.get("uuid"), str):
++        return
+     with _connection() as conn:
+-        # Upsert (not INSERT OR IGNORE): a piece can be recorded early by the
+-        # correction API straight from memory (so a just-classified piece is
+-        # correctable before it distributes), then re-recorded at distribution
+-        # with its bin. On conflict we refresh the classification/bin columns but
+-        # NEVER touch the correction columns (part_correct, color_corrected_id,
+-        # *_feedback_submitted, correction_updated_at) so a recorded correction
+-        # survives the distribution write.
+-        conn.execute(
+-            "INSERT INTO piece_records "
+-            "(uuid, run_id, machine_id, seen_at, recorded_at, classification_status, "
+-            "part_id, part_name, color_id, color_name, category_id, confidence, "
+-            "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
+-            "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
+-            "brickognize_color_rank, color_provider, mold_provider, color_confidence, "
+-            "transfer_episode_id, transfer_first_pass, transport_failure_reason, forced_reject_reason, reject_category, physical_group_size_unknown, harvest_exception) "
+-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+-            "ON CONFLICT(uuid) DO UPDATE SET "
+-            "run_id=excluded.run_id, machine_id=excluded.machine_id, "
+-            "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
+-            "classification_status=excluded.classification_status, "
+-            "part_id=excluded.part_id, part_name=excluded.part_name, "
+-            "color_id=excluded.color_id, color_name=excluded.color_name, "
+-            "category_id=excluded.category_id, confidence=excluded.confidence, "
+-            "bin_x=excluded.bin_x, bin_y=excluded.bin_y, bin_z=excluded.bin_z, "
+-            "dead=excluded.dead, brickognize_preview_url=excluded.brickognize_preview_url, "
+-            "brickognize_listing_id=excluded.brickognize_listing_id, "
+-            "brickognize_item_rank=excluded.brickognize_item_rank, "
+-            "brickognize_item_type=excluded.brickognize_item_type, "
+-            "brickognize_color_rank=excluded.brickognize_color_rank, "
+-            "color_provider=excluded.color_provider, "
+-            "mold_provider=excluded.mold_provider, "
+-            "color_confidence=excluded.color_confidence, "
+-            "transfer_episode_id=COALESCE(excluded.transfer_episode_id, piece_records.transfer_episode_id), "
+-            "transfer_first_pass=COALESCE(excluded.transfer_first_pass, piece_records.transfer_first_pass), "
+-            "transport_failure_reason=COALESCE(excluded.transport_failure_reason, piece_records.transport_failure_reason), "
+-            "forced_reject_reason=COALESCE(excluded.forced_reject_reason, piece_records.forced_reject_reason), "
+-            "reject_category=COALESCE(excluded.reject_category, piece_records.reject_category), "
+-            "physical_group_size_unknown=COALESCE(excluded.physical_group_size_unknown, piece_records.physical_group_size_unknown), "
+-            "harvest_exception=COALESCE(excluded.harvest_exception, piece_records.harvest_exception)",
+-            (
+-                uuid_val,
+-                run_id,
+-                machine_id,
+-                float(seen_at) if isinstance(seen_at, (int, float)) else None,
+-                float(recorded_at) if isinstance(recorded_at, (int, float)) else None,
+-                piece.get("classification_status"),
+-                piece.get("part_id"),
+-                piece.get("part_name"),
+-                piece.get("color_id"),
+-                piece.get("color_name"),
+-                piece.get("category_id"),
+-                piece.get("confidence"),
+-                bin_x,
+-                bin_y,
+-                bin_z,
+-                dead,
+-                piece.get("brickognize_preview_url"),
+-                piece.get("brickognize_listing_id"),
+-                piece.get("brickognize_item_rank"),
+-                piece.get("brickognize_item_type"),
+-                piece.get("brickognize_color_rank"),
+-                piece.get("color_provider"),
+-                piece.get("mold_provider"),
+-                piece.get("color_confidence"),
+-                piece.get("transfer_episode_id"),
+-                piece.get("transfer_first_pass"),
+-                piece.get("transport_failure_reason"),
+-                piece.get("forced_reject_reason"),
+-                piece.get("reject_category"),
+-                piece.get("physical_group_size_unknown"),
+-                piece.get("harvest_exception"),
+-            ),
+-        )
++        recordPieceOnConnection(conn, piece, run_id=run_id, machine_id=machine_id)
+         conn.commit()
+ 
+ 
+diff --git a/software/sorter/backend/smart_bins_storage.py b/software/sorter/backend/smart_bins_storage.py
+new file mode 100644
+index 0000000..3524a8a
+--- /dev/null
++++ b/software/sorter/backend/smart_bins_storage.py
+@@ -0,0 +1,337 @@
++"""Inactive smart-bin ledger schema and caller-owned SQLite transactions.
++
++Nothing in this module initializes on import or participates in legacy startup.
++P2A2 will backfill; later slices will provide admission and state transitions.
++"""
++
++from __future__ import annotations
++
++import sqlite3
++from contextlib import contextmanager
++from typing import Iterator
++
++from local_state import _connect
++
++
++SCHEMA_VERSION = 2
++
++
++class UnsupportedSmartBinSchema(RuntimeError):
++    """The ledger is absent, incomplete, or from an unsupported version."""
++
++
++_DELIVERY_RESERVATION_MATCH = (
++    "r.id = NEW.reservation_id AND "
++    "r.machine_id IS NEW.machine_id AND r.piece_uuid IS NEW.piece_uuid AND "
++    "r.run_id IS NEW.run_id AND r.policy_revision_id IS NEW.policy_revision_id AND "
++    "r.group_key_id IS NEW.group_key_id AND r.quantity IS NEW.quantity AND "
++    "r.intended_kind IS NEW.intended_kind AND "
++    "r.intended_slot_id IS NEW.intended_slot_id AND "
++    "r.intended_cycle_id IS NEW.intended_cycle_id"
++)
++
++
++_SCHEMA_DDL = (
++    "CREATE TABLE IF NOT EXISTS smart_bin_schema_versions ("
++    "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
++    "version INTEGER NOT NULL CHECK(version >= 1), initialized_at REAL NOT NULL)",
++    "CREATE UNIQUE INDEX IF NOT EXISTS smart_bin_sessions_machine_id "
++    "ON sorting_sessions(machine_id, id)",
++    "CREATE TABLE IF NOT EXISTS smart_bin_machines ("
++    "machine_id TEXT NOT NULL PRIMARY KEY, state_revision INTEGER NOT NULL DEFAULT 0 "
++    "CHECK(state_revision >= 0))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_policy_revisions ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, compiled_artifact_hash TEXT NOT NULL, "
++    "policy_json TEXT NOT NULL, created_at REAL NOT NULL, "
++    "UNIQUE(machine_id, id), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_group_keys ("
++    "id TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL, namespace TEXT NOT NULL, "
++    "part_id TEXT, part_namespace TEXT, color_id TEXT, color_namespace TEXT, "
++    "provenance TEXT NOT NULL CHECK(provenance IN ('known', 'unknown')))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_slots ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, layout_revision TEXT NOT NULL, "
++    "layer_index INTEGER NOT NULL CHECK(layer_index >= 0), "
++    "section_index INTEGER NOT NULL CHECK(section_index >= 0), "
++    "bin_index INTEGER NOT NULL CHECK(bin_index >= 0), "
++    "UNIQUE(machine_id, id), "
++    "UNIQUE(machine_id, layout_revision, layer_index, section_index, bin_index), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_assignments ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, slot_id TEXT NOT NULL, "
++    "policy_revision_id TEXT NOT NULL, "
++    "group_key_id TEXT NOT NULL, routing_revision INTEGER NOT NULL "
++    "CHECK(routing_revision >= 0), created_at REAL NOT NULL, "
++    "UNIQUE(slot_id, policy_revision_id, group_key_id), "
++    "FOREIGN KEY(machine_id, slot_id) REFERENCES smart_bin_slots(machine_id, id), "
++    "FOREIGN KEY(machine_id, policy_revision_id) "
++    "REFERENCES smart_bin_policy_revisions(machine_id, id), "
++    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_containers ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, label TEXT, "
++    "UNIQUE(machine_id, id), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_cycles ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, container_id TEXT, slot_id TEXT, "
++    "opened_at REAL NOT NULL, closed_at REAL, close_reason TEXT, provenance TEXT NOT NULL, "
++    "CHECK(closed_at IS NULL OR closed_at >= opened_at), "
++    "UNIQUE(machine_id, id), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(machine_id, container_id) REFERENCES smart_bin_containers(machine_id, id), "
++    "FOREIGN KEY(machine_id, slot_id) REFERENCES smart_bin_slots(machine_id, id))",
++    "CREATE UNIQUE INDEX IF NOT EXISTS smart_bin_one_open_cycle_per_slot "
++    "ON smart_bin_cycles(slot_id) WHERE slot_id IS NOT NULL AND closed_at IS NULL",
++    "CREATE UNIQUE INDEX IF NOT EXISTS smart_bin_one_open_cycle_per_container "
++    "ON smart_bin_cycles(container_id) WHERE container_id IS NOT NULL AND closed_at IS NULL",
++    "CREATE TABLE IF NOT EXISTS smart_bin_reservations ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, piece_uuid TEXT NOT NULL, "
++    "route_attempt TEXT NOT NULL, request_key TEXT NOT NULL UNIQUE, "
++    "run_id TEXT NOT NULL, policy_revision_id TEXT NOT NULL, group_key_id TEXT NOT NULL, "
++    "routing_revision INTEGER NOT NULL CHECK(routing_revision >= 0), "
++    "quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity > 0), "
++    "intended_kind TEXT NOT NULL CHECK(intended_kind IN ('BIN', 'REJECT')), "
++    "intended_slot_id TEXT, intended_cycle_id TEXT, "
++    "owner_incarnation TEXT, episode_id TEXT, pocket_index INTEGER, "
++    "pocket_generation INTEGER, "
++    "state TEXT NOT NULL CHECK(state IN "
++    "('RESERVED', 'RELEASE_INTENT', 'EXIT_CONFIRMED', 'UNCERTAIN', 'COMPLETED', 'CANCELLED')), "
++    "row_revision INTEGER NOT NULL DEFAULT 0 CHECK(row_revision >= 0), "
++    "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
++    "UNIQUE(machine_id, piece_uuid, route_attempt), "
++    "UNIQUE(machine_id, id), "
++    "CHECK((intended_kind = 'BIN' AND intended_slot_id IS NOT NULL AND intended_cycle_id IS NOT NULL) "
++    "OR (intended_kind = 'REJECT' AND intended_slot_id IS NULL AND intended_cycle_id IS NULL)), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(machine_id, run_id) REFERENCES sorting_sessions(machine_id, id), "
++    "FOREIGN KEY(machine_id, policy_revision_id) "
++    "REFERENCES smart_bin_policy_revisions(machine_id, id), "
++    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id), "
++    "FOREIGN KEY(machine_id, intended_slot_id) REFERENCES smart_bin_slots(machine_id, id), "
++    "FOREIGN KEY(machine_id, intended_cycle_id) REFERENCES smart_bin_cycles(machine_id, id))",
++    "CREATE UNIQUE INDEX IF NOT EXISTS smart_bin_one_live_reservation_per_piece "
++    "ON smart_bin_reservations(machine_id, piece_uuid) "
++    "WHERE state IN ('RESERVED', 'RELEASE_INTENT', 'EXIT_CONFIRMED', 'UNCERTAIN')",
++    "CREATE TRIGGER IF NOT EXISTS smart_bin_reservation_intent_immutable "
++    "BEFORE UPDATE OF intended_kind, intended_slot_id, intended_cycle_id "
++    "ON smart_bin_reservations WHEN "
++    "NEW.intended_kind IS NOT OLD.intended_kind OR "
++    "NEW.intended_slot_id IS NOT OLD.intended_slot_id OR "
++    "NEW.intended_cycle_id IS NOT OLD.intended_cycle_id "
++    "BEGIN SELECT RAISE(ABORT, 'reservation intended destination is immutable'); END",
++    "CREATE TABLE IF NOT EXISTS smart_bin_release_attempts ("
++    "id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL, owner_incarnation TEXT NOT NULL, "
++    "target_boundary TEXT NOT NULL, created_at REAL NOT NULL, "
++    "UNIQUE(owner_incarnation, target_boundary), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_deliveries ("
++    "id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL UNIQUE, "
++    "machine_id TEXT NOT NULL, piece_uuid TEXT NOT NULL, run_id TEXT NOT NULL, "
++    "policy_revision_id TEXT NOT NULL, group_key_id TEXT NOT NULL, "
++    "quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity > 0), "
++    "intended_kind TEXT NOT NULL CHECK(intended_kind IN ('BIN', 'REJECT')), "
++    "intended_slot_id TEXT, intended_cycle_id TEXT, "
++    "actual_kind TEXT NOT NULL CHECK(actual_kind IN ('BIN', 'REJECT')), "
++    "actual_slot_id TEXT, actual_cycle_id TEXT, evidence_ref TEXT NOT NULL, "
++    "delivered_at REAL NOT NULL, "
++    "UNIQUE(machine_id, piece_uuid), "
++    "CHECK((intended_kind = 'BIN' AND intended_slot_id IS NOT NULL AND intended_cycle_id IS NOT NULL) "
++    "OR (intended_kind = 'REJECT' AND intended_slot_id IS NULL AND intended_cycle_id IS NULL)), "
++    "CHECK((actual_kind = 'BIN' AND actual_slot_id IS NOT NULL AND actual_cycle_id IS NOT NULL) "
++    "OR (actual_kind = 'REJECT' AND actual_slot_id IS NULL AND actual_cycle_id IS NULL)), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id), "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(machine_id, run_id) REFERENCES sorting_sessions(machine_id, id), "
++    "FOREIGN KEY(machine_id, policy_revision_id) "
++    "REFERENCES smart_bin_policy_revisions(machine_id, id), "
++    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id), "
++    "FOREIGN KEY(machine_id, intended_slot_id) REFERENCES smart_bin_slots(machine_id, id), "
++    "FOREIGN KEY(machine_id, intended_cycle_id) REFERENCES smart_bin_cycles(machine_id, id), "
++    "FOREIGN KEY(machine_id, actual_slot_id) REFERENCES smart_bin_slots(machine_id, id), "
++    "FOREIGN KEY(machine_id, actual_cycle_id) REFERENCES smart_bin_cycles(machine_id, id))",
++    f"CREATE TRIGGER IF NOT EXISTS smart_bin_delivery_matches_reservation_insert "
++    f"BEFORE INSERT ON smart_bin_deliveries WHEN NOT EXISTS ("
++    f"SELECT 1 FROM smart_bin_reservations r WHERE {_DELIVERY_RESERVATION_MATCH}) "
++    f"BEGIN SELECT RAISE(ABORT, 'delivery does not match reservation'); END",
++    f"CREATE TRIGGER IF NOT EXISTS smart_bin_delivery_matches_reservation_update "
++    f"BEFORE UPDATE OF reservation_id, machine_id, piece_uuid, run_id, "
++    f"policy_revision_id, group_key_id, quantity, intended_kind, "
++    f"intended_slot_id, intended_cycle_id ON smart_bin_deliveries "
++    f"WHEN NOT EXISTS (SELECT 1 FROM smart_bin_reservations r "
++    f"WHERE {_DELIVERY_RESERVATION_MATCH}) "
++    f"BEGIN SELECT RAISE(ABORT, 'delivery does not match reservation'); END",
++    "CREATE TRIGGER IF NOT EXISTS smart_bin_delivery_reservation_immutable "
++    "BEFORE UPDATE OF reservation_id ON smart_bin_deliveries "
++    "WHEN NEW.reservation_id IS NOT OLD.reservation_id "
++    "BEGIN SELECT RAISE(ABORT, 'delivery reservation identity is immutable'); END",
++    "CREATE TRIGGER IF NOT EXISTS smart_bin_reservation_delivery_facts_immutable "
++    "BEFORE UPDATE OF id, machine_id, piece_uuid, run_id, policy_revision_id, "
++    "group_key_id, quantity, intended_kind, intended_slot_id, intended_cycle_id "
++    "ON smart_bin_reservations WHEN EXISTS ("
++    "SELECT 1 FROM smart_bin_deliveries WHERE reservation_id = OLD.id) AND ("
++    "NEW.id IS NOT OLD.id OR NEW.machine_id IS NOT OLD.machine_id OR "
++    "NEW.piece_uuid IS NOT OLD.piece_uuid OR NEW.run_id IS NOT OLD.run_id OR "
++    "NEW.policy_revision_id IS NOT OLD.policy_revision_id OR "
++    "NEW.group_key_id IS NOT OLD.group_key_id OR NEW.quantity IS NOT OLD.quantity OR "
++    "NEW.intended_kind IS NOT OLD.intended_kind OR "
++    "NEW.intended_slot_id IS NOT OLD.intended_slot_id OR "
++    "NEW.intended_cycle_id IS NOT OLD.intended_cycle_id) "
++    "BEGIN SELECT RAISE(ABORT, 'reservation fact is referenced by delivery'); END",
++    "CREATE TRIGGER IF NOT EXISTS smart_bin_delivery_intent_immutable "
++    "BEFORE UPDATE OF intended_kind, intended_slot_id, intended_cycle_id "
++    "ON smart_bin_deliveries WHEN "
++    "NEW.intended_kind IS NOT OLD.intended_kind OR "
++    "NEW.intended_slot_id IS NOT OLD.intended_slot_id OR "
++    "NEW.intended_cycle_id IS NOT OLD.intended_cycle_id "
++    "BEGIN SELECT RAISE(ABORT, 'delivery intended destination is immutable'); END",
++    "CREATE TRIGGER IF NOT EXISTS smart_bin_delivery_actual_immutable "
++    "BEFORE UPDATE OF actual_kind, actual_slot_id, actual_cycle_id "
++    "ON smart_bin_deliveries WHEN "
++    "NEW.actual_kind IS NOT OLD.actual_kind OR "
++    "NEW.actual_slot_id IS NOT OLD.actual_slot_id OR "
++    "NEW.actual_cycle_id IS NOT OLD.actual_cycle_id "
++    "BEGIN SELECT RAISE(ABORT, 'delivery evidenced destination is immutable'); END",
++    "CREATE TABLE IF NOT EXISTS smart_bin_opening_balances ("
++    "id TEXT NOT NULL PRIMARY KEY, cycle_id TEXT NOT NULL, group_key_id TEXT, "
++    "quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity >= 0), "
++    "provenance TEXT NOT NULL, coverage TEXT NOT NULL, created_at REAL NOT NULL, "
++    "FOREIGN KEY(cycle_id) REFERENCES smart_bin_cycles(id), "
++    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_audit_events ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, reservation_id TEXT, "
++    "request_key TEXT NOT NULL UNIQUE, payload_hash TEXT NOT NULL, "
++    "before_revision INTEGER NOT NULL CHECK(before_revision >= 0), "
++    "after_revision INTEGER NOT NULL CHECK(after_revision >= before_revision), "
++    "actor TEXT NOT NULL, reason TEXT NOT NULL, evidence_ref TEXT, created_at REAL NOT NULL, "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_discrepancies ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, reservation_id TEXT, cycle_id TEXT, "
++    "kind TEXT NOT NULL, status TEXT NOT NULL, evidence_ref TEXT, details_json TEXT NOT NULL, "
++    "created_at REAL NOT NULL, resolved_at REAL, "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id), "
++    "FOREIGN KEY(cycle_id) REFERENCES smart_bin_cycles(id))",
++    "CREATE TABLE IF NOT EXISTS smart_bin_external_operations ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, reservation_id TEXT, "
++    "system_name TEXT NOT NULL, operation_kind TEXT NOT NULL, "
++    "request_key TEXT NOT NULL UNIQUE, payload_hash TEXT NOT NULL, "
++    "external_ref TEXT, status TEXT NOT NULL, result_json TEXT, "
++    "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++)
++
++
++def _schema_version(conn: sqlite3.Connection) -> int:
++    present = {
++        (row[0], row[1]) for row in conn.execute(
++            "SELECT type, name FROM sqlite_master WHERE name LIKE 'smart_bin_%'"
++        )
++    }
++    if ("table", "smart_bin_schema_versions") not in present:
++        if present:
++            raise UnsupportedSmartBinSchema("unversioned smart-bin schema objects exist")
++        return 0
++    rows = conn.execute("SELECT singleton, version FROM smart_bin_schema_versions").fetchall()
++    if len(rows) != 1 or rows[0][0] != 1:
++        raise UnsupportedSmartBinSchema("invalid smart-bin schema version record")
++    if rows[0][1] != SCHEMA_VERSION:
++        raise UnsupportedSmartBinSchema(
++            f"unsupported smart-bin schema version {rows[0][1]}; expected {SCHEMA_VERSION}; "
++            "migration is not implemented"
++        )
++    required = set()
++    for ddl in _SCHEMA_DDL:
++        tokens = ddl.split()
++        kind = "table" if tokens[1] == "TABLE" else (
++            "trigger" if "TRIGGER" in tokens[:3] else "index"
++        )
++        required.add((kind, tokens[tokens.index("EXISTS") + 1]))
++    if required - present:
++        raise UnsupportedSmartBinSchema("smart-bin schema version has missing objects")
++    return SCHEMA_VERSION
++
++
++def check_schema_version(conn: sqlite3.Connection) -> int:
++    """Read the explicit ledger version without creating schema or legacy state."""
++    return _schema_version(conn)
++
++
++def _configure_critical_connection(conn: sqlite3.Connection) -> None:
++    if conn.in_transaction:
++        raise RuntimeError("nested or already-active SQLite transaction is unsupported")
++    conn.execute("PRAGMA foreign_keys = ON")
++    conn.execute("PRAGMA synchronous = FULL")
++    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
++        raise RuntimeError("SQLite foreign keys could not be enabled")
++    if conn.execute("PRAGMA synchronous").fetchone()[0] != 2:
++        raise RuntimeError("SQLite FULL synchronization could not be enabled")
++
++
++def _create_schema(conn: sqlite3.Connection) -> None:
++    for statement in _SCHEMA_DDL:
++        conn.execute(statement)
++
++
++def initialize_schema() -> int:
++    """Explicitly install the inactive v2 ledger in the local-state database.
++
++    Requires the existing sorting-session table; never initializes or migrates
++    legacy state itself. All DDL and the version row commit together.
++    """
++    conn = _connect()
++    try:
++        _configure_critical_connection(conn)
++        conn.execute("BEGIN IMMEDIATE")
++        if conn.execute(
++            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sorting_sessions'"
++        ).fetchone() is None:
++            raise UnsupportedSmartBinSchema("legacy sorting_sessions schema must be initialized first")
++        version = _schema_version(conn)
++        if version == 0:
++            _create_schema(conn)
++            conn.execute(
++                "INSERT INTO smart_bin_schema_versions(singleton, version, initialized_at) "
++                "VALUES(1, ?, unixepoch('now'))",
++                (SCHEMA_VERSION,),
++            )
++        conn.commit()
++        return SCHEMA_VERSION
++    except BaseException:
++        if conn.in_transaction:
++            conn.rollback()
++        raise
++    finally:
++        conn.close()
++
++
++@contextmanager
++def critical_transaction(conn: sqlite3.Connection | None = None) -> Iterator[sqlite3.Connection]:
++    """Begin a FULL-synchronous, FK-enforced transaction for caller writes.
++
++    The caller explicitly commits. Exceptions or an uncommitted normal exit
++    roll back. A supplied connection stays open; its original PRAGMAs return
++    after the transaction. Schema initialization must happen beforehand.
++    """
++    owned = conn is None
++    if conn is None:
++        conn = _connect()
++    active_at_entry = conn.in_transaction
++    original_sync = conn.execute("PRAGMA synchronous").fetchone()[0]
++    original_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
++    try:
++        _configure_critical_connection(conn)
++        conn.execute("BEGIN IMMEDIATE")
++        if _schema_version(conn) != SCHEMA_VERSION:
++            raise UnsupportedSmartBinSchema("smart-bin schema is not initialized")
++        yield conn
++        if conn.in_transaction:
++            raise RuntimeError("critical transaction requires an explicit caller commit")
++    finally:
++        if not active_at_entry and conn.in_transaction:
++            conn.rollback()
++        if owned:
++            conn.close()
++        elif not active_at_entry:
++            conn.execute(f"PRAGMA synchronous = {int(original_sync)}")
++            conn.execute(f"PRAGMA foreign_keys = {int(original_fk)}")
+diff --git a/software/sorter/backend/tests/test_local_state.py b/software/sorter/backend/tests/test_local_state.py
+index cd82297..642c8b9 100644
+--- a/software/sorter/backend/tests/test_local_state.py
++++ b/software/sorter/backend/tests/test_local_state.py
+@@ -160,8 +160,9 @@ class LocalStateMigrationTests(unittest.TestCase):
+         initialize_local_state()
+ 
+         import sqlite3
++        from contextlib import closing
+ 
+-        with sqlite3.connect(self.local_state_db_path) as conn:
++        with closing(sqlite3.connect(self.local_state_db_path)) as conn, conn:
+             conn.execute(
+                 "CREATE TABLE IF NOT EXISTS runtime_perf_metric_snapshots ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, recorded_at REAL)"
+@@ -176,7 +177,7 @@ class LocalStateMigrationTests(unittest.TestCase):
+         self.assertEqual(7, deleted["runtime_perf_metric_snapshots"])
+         self.assertEqual(0, deleted["profiler_metric_snapshots"])
+ 
+-        with sqlite3.connect(self.local_state_db_path) as conn:
++        with closing(sqlite3.connect(self.local_state_db_path)) as conn:
+             remaining = conn.execute(
+                 "SELECT name FROM sqlite_master WHERE type = 'table' "
+                 "AND name IN ('runtime_perf_metric_snapshots', 'profiler_metric_snapshots')"
+diff --git a/software/sorter/backend/tests/test_smart_bins_storage.py b/software/sorter/backend/tests/test_smart_bins_storage.py
+new file mode 100644
+index 0000000..1cf1ada
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_storage.py
+@@ -0,0 +1,424 @@
++"""Isolated SQLite checks for the inactive smart-bin storage foundation."""
++
++from __future__ import annotations
++
++import sqlite3
++from contextlib import contextmanager
++
++import pytest
++
++import local_state
++import piece_records
++import smart_bins_storage as storage
++
++
++@pytest.fixture
++def db_path(tmp_path, monkeypatch):
++    path = tmp_path / "state.sqlite"
++    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(path))
++    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(tmp_path / "machine.toml"))
++    monkeypatch.setattr(piece_records, "_initialized", False)
++    yield path
++    local_state.close_local_state_keeper()
++
++
++@contextmanager
++def connect(path):
++    conn = sqlite3.connect(path)
++    try:
++        conn.execute("PRAGMA foreign_keys = ON")
++        try:
++            yield conn
++        except BaseException:
++            conn.rollback()
++            raise
++        else:
++            conn.commit()
++    finally:
++        conn.close()
++
++
++def tables(conn):
++    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
++
++
++@pytest.fixture
++def prepared(db_path):
++    local_state.initialize_local_state()
++    storage.initialize_schema()
++    return db_path
++
++
++def seed(conn):
++    conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m')")
++    conn.execute(
++        "INSERT INTO smart_bin_policy_revisions(id,machine_id,compiled_artifact_hash,policy_json,created_at) "
++        "VALUES('p','m','hash','{}',1)"
++    )
++    conn.execute(
++        "INSERT INTO smart_bin_group_keys(id,kind,namespace,provenance) "
++        "VALUES('g','category','local','known')"
++    )
++    conn.execute(
++        "INSERT INTO smart_bin_slots(id,machine_id,layout_revision,layer_index,section_index,bin_index) "
++        "VALUES('s','m','layout',0,0,0)"
++    )
++    conn.execute("INSERT INTO smart_bin_containers(id,machine_id) VALUES('c','m')")
++    conn.execute(
++        "INSERT INTO smart_bin_cycles(id,machine_id,container_id,slot_id,opened_at,provenance) "
++        "VALUES('cy','m','c','s',1,'observed')"
++    )
++    conn.execute(
++        "INSERT INTO sorting_sessions(id,machine_id,started_at,status) VALUES('run','m',1,'active')"
++    )
++
++
++def reservation(conn, *, id="r", piece="piece", attempt="a", quantity=1, state="RESERVED"):
++    conn.execute(
++        "INSERT INTO smart_bin_reservations "
++        "(id,machine_id,piece_uuid,route_attempt,request_key,run_id,policy_revision_id,"
++        "group_key_id,routing_revision,quantity,intended_kind,intended_slot_id,"
++        "intended_cycle_id,state,created_at,updated_at) "
++        "VALUES(?,?,?,?,?,'run','p','g',0,?,'BIN','s','cy',?,1,1)",
++        (id, "m", piece, attempt, id, quantity, state),
++    )
++
++
++def seed_alternatives(conn):
++    conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m2')")
++    conn.execute("INSERT INTO smart_bin_policy_revisions(id,machine_id,compiled_artifact_hash,policy_json,created_at) VALUES('p2','m2','hash2','{}',1)")
++    conn.execute("INSERT INTO smart_bin_policy_revisions(id,machine_id,compiled_artifact_hash,policy_json,created_at) VALUES('p-other','m','hash3','{}',1)")
++    conn.execute("INSERT INTO smart_bin_group_keys(id,kind,namespace,provenance) VALUES('g-other','category','local','known')")
++    conn.execute("INSERT INTO smart_bin_slots(id,machine_id,layout_revision,layer_index,section_index,bin_index) VALUES('s2','m','layout',0,0,1)")
++    conn.execute("INSERT INTO smart_bin_cycles(id,machine_id,slot_id,opened_at,provenance) VALUES('cy2','m','s2',1,'observed')")
++    conn.execute("INSERT INTO smart_bin_slots(id,machine_id,layout_revision,layer_index,section_index,bin_index) VALUES('s-m2','m2','layout',0,0,0)")
++    conn.execute("INSERT INTO smart_bin_cycles(id,machine_id,slot_id,opened_at,provenance) VALUES('cy-m2','m2','s-m2',1,'observed')")
++    conn.execute("INSERT INTO sorting_sessions(id,machine_id,started_at,status) VALUES('run-other','m',1,'active')")
++    conn.execute("INSERT INTO sorting_sessions(id,machine_id,started_at,status) VALUES('run-m2','m2',1,'active')")
++
++
++def delivery(conn, **overrides):
++    fields = dict(id="d", reservation_id="r", machine_id="m", piece_uuid="piece",
++                  run_id="run", policy_revision_id="p", group_key_id="g", quantity=1,
++                  intended_kind="BIN", intended_slot_id="s", intended_cycle_id="cy",
++                  actual_kind="BIN", actual_slot_id="s", actual_cycle_id="cy",
++                  evidence_ref="exit", delivered_at=2)
++    fields.update(overrides)
++    conn.execute(
++        "INSERT INTO smart_bin_deliveries (" + ",".join(fields) + ") VALUES (" +
++        ",".join("?" for _ in fields) + ")", tuple(fields.values())
++    )
++
++
++def test_explicit_rerunnable_init_and_legacy_state_preserved(db_path):
++    assert not db_path.exists()
++    with pytest.raises(storage.UnsupportedSmartBinSchema):
++        storage.initialize_schema()
++    with connect(db_path) as conn:
++        assert not any(name.startswith("smart_bin_") for name in tables(conn))
++    local_state.initialize_local_state()
++    with connect(db_path) as conn:
++        conn.execute(
++            "INSERT INTO sorting_sessions(id,machine_id,started_at,status) "
++            "VALUES('existing','legacy',1,'active')"
++        )
++        conn.execute("INSERT INTO state_entries(key,json_value,updated_at) VALUES('setting','{\"enabled\":true}',1)")
++        before = conn.execute("SELECT * FROM sorting_sessions WHERE id='existing'").fetchone()
++        setting = conn.execute("SELECT * FROM state_entries WHERE key='setting'").fetchone()
++        assert not any(name.startswith("smart_bin_") for name in tables(conn))
++    assert storage.initialize_schema() == storage.SCHEMA_VERSION
++    assert storage.initialize_schema() == storage.SCHEMA_VERSION
++    with connect(db_path) as conn:
++        assert storage.check_schema_version(conn) == storage.SCHEMA_VERSION
++        assert conn.execute("SELECT * FROM sorting_sessions WHERE id='existing'").fetchone() == before
++        assert conn.execute("SELECT * FROM state_entries WHERE key='setting'").fetchone() == setting
++        assert conn.execute("SELECT count(*) FROM smart_bin_schema_versions").fetchone()[0] == 1
++
++
++def test_init_failure_rolls_back_all_ledger_ddl(db_path, monkeypatch):
++    local_state.initialize_local_state()
++    original = storage._create_schema
++
++    def fail_after_first_table(conn):
++        conn.execute(storage._SCHEMA_DDL[0])
++        raise RuntimeError("injected failure")
++
++    monkeypatch.setattr(storage, "_create_schema", fail_after_first_table)
++    with pytest.raises(RuntimeError, match="injected failure"):
++        storage.initialize_schema()
++    with connect(db_path) as conn:
++        assert not any(name.startswith("smart_bin_") for name in tables(conn))
++        assert "sorting_sessions" in tables(conn)
++    monkeypatch.setattr(storage, "_create_schema", original)
++    assert storage.initialize_schema() == storage.SCHEMA_VERSION
++
++
++def test_constraints_and_intended_destination_immutability(prepared):
++    with storage.critical_transaction() as conn:
++        seed(conn)
++        reservation(conn)
++        conn.commit()
++    with connect(prepared) as conn:
++        with pytest.raises(sqlite3.IntegrityError):
++            reservation(conn, id="bad-quantity", piece="q", quantity=0)
++        with pytest.raises(sqlite3.IntegrityError):
++            reservation(conn, id="duplicate-live", piece="piece", attempt="b")
++        with pytest.raises(sqlite3.IntegrityError, match="reservation intended destination is immutable"):
++            conn.execute("UPDATE smart_bin_reservations SET intended_kind='REJECT', "
++                         "intended_slot_id=NULL, intended_cycle_id=NULL WHERE id='r'")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("INSERT INTO smart_bin_cycles(id,machine_id,slot_id,opened_at,provenance) "
++                         "VALUES('second','m','s',2,'observed')")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("INSERT INTO smart_bin_opening_balances(id,cycle_id,quantity,provenance,coverage,created_at) "
++                         "VALUES('bad','cy',-1,'observed','complete',2)")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("INSERT INTO smart_bin_opening_balances(id,cycle_id,quantity,provenance,coverage,created_at) "
++                         "VALUES('missing','absent',1,'observed','complete',2)")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("INSERT INTO smart_bin_assignments(id,machine_id,slot_id,policy_revision_id,group_key_id,routing_revision,created_at) "
++                         "VALUES('wrong-machine','other','s','p','g',0,2)")
++        delivery(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="delivery evidenced destination is immutable"):
++            conn.execute("UPDATE smart_bin_deliveries SET actual_kind='REJECT', "
++                         "actual_slot_id=NULL, actual_cycle_id=NULL WHERE id='d'")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("INSERT INTO smart_bin_deliveries "
++                         "(id,reservation_id,machine_id,piece_uuid,run_id,policy_revision_id,group_key_id,"
++                         "quantity,intended_kind,intended_slot_id,intended_cycle_id,actual_kind,"
++                         "actual_slot_id,actual_cycle_id,evidence_ref,delivered_at) "
++                         "VALUES('d2','r','m','piece','run','p','g',1,'BIN','s','cy','BIN','s','cy','exit',2)")
++        assert conn.execute("SELECT intended_slot_id FROM smart_bin_reservations WHERE id='r'").fetchone()[0] == "s"
++
++
++@pytest.mark.parametrize("overrides", [
++    {"piece_uuid": "different"},
++    {"run_id": "run-other"},
++    {"policy_revision_id": "p-other"},
++    {"group_key_id": "g-other"},
++    {"quantity": 2},
++    {"intended_kind": "REJECT", "intended_slot_id": None, "intended_cycle_id": None},
++    {"intended_slot_id": "s2"},
++    {"intended_cycle_id": "cy2"},
++    {"machine_id": "m2", "run_id": "run-m2", "policy_revision_id": "p2",
++     "intended_slot_id": "s-m2", "intended_cycle_id": "cy-m2",
++     "actual_slot_id": "s-m2", "actual_cycle_id": "cy-m2"},
++])
++def test_delivery_insert_must_match_reservation(prepared, overrides):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        reservation(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="delivery does not match reservation"):
++            delivery(conn, **overrides)
++
++
++@pytest.mark.parametrize("overrides,error", [
++    ({"piece_uuid": "different"}, "delivery does not match reservation"),
++    ({"run_id": "run-other"}, "delivery does not match reservation"),
++    ({"intended_kind": "REJECT", "intended_slot_id": None, "intended_cycle_id": None},
++     "delivery (does not match reservation|intended destination is immutable)"),
++    ({"machine_id": "m2", "run_id": "run-m2", "policy_revision_id": "p2",
++     "intended_slot_id": "s-m2", "intended_cycle_id": "cy-m2",
++     "actual_slot_id": "s-m2", "actual_cycle_id": "cy-m2"},
++     "delivery (does not match reservation|intended destination is immutable|evidenced destination is immutable)"),
++])
++def test_delivery_update_must_match_reservation(prepared, overrides, error):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        reservation(conn)
++        delivery(conn)
++        update = ", ".join(f"{name}=?" for name in overrides)
++        with pytest.raises(sqlite3.IntegrityError, match=error):
++            conn.execute(f"UPDATE smart_bin_deliveries SET {update} WHERE id='d'", tuple(overrides.values()))
++        assert conn.execute("SELECT piece_uuid FROM smart_bin_deliveries WHERE id='d'").fetchone()[0] == "piece"
++
++
++@pytest.mark.parametrize("column,value", [
++    ("piece_uuid", "different"), ("run_id", "run-other"),
++    ("policy_revision_id", "p-other"), ("group_key_id", "g-other"),
++    ("quantity", 2),
++])
++def test_delivered_reservation_facts_cannot_change(prepared, column, value):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        reservation(conn)
++        delivery(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="reservation fact is referenced by delivery"):
++            conn.execute(f"UPDATE smart_bin_reservations SET {column}=? WHERE id='r'", (value,))
++
++
++def test_delivery_reservation_identity_cannot_be_repointed(prepared):
++    with connect(prepared) as conn:
++        seed(conn)
++        reservation(conn)
++        delivery(conn)
++        conn.execute("UPDATE smart_bin_reservations SET state='COMPLETED' WHERE id='r'")
++        reservation(conn, id="r2", attempt="b")
++        with pytest.raises(sqlite3.IntegrityError, match="delivery reservation identity is immutable"):
++            conn.execute("UPDATE smart_bin_deliveries SET reservation_id='r2' WHERE id='d'")
++
++
++def test_consistent_delivery_and_independent_actual_destination(prepared):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        reservation(conn)
++        # The actual receiving cycle may differ from the reservation's intent.
++        delivery(conn, actual_slot_id="s2", actual_cycle_id="cy2")
++        assert conn.execute("SELECT intended_cycle_id,actual_cycle_id FROM smart_bin_deliveries "
++                            "WHERE id='d'").fetchone() == ("cy", "cy2")
++        # Historical evidence remains valid when the cycle is detached.
++        conn.execute("UPDATE smart_bin_cycles SET slot_id=NULL WHERE id='cy2'")
++        assert conn.execute("SELECT actual_cycle_id FROM smart_bin_deliveries WHERE id='d'").fetchone()[0] == "cy2"
++
++
++def test_cross_machine_sorting_session_rejected(prepared):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
++            conn.execute(
++                "INSERT INTO smart_bin_reservations "
++                "(id,machine_id,piece_uuid,route_attempt,request_key,run_id,policy_revision_id,"
++                "group_key_id,routing_revision,quantity,intended_kind,intended_slot_id,"
++                "intended_cycle_id,state,created_at,updated_at) "
++                "VALUES('cross','m','other','a','cross','run-m2','p','g',0,1,'BIN','s','cy','RESERVED',1,1)"
++            )
++        reservation(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
++            conn.execute("UPDATE sorting_sessions SET machine_id='m2' WHERE id='run'")
++
++
++def test_cross_machine_updates_cannot_rewrite_reject_delivery(prepared):
++    with connect(prepared) as conn:
++        seed(conn)
++        seed_alternatives(conn)
++        conn.execute(
++            "INSERT INTO smart_bin_reservations "
++            "(id,machine_id,piece_uuid,route_attempt,request_key,run_id,policy_revision_id,"
++            "group_key_id,routing_revision,quantity,intended_kind,state,created_at,updated_at) "
++            "VALUES('reject-r','m','reject-piece','a','reject-r','run','p','g',0,1,"
++            "'REJECT','RESERVED',1,1)"
++        )
++        delivery(conn, id="reject-d", reservation_id="reject-r", piece_uuid="reject-piece",
++                 intended_kind="REJECT", intended_slot_id=None, intended_cycle_id=None,
++                 actual_kind="REJECT", actual_slot_id=None, actual_cycle_id=None)
++        with pytest.raises(sqlite3.IntegrityError, match="delivery does not match reservation"):
++            conn.execute("UPDATE smart_bin_deliveries SET machine_id='m2', "
++                         "run_id='run-m2', policy_revision_id='p2' WHERE id='reject-d'")
++        with pytest.raises(sqlite3.IntegrityError, match="reservation fact is referenced by delivery"):
++            conn.execute("UPDATE smart_bin_reservations SET machine_id='m2', "
++                         "run_id='run-m2', policy_revision_id='p2' WHERE id='reject-r'")
++
++
++def test_primary_text_ids_are_required(prepared):
++    with connect(prepared) as conn:
++        for table, column in (("smart_bin_machines", "machine_id"),
++                              ("smart_bin_policy_revisions", "id"),
++                              ("smart_bin_group_keys", "id"),
++                              ("smart_bin_slots", "id"),
++                              ("smart_bin_assignments", "id"),
++                              ("smart_bin_containers", "id"),
++                              ("smart_bin_cycles", "id"),
++                              ("smart_bin_reservations", "id"),
++                              ("smart_bin_release_attempts", "id"),
++                              ("smart_bin_deliveries", "id"),
++                              ("smart_bin_opening_balances", "id"),
++                              ("smart_bin_audit_events", "id"),
++                              ("smart_bin_discrepancies", "id"),
++                              ("smart_bin_external_operations", "id")):
++            info = {row[1]: row for row in conn.execute(f"PRAGMA table_info({table})")}
++            assert info[column][3] == 1, (table, column)
++        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed"):
++            conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES(NULL)")
++        seed(conn)
++        reservation(conn)
++        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL constraint failed"):
++            delivery(conn, id=None)
++
++
++def test_old_schema_version_is_rejected_without_repair(db_path):
++    local_state.initialize_local_state()
++    with connect(db_path) as conn:
++        conn.execute("CREATE TABLE smart_bin_schema_versions (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, initialized_at REAL NOT NULL)")
++        conn.execute("INSERT INTO smart_bin_schema_versions VALUES(1,1,1)")
++        conn.execute("CREATE TABLE smart_bin_machines (machine_id TEXT PRIMARY KEY, state_revision INTEGER NOT NULL)")
++        before = tables(conn)
++    with pytest.raises(storage.UnsupportedSmartBinSchema, match="version 1"):
++        storage.initialize_schema()
++    with connect(db_path) as conn:
++        assert tables(conn) == before
++        assert conn.execute("SELECT version FROM smart_bin_schema_versions").fetchone()[0] == 1
++
++
++def test_test_connection_helper_closes_on_success_and_failure(db_path):
++    with connect(db_path) as conn:
++        conn.execute("CREATE TABLE scratch (id INTEGER)")
++        conn.execute("INSERT INTO scratch VALUES(1)")
++    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
++        conn.execute("SELECT 1")
++    with pytest.raises(RuntimeError, match="injected"):
++        with connect(db_path) as failed:
++            failed.execute("INSERT INTO scratch VALUES(2)")
++            raise RuntimeError("injected")
++    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
++        failed.execute("SELECT 1")
++    with connect(db_path) as reader:
++        assert reader.execute("SELECT count(*) FROM scratch").fetchone()[0] == 1
++
++
++def test_critical_transaction_full_fk_nesting_and_rollback(prepared):
++    with connect(prepared) as conn:
++        conn.execute("PRAGMA synchronous = NORMAL")
++        with pytest.raises(RuntimeError, match="explicit caller commit"):
++            with storage.critical_transaction(conn) as tx:
++                assert tx.execute("PRAGMA synchronous").fetchone()[0] == 2
++                assert tx.execute("PRAGMA foreign_keys").fetchone()[0] == 1
++                tx.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('rolled-back')")
++                with pytest.raises(RuntimeError, match="nested"):
++                    with storage.critical_transaction(tx):
++                        pass
++                assert tx.in_transaction
++        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM smart_bin_machines").fetchone()[0] == 0
++        with pytest.raises(storage.UnsupportedSmartBinSchema):
++            with storage.critical_transaction(conn) as tx:
++                tx.execute("DELETE FROM smart_bin_schema_versions")
++                tx.commit()
++                # Check catches the missing version on the next entry.
++            with storage.critical_transaction(conn):
++                pass
++
++
++def test_history_and_ledger_share_commit_and_rollback(prepared):
++    piece_records.initialize_piece_records()
++    with pytest.raises(RuntimeError, match="injected"):
++        with storage.critical_transaction() as conn:
++            conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m')")
++            piece_records.recordPieceOnConnection(conn, {"uuid": "piece", "part_id": "A"}, run_id="run")
++            raise RuntimeError("injected")
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_machines").fetchone()[0] == 0
++        assert conn.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 0
++    with storage.critical_transaction() as conn:
++        conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m')")
++        piece_records.recordPieceOnConnection(conn, {"uuid": "piece", "part_id": "A"}, run_id="run")
++        with connect(prepared) as separate:
++            assert separate.execute("SELECT count(*) FROM smart_bin_machines").fetchone()[0] == 0
++            assert separate.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 0
++        conn.commit()
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT part_id FROM piece_records WHERE uuid='piece'").fetchone()[0] == "A"
++        conn.execute("UPDATE piece_records SET part_correct=0, correction_updated_at=12 WHERE uuid='piece'")
++    with storage.critical_transaction() as conn:
++        piece_records.recordPieceOnConnection(conn, {"uuid": "piece", "part_id": "B"}, run_id="run")
++        conn.commit()
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT part_id,part_correct,correction_updated_at FROM piece_records "
++                            "WHERE uuid='piece'").fetchone() == ("B", 0, 12)
++    piece_records.recordPiece({"uuid": "wrapper", "part_id": "C"}, run_id="run")
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT part_id FROM piece_records WHERE uuid='wrapper'").fetchone()[0] == "C"

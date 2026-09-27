@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2A1 review correction",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "uncommitted": true
+  },
+  "accepted_p1_review": {
+    "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+    "package": "chat_review/smart-bins/P1/r2",
+    "patch_sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48"
+  },
+  "predecessor_review": {
+    "commit": "0f2d146132b9ca10e086254f8d9655b9718a6b9f",
+    "package": "chat_review/smart-bins/P2A1/r1",
+    "patch_sha256": "033d8d5fd3b9bcb3a7629b8f33fdc2379c47ac04e31830fd2ed59c308b6f5ccc"
+  },
+  "patches": {
+    "P2A1.patch": {
+      "base": "original implementation HEAD plus accepted P1 r2 P1.patch",
+      "scope": "complete current P2A1 slice only",
+      "paths": [
+        "software/sorter/backend/piece_records.py",
+        "software/sorter/backend/smart_bins_storage.py",
+        "software/sorter/backend/tests/test_local_state.py",
+        "software/sorter/backend/tests/test_smart_bins_storage.py"
+      ]
+    },
+    "P2A1-r1-to-r2.patch": {
+      "base": "exact P2A1 r1 source after accepted P1 r2",
+      "scope": "r2 correction only",
+      "paths": [
+        "software/sorter/backend/smart_bins_storage.py",
+        "software/sorter/backend/tests/test_local_state.py",
+        "software/sorter/backend/tests/test_smart_bins_storage.py"
+      ]
+    }
+  },
+  "predecessor_source_test_sha256": {
+    "software/sorter/backend/local_state.py": "005c097bc152858c2fa3178936a5190cc3adf02006467a335cf2731276af7534",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_bin_eligibility.py": "64ac552e1912fe64135fbb9b2c19644b976ca92a6f1a3d56a74b93e719162a94",
+    "software/sorter/backend/tests/test_local_state.py": "017cfc954f6dc19024558002e36692248c564e96b4dbc89ce9a9a8319bc12cae",
+    "software/sorter/backend/piece_records.py": "e8e4c6f7540deb5985425f895dff582d6ca392c37ef7bd9590b8f4ddae467c28",
+    "software/sorter/backend/smart_bins_storage.py": "a1db0a420bca9ce17c291d3334a372aeb7185184529c63709ed189fd5bd1ea5f",
+    "software/sorter/backend/tests/test_smart_bins_storage.py": "20005a4b60f4cfe7147d12e48903438ff3caf3094f0efe7f404b97dc7b562720"
+  },
+  "current_source_test_sha256": {
+    "software/sorter/backend/local_state.py": "005c097bc152858c2fa3178936a5190cc3adf02006467a335cf2731276af7534",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_bin_eligibility.py": "64ac552e1912fe64135fbb9b2c19644b976ca92a6f1a3d56a74b93e719162a94",
+    "software/sorter/backend/tests/test_local_state.py": "f098ddfabb5f6051307c5b40d24166ebae3059430a1e9d67394293e93ef047ba",
+    "software/sorter/backend/piece_records.py": "e8e4c6f7540deb5985425f895dff582d6ca392c37ef7bd9590b8f4ddae467c28",
+    "software/sorter/backend/smart_bins_storage.py": "923b07906a19c9e730cb9511aaa51b9a774caaff2fb6b299a2bd4ccb07514373",
+    "software/sorter/backend/tests/test_smart_bins_storage.py": "95a7e8ad06022b8bd870a6c9d0415c8ef9434ca4bf3d0d688e9f8fc792694624"
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2A1/r2/REVIEW.md": "009590da10b1235d9c496bb4fb1ef006e8c506df158e77d5476531f3d4609bfe",
+    "chat_review/smart-bins/P2A1/r2/P2A1.patch": "c5fa8560d32b35ddcff00c667d9155ef863c64dac83d932f5e630859fde544cf",
+    "chat_review/smart-bins/P2A1/r2/P2A1-r1-to-r2.patch": "ccb3c5f534bedbf0f93caa7463ff1b2649300797835cc586b3cd0ca9888c81f4"
+  }
+}
