@@ -1,0 +1,79 @@
+{
+  "changed_source_test_sha256": {
+    "software/sorter/backend/smart_bins_eligibility.py": "c7dd4984d2a1cff480167ecee1e964e8c2979dd87a798531879395eda4dd3341",
+    "software/sorter/backend/smart_bins_migration.py": "ba7087a9ea507980afb837d9704366d16e3bc8ce7313adb860a1be54991e5ee5",
+    "software/sorter/backend/smart_bins_service.py": "82ce762753ac678dbf561cc52c458249147c64c683b760e9094735d299c0bbd4",
+    "software/sorter/backend/subsystems/distribution/positioning.py": "214db31c58865de40d843debeb80d565d3f40ab735f01cfe9357d29d308bca0a",
+    "software/sorter/backend/tests/test_smart_bins_reservations.py": "6660f23110b13aea3bdea4b61cd18c0eadc28314ce4a43d7ef2f84d5953849aa"
+  },
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "uncommitted": true
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2B/r1/P2B.patch": "7666f33b90cc8a1c7fd9bd7fa00ff90a1f36e349e998c5ec36faa345e721e4a2",
+    "chat_review/smart-bins/P2B/r1/REVIEW.md": "4543a0811e9eb03f8f337475c7464c04fb002812f0047f8ccb39c29b98bff703"
+  },
+  "patch": {
+    "base_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899",
+    "file": "P2B.patch",
+    "paths": [
+      "software/sorter/backend/smart_bins_eligibility.py",
+      "software/sorter/backend/smart_bins_migration.py",
+      "software/sorter/backend/smart_bins_service.py",
+      "software/sorter/backend/subsystems/distribution/positioning.py",
+      "software/sorter/backend/tests/test_smart_bins_reservations.py"
+    ],
+    "reconstruction_verified": true,
+    "result_tree": "8ba9a372480b74d50b8c205146459c494ec1d8cc",
+    "scope": "P2B slice only"
+  },
+  "patch_base_blob_sha256": {
+    "software/sorter/backend/smart_bins_eligibility.py": null,
+    "software/sorter/backend/smart_bins_migration.py": "b6da623a36d9cb0a9391003f92dd521e594398b678a2ddb87b332eab049d9cb4",
+    "software/sorter/backend/smart_bins_service.py": null,
+    "software/sorter/backend/subsystems/distribution/positioning.py": "545afcea70ffbcd0369c1c0d23ef40a0e0bd71314ab2e85278978edb4142e9e5",
+    "software/sorter/backend/tests/test_smart_bins_reservations.py": null
+  },
+  "predecessors": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch"
+    }
+  ],
+  "repository": "abrianbaker80/sorter-v2",
+  "schema_version": 1,
+  "service_schema": {
+    "core_version": 2,
+    "explicit_initialization": true,
+    "migration_extension_version": 2,
+    "service_extension_version": 1
+  },
+  "slice": "P2B inactive transactional destination reservations r1",
+  "tests": [
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_reservations.py -q",
+      "result": "25 passed"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_reservations.py tests/test_smart_bins_storage.py tests/test_smart_bins_migration.py -q",
+      "result": "90 passed"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_bin_eligibility.py -q",
+      "result": "26 passed"
+    }
+  ]
+}
