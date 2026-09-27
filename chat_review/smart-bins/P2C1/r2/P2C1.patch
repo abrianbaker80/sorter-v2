@@ -1,0 +1,1343 @@
+diff --git a/software/sorter/backend/smart_bins_delivery.py b/software/sorter/backend/smart_bins_delivery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..723024c35687bd59172b609e07cf51491afbf606
+--- /dev/null
++++ b/software/sorter/backend/smart_bins_delivery.py
+@@ -0,0 +1,557 @@
++"""Inactive, durable native smart-bin delivery transitions.
++
++The physical owner supplies custody and route observations while holding its
++outer locks. This module records them; it never grants or dispatches motion.
++The future adapter must enforce a single-use owner-bound dispatch permit after
++prepare_release, and retain marker confirmation until confirm_exit commits
++before planner.complete_index removes the exiting custody binding.
++"""
++
++from __future__ import annotations
++
++import json
++import sqlite3
++import time
++import uuid
++from contextlib import contextmanager
++from dataclasses import asdict, dataclass
++from typing import Any
++
++from local_state import local_state_db_path
++from piece_records import initialize_piece_records, recordPieceOnConnection
++from smart_bins_service import (
++    ReservationRequest, RoutingQualification, _candidate, _check_service_schema,
++    _digest, _receipt, _refuse, _rollback_refusal, _save_receipt,
++    _unresolved_journey_discrepancy, _validate_context, qualification_digest,
++)
++from smart_bins_storage import critical_transaction
++
++
++@dataclass(frozen=True)
++class CustodyRef:
++    piece_uuid: str
++    owner_incarnation: str
++    episode_id: str
++    pocket_index: int
++    pocket_generation: int
++
++
++@dataclass(frozen=True)
++class ReleaseEvidence:
++    custody: CustodyRef
++    target_boundary: int
++    destination_kind: str
++    slot_id: str | None
++    cycle_id: str | None
++    current_owner: bool
++    route_ready: bool
++    owner_evidence_ref: str
++    route_evidence_ref: str
++    observed_at: float
++    expires_at: float
++    max_dimension_mm: float | None = None
++    too_big: bool = False
++    harvest_allocation_ref: str | None = None
++    harvest_metadata: dict[str, Any] | None = None
++
++
++@dataclass(frozen=True)
++class ExitEvidence:
++    custody: CustodyRef
++    attempt_id: str
++    target_boundary: int
++    marker_confirmed: bool
++    marker_evidence_ref: str
++    confirmed_at: float
++
++
++@dataclass(frozen=True)
++class CompletionEvidence:
++    custody: CustodyRef
++    attempt_id: str
++    target_boundary: int
++    completion_evidence_ref: str
++    completed_at: float
++    actual_kind: str
++    actual_slot_id: str | None
++    actual_cycle_id: str | None
++    sorting_session_id: str
++    runtime_run_id: str
++    history_piece: dict[str, Any]
++    harvest_allocation_ref: str | None = None
++    harvest_metadata: dict[str, Any] | None = None
++
++
++@dataclass(frozen=True)
++class UncertaintyEvidence:
++    piece_uuid: str
++    owner_incarnation: str | None
++    reason: str
++    evidence_ref: str
++    attempt_id: str | None = None
++
++
++@dataclass(frozen=True)
++class ContradictionEvidence:
++    reason: str
++    evidence_ref: str
++    actual_kind: str | None = None
++    actual_slot_id: str | None = None
++    actual_cycle_id: str | None = None
++
++
++def _identity(machine_id: str, reservation_id: str, request_key: str,
++              expected_reservation_revision: int) -> None:
++    if (not all(isinstance(value, str) and value for value in
++                (machine_id, reservation_id, request_key))
++        or type(expected_reservation_revision) is not int
++        or expected_reservation_revision < 0):
++        raise ValueError("missing lifecycle identity or expected revision")
++
++
++def _hash(action: str, machine_id: str, reservation_id: str, revision: int,
++          evidence: Any, qualification: RoutingQualification | None = None) -> str:
++    return _digest({"action": action, "machine_id": machine_id,
++                    "reservation_id": reservation_id,
++                    "expected_reservation_revision": revision,
++                    "evidence": asdict(evidence),
++                    "qualification": asdict(qualification) if qualification else None})
++
++
++def _reservation(conn: sqlite3.Connection, machine_id: str, reservation_id: str):
++    return conn.execute("SELECT * FROM smart_bin_reservations WHERE machine_id=? AND id=?",
++                        (machine_id, reservation_id)).fetchone()
++
++
++def _current(row: sqlite3.Row | None, revision: int, state: str | tuple[str, ...]):
++    if row is None:
++        return _refuse("NOT_FOUND")
++    allowed = (state,) if isinstance(state, str) else state
++    if row["state"] not in allowed:
++        return _refuse("UNSAFE_STATE", state=row["state"])
++    if row["row_revision"] != revision:
++        return _refuse("STALE_REVISION", reservation_revision=row["row_revision"])
++    return None
++
++
++def _custody_matches(row: sqlite3.Row, custody: CustodyRef) -> bool:
++    return (isinstance(custody.piece_uuid, str) and bool(custody.piece_uuid)
++            and isinstance(custody.owner_incarnation, str) and bool(custody.owner_incarnation)
++            and isinstance(custody.episode_id, str) and bool(custody.episode_id)
++            and type(custody.pocket_index) is int and custody.pocket_index >= 0
++            and type(custody.pocket_generation) is int and custody.pocket_generation >= 0
++            and custody.piece_uuid == row["piece_uuid"]
++            and custody.owner_incarnation == row["owner_incarnation"]
++            and custody.episode_id == row["episode_id"]
++            and custody.pocket_index == row["pocket_index"]
++            and custody.pocket_generation == row["pocket_generation"])
++
++
++def _destination_valid(kind: str | None, slot_id: str | None,
++                       cycle_id: str | None) -> bool:
++    return ((kind == "BIN" and bool(slot_id) and bool(cycle_id))
++            or (kind == "REJECT" and slot_id is None and cycle_id is None))
++
++
++def _destination_references_qualified(conn: sqlite3.Connection, machine_id: str,
++                                      kind: str, slot_id: str | None,
++                                      cycle_id: str | None) -> bool:
++    """Validate identity without binding historical evidence to attachment."""
++    if kind == "REJECT":
++        return slot_id is None and cycle_id is None
++    if kind != "BIN" or not slot_id or not cycle_id:
++        return False
++    return (conn.execute("SELECT 1 FROM smart_bin_slots WHERE machine_id=? AND id=?",
++                         (machine_id, slot_id)).fetchone() is not None
++            and conn.execute("SELECT 1 FROM smart_bin_cycles WHERE machine_id=? AND id=?",
++                             (machine_id, cycle_id)).fetchone() is not None)
++
++
++def _harvest_metadata(evidence: ReleaseEvidence | CompletionEvidence) -> bool:
++    if evidence.harvest_allocation_ref is not None or evidence.harvest_metadata:
++        return True
++    if isinstance(evidence, CompletionEvidence):
++        return any(key.startswith("harvest_") and key != "harvest_exception" and value
++                   for key, value in evidence.history_piece.items())
++    return False
++
++
++def _attempt(conn: sqlite3.Connection, reservation_id: str):
++    return conn.execute("SELECT a.id,a.owner_incarnation,a.target_boundary,a.created_at,"
++                        "e.intent_json,e.exit_json,e.completion_json "
++                        "FROM smart_bin_release_attempts a JOIN smart_bin_release_evidence e "
++                        "ON e.attempt_id=a.id WHERE a.reservation_id=?", (reservation_id,)).fetchone()
++
++
++def _finish(conn: sqlite3.Connection, row: sqlite3.Row, request_key: str,
++            payload_hash: str, action: str, *, new_state: str | None,
++            evidence_ref: str, result: dict[str, Any], code: str = "OK") -> dict[str, Any]:
++    machine_id, reservation_id = row["machine_id"], row["id"]
++    before = conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id=?",
++                          (machine_id,)).fetchone()[0]
++    now = time.time()
++    row_revision = row["row_revision"]
++    if new_state is not None:
++        cursor = conn.execute("UPDATE smart_bin_reservations SET state=?,row_revision=row_revision+1,"
++                              "updated_at=? WHERE id=? AND row_revision=? AND state=?",
++                              (new_state, now, reservation_id, row_revision, row["state"]))
++        if cursor.rowcount != 1:
++            raise RuntimeError("reservation changed during lifecycle transaction")
++        row_revision += 1
++    conn.execute("UPDATE smart_bin_machines SET state_revision=? WHERE machine_id=?",
++                 (before + 1, machine_id))
++    conn.execute("INSERT INTO smart_bin_audit_events "
++                 "(id,machine_id,reservation_id,request_key,payload_hash,before_revision,"
++                 "after_revision,actor,reason,evidence_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
++                 (str(uuid.uuid4()), machine_id, reservation_id, request_key, payload_hash,
++                  before, before + 1, "smart_bins_delivery", action.lower(), evidence_ref, now))
++    receipt = {"code": code, "reservation_id": reservation_id,
++               "state": new_state or row["state"], "reservation_revision": row_revision,
++               "state_revision": before + 1, **result}
++    _save_receipt(conn, request_key, machine_id, action, payload_hash,
++                  reservation_id, receipt)
++    conn.commit()
++    return receipt
++
++
++def prepare_release(machine_id: str, reservation_id: str, *,
++                    expected_reservation_revision: int, request_key: str,
++                    qualification: RoutingQualification,
++                    evidence: ReleaseEvidence) -> dict[str, Any]:
++    """Persist intent only. A replayed receipt never authorizes motor dispatch."""
++    _identity(machine_id, reservation_id, request_key, expected_reservation_revision)
++    payload_hash = _hash("PREPARE_RELEASE", machine_id, reservation_id,
++                         expected_reservation_revision, evidence, qualification)
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        row = _reservation(conn, machine_id, reservation_id)
++        refusal = _current(row, expected_reservation_revision, "RESERVED")
++        if refusal:
++            return _rollback_refusal(conn, **refusal)
++        if _unresolved_journey_discrepancy(conn, machine_id, row["piece_uuid"]):
++            return _rollback_refusal(conn, "UNRESOLVED_DELIVERY")
++        now = time.time()
++        if (not _custody_matches(row, evidence.custody)
++            or not evidence.current_owner or not evidence.route_ready
++            or not evidence.owner_evidence_ref or not evidence.route_evidence_ref
++            or type(evidence.target_boundary) is not int or evidence.target_boundary < 0
++            or type(evidence.observed_at) not in (int, float)
++            or type(evidence.expires_at) not in (int, float)
++            or evidence.observed_at > now + 1 or now - evidence.observed_at > 5
++            or evidence.expires_at <= now or evidence.expires_at - evidence.observed_at > 5):
++            return _rollback_refusal(conn, "OWNER_EVIDENCE_REQUIRED")
++        if _harvest_metadata(evidence):
++            return _rollback_refusal(conn, "HARVEST_DEFERRED")
++        if (not _destination_valid(evidence.destination_kind, evidence.slot_id, evidence.cycle_id)
++            or (evidence.destination_kind, evidence.slot_id, evidence.cycle_id)
++            != (row["intended_kind"], row["intended_slot_id"], row["intended_cycle_id"])):
++            return _rollback_refusal(conn, "DESTINATION_MISMATCH")
++        if (qualification.machine_id != machine_id
++            or qualification.policy_revision_id != row["policy_revision_id"]
++            or qualification.routing_revision != row["routing_revision"]):
++            return _rollback_refusal(conn, "STALE_POLICY")
++        slot = next((item for item in qualification.slots
++                     if item.slot_id == row["intended_slot_id"]
++                     and item.cycle_id == row["intended_cycle_id"]), None)
++        if row["intended_kind"] == "BIN" and slot is None:
++            return _rollback_refusal(conn, "UNQUALIFIED_DESTINATION")
++        request = ReservationRequest(
++            piece_uuid=row["piece_uuid"], route_attempt=row["route_attempt"],
++            sorting_session_id=row["run_id"], group_key_id=row["group_key_id"],
++            quantity=0, not_in_inventory=slot.not_in_inventory if slot else False,
++            max_dimension_mm=evidence.max_dimension_mm, too_big=evidence.too_big)
++        context = _validate_context(conn, request, qualification)
++        if context is not None:
++            return _rollback_refusal(conn, **context)
++        if row["intended_kind"] == "BIN" and _candidate(
++            conn, request, qualification, slot, misc="misc") is None:
++            return _rollback_refusal(conn, "OCCUPIED_INCOMPATIBLE")
++        if conn.execute("SELECT 1 FROM smart_bin_release_attempts WHERE "
++                        "owner_incarnation=? AND target_boundary=?",
++                        (evidence.custody.owner_incarnation,
++                         str(evidence.target_boundary))).fetchone():
++            return _rollback_refusal(conn, "TARGET_ALREADY_USED")
++        attempt_id = str(uuid.uuid4())
++        conn.execute("INSERT INTO smart_bin_release_attempts VALUES(?,?,?,?,?)",
++                     (attempt_id, reservation_id, evidence.custody.owner_incarnation,
++                      str(evidence.target_boundary), now))
++        conn.execute("INSERT INTO smart_bin_release_evidence "
++                     "(attempt_id,reservation_id,intent_json) VALUES(?,?,?)",
++                     (attempt_id, reservation_id, json.dumps({"evidence": asdict(evidence),
++                      "qualification_hash": qualification_digest(qualification)},
++                      sort_keys=True, allow_nan=False)))
++        return _finish(conn, row, request_key, payload_hash, "PREPARE_RELEASE",
++                       new_state="RELEASE_INTENT", evidence_ref=evidence.route_evidence_ref,
++                       result={"attempt_id": attempt_id,
++                               "target_boundary": evidence.target_boundary})
++
++
++def confirm_exit(machine_id: str, reservation_id: str, *,
++                 expected_reservation_revision: int, request_key: str,
++                 evidence: ExitEvidence) -> dict[str, Any]:
++    _identity(machine_id, reservation_id, request_key, expected_reservation_revision)
++    payload_hash = _hash("CONFIRM_EXIT", machine_id, reservation_id,
++                         expected_reservation_revision, evidence)
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        row = _reservation(conn, machine_id, reservation_id)
++        refusal = _current(row, expected_reservation_revision, "RELEASE_INTENT")
++        if refusal:
++            return _rollback_refusal(conn, **refusal)
++        attempt = _attempt(conn, reservation_id)
++        if (attempt is None or not _custody_matches(row, evidence.custody)
++            or evidence.attempt_id != attempt["id"]
++            or str(evidence.target_boundary) != attempt["target_boundary"]
++            or not evidence.marker_confirmed or not evidence.marker_evidence_ref
++            or type(evidence.confirmed_at) not in (int, float)
++            or evidence.confirmed_at < attempt["created_at"]):
++            return _rollback_refusal(conn, "MARKER_EVIDENCE_REQUIRED")
++        conn.execute("UPDATE smart_bin_release_evidence SET exit_json=? WHERE attempt_id=? "
++                     "AND exit_json IS NULL",
++                     (json.dumps(asdict(evidence), sort_keys=True, allow_nan=False),
++                      attempt["id"]))
++        return _finish(conn, row, request_key, payload_hash, "CONFIRM_EXIT",
++                       new_state="EXIT_CONFIRMED", evidence_ref=evidence.marker_evidence_ref,
++                       result={"attempt_id": attempt["id"]})
++
++
++def complete_native(machine_id: str, reservation_id: str, *,
++                    expected_reservation_revision: int, request_key: str,
++                    evidence: CompletionEvidence) -> dict[str, Any]:
++    _identity(machine_id, reservation_id, request_key, expected_reservation_revision)
++    payload_hash = _hash("COMPLETE_NATIVE", machine_id, reservation_id,
++                         expected_reservation_revision, evidence)
++    # Resolve an ambiguous acknowledgement without a schema write. Recheck
++    # inside the write transaction after preparing history for a new result.
++    with _readonly() as conn:
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            return replay
++    if _harvest_metadata(evidence):
++        return _refuse("HARVEST_DEFERRED")
++    # Schema changes cannot occur inside the critical delivery transaction.
++    initialize_piece_records()
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        row = _reservation(conn, machine_id, reservation_id)
++        refusal = _current(row, expected_reservation_revision, "EXIT_CONFIRMED")
++        if refusal:
++            return _rollback_refusal(conn, **refusal)
++        if _harvest_metadata(evidence):
++            return _rollback_refusal(conn, "HARVEST_DEFERRED")
++        if conn.execute("SELECT 1 FROM smart_bin_discrepancies WHERE reservation_id=? "
++                        "AND resolved_at IS NULL", (reservation_id,)).fetchone():
++            return _rollback_refusal(conn, "UNRESOLVED_DELIVERY")
++        attempt = _attempt(conn, reservation_id)
++        exit_data = json.loads(attempt["exit_json"]) if attempt and attempt["exit_json"] else None
++        if (attempt is None or exit_data is None
++            or not _custody_matches(row, evidence.custody)
++            or evidence.attempt_id != attempt["id"]
++            or str(evidence.target_boundary) != attempt["target_boundary"]
++            or not evidence.completion_evidence_ref
++            or type(evidence.completed_at) not in (int, float)
++            or evidence.completed_at < exit_data["confirmed_at"]
++            or evidence.sorting_session_id != row["run_id"]
++            or not evidence.runtime_run_id
++            or evidence.history_piece.get("uuid") != row["piece_uuid"]):
++            return _rollback_refusal(conn, "COMPLETION_EVIDENCE_REQUIRED")
++        if not _destination_valid(evidence.actual_kind, evidence.actual_slot_id,
++                                  evidence.actual_cycle_id):
++            return _rollback_refusal(conn, "DESTINATION_MISMATCH")
++        if not _destination_references_qualified(
++            conn, machine_id, evidence.actual_kind, evidence.actual_slot_id,
++            evidence.actual_cycle_id):
++            return _rollback_refusal(conn, "UNQUALIFIED_DESTINATION")
++        if ((evidence.actual_kind, evidence.actual_slot_id, evidence.actual_cycle_id)
++            != (row["intended_kind"], row["intended_slot_id"], row["intended_cycle_id"])):
++            conn.execute("INSERT INTO smart_bin_discrepancies "
++                         "(id,machine_id,reservation_id,cycle_id,kind,status,evidence_ref,"
++                         "details_json,created_at) VALUES(?,?,?,?,?,'open',?,?,?)",
++                         (str(uuid.uuid4()), machine_id, reservation_id,
++                          evidence.actual_cycle_id, "NATIVE_DESTINATION_MISMATCH",
++                          evidence.completion_evidence_ref,
++                          json.dumps(asdict(evidence), sort_keys=True, allow_nan=False), time.time()))
++            result = _finish(conn, row, request_key, payload_hash, "COMPLETE_NATIVE",
++                             new_state="UNCERTAIN", evidence_ref=evidence.completion_evidence_ref,
++                             result={"delivery_id": None, "discrepancy": "NATIVE_DESTINATION_MISMATCH"},
++                             code="DESTINATION_MISMATCH")
++            return result
++        if evidence.actual_kind == "BIN":
++            dest = conn.execute("SELECT layer_index,section_index,bin_index FROM "
++                                "smart_bin_slots WHERE machine_id=? AND id=?",
++                                (machine_id, evidence.actual_slot_id)).fetchone()
++            destination_bin = list(dest)
++        else:
++            destination_bin = None
++        delivery_id = str(uuid.uuid4())
++        conn.execute("INSERT INTO smart_bin_deliveries "
++                     "(id,reservation_id,machine_id,piece_uuid,run_id,policy_revision_id,"
++                     "group_key_id,quantity,intended_kind,intended_slot_id,intended_cycle_id,"
++                     "actual_kind,actual_slot_id,actual_cycle_id,evidence_ref,delivered_at) "
++                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++                     (delivery_id, reservation_id, machine_id, row["piece_uuid"], row["run_id"],
++                      row["policy_revision_id"], row["group_key_id"], row["quantity"],
++                      row["intended_kind"], row["intended_slot_id"], row["intended_cycle_id"],
++                      evidence.actual_kind, evidence.actual_slot_id, evidence.actual_cycle_id,
++                      evidence.completion_evidence_ref, evidence.completed_at))
++        history = dict(evidence.history_piece)
++        history["destination_bin"] = destination_bin
++        history["distributed_at"] = evidence.completed_at
++        recordPieceOnConnection(conn, history, run_id=evidence.runtime_run_id,
++                                machine_id=machine_id)
++        conn.execute("UPDATE smart_bin_release_evidence SET completion_json=? "
++                     "WHERE attempt_id=? AND completion_json IS NULL",
++                     (json.dumps(asdict(evidence), sort_keys=True, allow_nan=False),
++                      attempt["id"]))
++        return _finish(conn, row, request_key, payload_hash, "COMPLETE_NATIVE",
++                       new_state="COMPLETED", evidence_ref=evidence.completion_evidence_ref,
++                       result={"attempt_id": attempt["id"], "delivery_id": delivery_id,
++                               "actual_kind": evidence.actual_kind,
++                               "actual_slot_id": evidence.actual_slot_id,
++                               "actual_cycle_id": evidence.actual_cycle_id})
++
++
++def mark_uncertain(machine_id: str, reservation_id: str, *,
++                   expected_reservation_revision: int, request_key: str,
++                   evidence: UncertaintyEvidence) -> dict[str, Any]:
++    _identity(machine_id, reservation_id, request_key, expected_reservation_revision)
++    payload_hash = _hash("MARK_UNCERTAIN", machine_id, reservation_id,
++                         expected_reservation_revision, evidence)
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        row = _reservation(conn, machine_id, reservation_id)
++        refusal = _current(row, expected_reservation_revision,
++                           ("RESERVED", "RELEASE_INTENT", "EXIT_CONFIRMED", "UNCERTAIN"))
++        if refusal:
++            return _rollback_refusal(conn, **refusal)
++        attempt = _attempt(conn, reservation_id)
++        if (evidence.piece_uuid != row["piece_uuid"] or not evidence.reason
++            or not evidence.evidence_ref
++            or (row["owner_incarnation"] is not None
++                and evidence.owner_incarnation != row["owner_incarnation"])
++            or (attempt is not None and evidence.attempt_id != attempt["id"])
++            or (attempt is None and evidence.attempt_id is not None)):
++            return _rollback_refusal(conn, "UNCERTAINTY_EVIDENCE_REQUIRED")
++        conn.execute("INSERT INTO smart_bin_discrepancies "
++                     "(id,machine_id,reservation_id,cycle_id,kind,status,evidence_ref,"
++                     "details_json,created_at) VALUES(?,?,?,?,?,'open',?,?,?)",
++                     (str(uuid.uuid4()), machine_id, reservation_id, row["intended_cycle_id"],
++                      "NATIVE_UNCERTAIN", evidence.evidence_ref,
++                      json.dumps(asdict(evidence), sort_keys=True, allow_nan=False), time.time()))
++        return _finish(conn, row, request_key, payload_hash, "MARK_UNCERTAIN",
++                       new_state="UNCERTAIN", evidence_ref=evidence.evidence_ref,
++                       result={"attempt_id": attempt["id"] if attempt else None})
++
++
++def record_contradiction(machine_id: str, reservation_id: str, *,
++                         expected_reservation_revision: int, request_key: str,
++                         evidence: ContradictionEvidence) -> dict[str, Any]:
++    """Retain later contradictory evidence without rewriting terminal facts."""
++    _identity(machine_id, reservation_id, request_key, expected_reservation_revision)
++    payload_hash = _hash("RECORD_CONTRADICTION", machine_id, reservation_id,
++                         expected_reservation_revision, evidence)
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        replay = _receipt(conn, request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        row = _reservation(conn, machine_id, reservation_id)
++        refusal = _current(row, expected_reservation_revision, ("COMPLETED", "CANCELLED"))
++        if refusal:
++            return _rollback_refusal(conn, **refusal)
++        if not evidence.reason or not evidence.evidence_ref:
++            return _rollback_refusal(conn, "CONTRADICTION_EVIDENCE_REQUIRED")
++        if evidence.actual_kind is None and (
++            evidence.actual_slot_id is not None or evidence.actual_cycle_id is not None):
++            return _rollback_refusal(conn, "DESTINATION_MISMATCH")
++        if evidence.actual_kind is not None and not _destination_valid(
++            evidence.actual_kind, evidence.actual_slot_id, evidence.actual_cycle_id):
++            return _rollback_refusal(conn, "DESTINATION_MISMATCH")
++        if evidence.actual_kind is not None and not _destination_references_qualified(
++            conn, machine_id, evidence.actual_kind, evidence.actual_slot_id,
++            evidence.actual_cycle_id):
++            return _rollback_refusal(conn, "DESTINATION_MISMATCH")
++        discrepancy_id = str(uuid.uuid4())
++        conn.execute("INSERT INTO smart_bin_discrepancies "
++                     "(id,machine_id,reservation_id,cycle_id,kind,status,evidence_ref,"
++                     "details_json,created_at) VALUES(?,?,?,?,?,'open',?,?,?)",
++                     (discrepancy_id, machine_id, reservation_id,
++                      evidence.actual_cycle_id or row["intended_cycle_id"],
++                      "TERMINAL_CONTRADICTION", evidence.evidence_ref,
++                      json.dumps(asdict(evidence), sort_keys=True, allow_nan=False), time.time()))
++        return _finish(conn, row, request_key, payload_hash, "RECORD_CONTRADICTION",
++                       new_state=None, evidence_ref=evidence.evidence_ref,
++                       result={"discrepancy_id": discrepancy_id})
++
++
++def lookup_request(request_key: str) -> dict[str, Any] | None:
++    """Read a committed receipt after an ambiguous acknowledgement."""
++    if not request_key:
++        raise ValueError("missing request key")
++    with _readonly() as conn:
++        row = conn.execute("SELECT action,payload_hash,result_json FROM "
++                           "smart_bin_request_receipts WHERE request_key=?",
++                           (request_key,)).fetchone()
++        return ({"action": row[0], "payload_hash": row[1],
++                 "result": json.loads(row[2])} if row else None)
++
++
++def inspect_recovery(machine_id: str) -> dict[str, Any]:
++    """Read outstanding custody, evidence and blockers without a write lock."""
++    if not machine_id:
++        raise ValueError("missing machine")
++    with _readonly() as conn:
++        revision = conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id=?",
++                                (machine_id,)).fetchone()
++        if revision is None:
++            raise ValueError("unknown machine")
++        claims = [dict(row) for row in conn.execute(
++            "SELECT * FROM smart_bin_reservations WHERE machine_id=? AND state IN "
++            "('RESERVED','RELEASE_INTENT','EXIT_CONFIRMED','UNCERTAIN') ORDER BY created_at,id",
++            (machine_id,))]
++        for claim in claims:
++            attempt = _attempt(conn, claim["id"])
++            claim["attempt"] = ({"id": attempt["id"],
++                                 "target_boundary": attempt["target_boundary"],
++                                 "intent": json.loads(attempt["intent_json"]),
++                                 "exit": json.loads(attempt["exit_json"]) if attempt["exit_json"] else None}
++                                if attempt else None)
++        discrepancies = [dict(row) for row in conn.execute(
++            "SELECT * FROM smart_bin_discrepancies WHERE machine_id=? AND resolved_at IS NULL "
++            "ORDER BY created_at,id", (machine_id,))]
++        return {"machine_id": machine_id, "state_revision": revision[0],
++                "claims": claims, "unresolved_discrepancies": discrepancies}
++
++
++@contextmanager
++def _readonly():
++    path = local_state_db_path()
++    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
++    conn.row_factory = sqlite3.Row
++    try:
++        conn.execute("PRAGMA query_only=ON")
++        conn.execute("BEGIN")
++        _check_service_schema(conn)
++        yield conn
++        conn.rollback()
++    finally:
++        if conn.in_transaction:
++            conn.rollback()
++        conn.close()
+diff --git a/software/sorter/backend/smart_bins_service.py b/software/sorter/backend/smart_bins_service.py
+index f1da0beb5cadea5d7e9fc920e24c3192721786d5..cd554bf1b2d7f5d4e0b586bbf50eb4413a159434 100644
+--- a/software/sorter/backend/smart_bins_service.py
++++ b/software/sorter/backend/smart_bins_service.py
+@@ -22,20 +22,42 @@ from smart_bins_migration import read_recorded_contents_on_connection, _check_ex
+ from smart_bins_storage import critical_transaction, check_schema_version
+ 
+ 
+-SERVICE_SCHEMA_VERSION = 1
++SERVICE_SCHEMA_VERSION = 2
+ HELD_STATES = ("RESERVED", "RELEASE_INTENT", "EXIT_CONFIRMED", "UNCERTAIN")
+ _CONFIG_KEYS = ("bin_layout", "bin_categories", "not_in_inventory_bins", "sorting_profile_sync")
+ _SERVICE_DDL = (
+     "CREATE TABLE smart_bin_service_versions (singleton INTEGER NOT NULL PRIMARY KEY "
+     "CHECK(singleton=1), version INTEGER NOT NULL, initialized_at REAL NOT NULL)",
+     "CREATE TABLE smart_bin_request_receipts (request_key TEXT NOT NULL PRIMARY KEY, "
+-    "machine_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('RESERVE','CANCEL')), "
++    "machine_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN "
++    "('RESERVE','CANCEL','PREPARE_RELEASE','CONFIRM_EXIT','COMPLETE_NATIVE',"
++    "'MARK_UNCERTAIN','RECORD_CONTRADICTION')), "
+     "payload_hash TEXT NOT NULL, reservation_id TEXT NOT NULL, result_json TEXT NOT NULL, "
+     "created_at REAL NOT NULL, FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
+     "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
+     "CREATE TABLE smart_bin_reservation_attempt_links (reservation_id TEXT NOT NULL PRIMARY KEY, "
+     "predecessor_reservation_id TEXT, FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id), "
+     "FOREIGN KEY(predecessor_reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE TABLE smart_bin_release_evidence ("
++    "attempt_id TEXT NOT NULL PRIMARY KEY, reservation_id TEXT NOT NULL UNIQUE, "
++    "intent_json TEXT NOT NULL, exit_json TEXT, completion_json TEXT, "
++    "FOREIGN KEY(attempt_id) REFERENCES smart_bin_release_attempts(id), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE UNIQUE INDEX smart_bin_one_attempt_per_reservation "
++    "ON smart_bin_release_attempts(reservation_id)",
++    "CREATE TRIGGER smart_bin_release_attempt_immutable BEFORE UPDATE ON "
++    "smart_bin_release_attempts BEGIN SELECT RAISE(ABORT, 'release attempt is immutable'); END",
++    "CREATE TRIGGER smart_bin_release_attempt_no_delete BEFORE DELETE ON "
++    "smart_bin_release_attempts BEGIN SELECT RAISE(ABORT, 'release attempt is immutable'); END",
++    "CREATE TRIGGER smart_bin_release_evidence_immutable BEFORE UPDATE ON "
++    "smart_bin_release_evidence WHEN NEW.attempt_id IS NOT OLD.attempt_id OR "
++    "NEW.reservation_id IS NOT OLD.reservation_id OR NEW.intent_json IS NOT OLD.intent_json OR "
++    "(OLD.exit_json IS NOT NULL AND NEW.exit_json IS NOT OLD.exit_json) OR "
++    "(OLD.completion_json IS NOT NULL AND NEW.completion_json IS NOT OLD.completion_json) OR "
++    "(NEW.completion_json IS NOT NULL AND NEW.exit_json IS NULL) "
++    "BEGIN SELECT RAISE(ABORT, 'release evidence is immutable'); END",
++    "CREATE TRIGGER smart_bin_release_evidence_no_delete BEFORE DELETE ON "
++    "smart_bin_release_evidence BEGIN SELECT RAISE(ABORT, 'release evidence is immutable'); END",
+     "CREATE TRIGGER smart_bin_service_reservation_facts_immutable BEFORE UPDATE OF "
+     "id,machine_id,piece_uuid,route_attempt,request_key,run_id,policy_revision_id,"
+     "group_key_id,routing_revision,quantity,intended_kind,intended_slot_id,"
+@@ -157,6 +179,19 @@ def _check_service_schema(conn: sqlite3.Connection) -> None:
+     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND "
+                     "name='smart_bin_service_reservation_facts_immutable'").fetchone() is None:
+         raise RuntimeError("inactive smart-bin service immutability guard is missing")
++    extension_tables = {"smart_bin_release_evidence"}
++    extension_triggers = {"smart_bin_release_attempt_immutable", "smart_bin_release_attempt_no_delete",
++                          "smart_bin_release_evidence_immutable", "smart_bin_release_evidence_no_delete"}
++    found_tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE "
++                                                  "type='table' AND name='smart_bin_release_evidence'")}
++    found_triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE "
++                                                    "type='trigger' AND name IN (?,?,?,?)",
++                                                    tuple(extension_triggers))}
++    if found_tables != extension_tables or found_triggers != extension_triggers:
++        raise RuntimeError("inactive smart-bin service v2 schema is incomplete")
++    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND "
++                    "name='smart_bin_one_attempt_per_reservation'").fetchone() is None:
++        raise RuntimeError("inactive smart-bin attempt uniqueness guard is missing")
+     rows = conn.execute("SELECT singleton,version FROM smart_bin_service_versions").fetchall()
+     if len(rows) != 1 or tuple(rows[0]) != (1, SERVICE_SCHEMA_VERSION):
+         raise RuntimeError("unsupported smart-bin service schema version; migration is not implemented")
+@@ -335,6 +370,9 @@ def _candidate(conn: sqlite3.Connection, request: ReservationRequest,
+                     "ON r.id=d.reservation_id WHERE r.intended_cycle_id=? AND d.resolved_at IS NULL",
+                     (slot.cycle_id,)).fetchone() is not None:
+         return None
++    if conn.execute("SELECT 1 FROM smart_bin_discrepancies WHERE cycle_id=? AND "
++                    "resolved_at IS NULL", (slot.cycle_id,)).fetchone() is not None:
++        return None
+     if conn.execute("SELECT 1 FROM smart_bin_deliveries d JOIN smart_bin_reservations r "
+                     "ON r.id=d.reservation_id WHERE d.actual_cycle_id=? AND r.state!='COMPLETED'",
+                     (slot.cycle_id,)).fetchone() is not None:
+@@ -441,6 +479,8 @@ def preview(request: ReservationRequest, qualification: RoutingQualification) ->
+ 
+ def _journey_conflict(conn: sqlite3.Connection, request: ReservationRequest,
+                       machine_id: str) -> str | None:
++    if _unresolved_journey_discrepancy(conn, machine_id, request.piece_uuid):
++        return "UNRESOLVED_DELIVERY"
+     if conn.execute("SELECT 1 FROM smart_bin_deliveries WHERE machine_id=? AND piece_uuid=?",
+                     (machine_id, request.piece_uuid)).fetchone():
+         return "ALREADY_CREDITED"
+@@ -466,6 +506,17 @@ def _journey_conflict(conn: sqlite3.Connection, request: ReservationRequest,
+     return None
+ 
+ 
++def _unresolved_journey_discrepancy(conn: sqlite3.Connection, machine_id: str,
++                                    piece_uuid: str) -> bool:
++    """Fence unresolved evidence on any reservation for this machine/piece."""
++    return conn.execute(
++        "SELECT 1 FROM smart_bin_discrepancies d "
++        "JOIN smart_bin_reservations r ON r.id=d.reservation_id "
++        "WHERE d.machine_id=? AND r.machine_id=? AND r.piece_uuid=? "
++        "AND d.resolved_at IS NULL LIMIT 1",
++        (machine_id, machine_id, piece_uuid)).fetchone() is not None
++
++
+ def reserve(request: ReservationRequest, qualification: RoutingQualification, *,
+             expected_state_revision: int, expected_qualification_hash: str,
+             request_key: str) -> dict[str, Any]:
+diff --git a/software/sorter/backend/tests/test_smart_bins_delivery.py b/software/sorter/backend/tests/test_smart_bins_delivery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b44a4d65c98203f31b3da709ab5f4248113554f
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_delivery.py
+@@ -0,0 +1,668 @@
++"""Isolated SQLite qualification for inactive native smart-bin delivery."""
++
++from __future__ import annotations
++
++import atexit
++import json
++import os
++import sqlite3
++import tempfile
++import time
++from contextlib import contextmanager
++from dataclasses import replace
++
++import pytest
++
++_import_isolation = tempfile.TemporaryDirectory(prefix="smart-bin-delivery-import-")
++atexit.register(_import_isolation.cleanup)
++os.environ["LOCAL_STATE_DB_PATH"] = os.path.join(_import_isolation.name, "state.sqlite")
++os.environ["MACHINE_SPECIFIC_PARAMS_PATH"] = os.path.join(_import_isolation.name, "machine.toml")
++
++import local_state
++import piece_records
++import smart_bins_delivery as delivery
++import smart_bins_migration as migration
++import smart_bins_service as service
++import smart_bins_storage as storage
++
++
++@contextmanager
++def connect(path):
++    conn = sqlite3.connect(path)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA foreign_keys=ON")
++    try:
++        try:
++            yield conn
++        except BaseException:
++            conn.rollback()
++            raise
++        else:
++            conn.commit()
++    finally:
++        conn.close()
++
++
++@pytest.fixture
++def prepared(tmp_path, monkeypatch):
++    local_state.close_local_state_keeper()
++    path = tmp_path / "state.sqlite"
++    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(path))
++    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(tmp_path / "machine.toml"))
++    monkeypatch.setattr(piece_records, "_initialized", False)
++    local_state.initialize_local_state()
++    storage.initialize_schema()
++    migration.initialize_migration_schema()
++    service.initialize_service_schema()
++    with connect(path) as conn:
++        conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m')")
++        conn.execute("INSERT INTO smart_bin_policy_revisions VALUES('p','m','artifact','{}',1)")
++        conn.execute("INSERT INTO smart_bin_group_keys "
++                     "(id,kind,namespace,part_id,provenance) "
++                     "VALUES('A','category','sorter','A','known')")
++        conn.execute("INSERT INTO sorting_sessions(id,machine_id,started_at,status) "
++                     "VALUES('session','m',1,'active')")
++        for index in range(2):
++            conn.execute("INSERT INTO smart_bin_slots "
++                         "(id,machine_id,layout_revision,layer_index,section_index,bin_index) "
++                         "VALUES(?,'m','layout',0,0,?)", (f"s{index}", index))
++            conn.execute("INSERT INTO smart_bin_cycles "
++                         "(id,machine_id,slot_id,opened_at,provenance) "
++                         "VALUES(?,'m',?,1,'qualified_synthetic')", (f"c{index}", f"s{index}"))
++        layout = {"layers": [{"sections": [["medium", "medium"]], "enabled": True,
++                              "section_enabled": [True], "max_pieces_per_bin": 3,
++                              "max_dimension_mm": None}]}
++        for key, value in (("bin_layout", layout),
++                           ("not_in_inventory_bins", [[[False, False]]])):
++            conn.execute("INSERT INTO state_entries(key,json_value,updated_at) VALUES(?,?,1)",
++                         (key, json.dumps(value, sort_keys=True)))
++    yield path
++    local_state.close_local_state_keeper()
++
++
++def qualification(*, two=False):
++    with connect(local_state.local_state_db_path()) as conn:
++        revision = conn.execute("SELECT state_revision FROM smart_bin_machines "
++                                "WHERE machine_id='m'").fetchone()[0]
++    slots = tuple(service.SlotQualification(
++        slot_id=f"s{index}", cycle_id=f"c{index}", layout_revision="layout",
++        enabled=True, reachable=True, not_in_inventory=False, count_limit=3,
++        layer_max_dimension_mm=None, cycle_evidence_ref=f"qualified-c{index}")
++        for index in range(2 if two else 1))
++    return service.RoutingQualification(
++        machine_id="m", policy_revision_id="p", policy_artifact_hash="artifact",
++        routing_revision=0, machine_state_revision=revision,
++        config_digest=service.configuration_digest(), external_revision="route-current",
++        allow_normal_sharing=False, slots=slots)
++
++
++def claim(piece="piece", key="reserve", *, pocket=0, two=False):
++    request = service.ReservationRequest(
++        piece_uuid=piece, route_attempt="first", sorting_session_id="session",
++        group_key_id="A", owner_incarnation="owner", episode_id="episode",
++        pocket_index=pocket, pocket_generation=1)
++    q = qualification(two=two)
++    preview = service.preview(request, q)
++    assert preview["code"] == "OK"
++    result = service.reserve(
++        request, q, expected_state_revision=preview["state_revision"],
++        expected_qualification_hash=preview["qualification_hash"], request_key=key)
++    assert result["code"] == "OK"
++    return result
++
++
++def custody(piece="piece", pocket=0):
++    return delivery.CustodyRef(piece, "owner", "episode", pocket, 1)
++
++
++def release_evidence(piece="piece", pocket=0, boundary=17, *, slot="s0", cycle="c0"):
++    now = time.time()
++    return delivery.ReleaseEvidence(
++        custody(piece, pocket), boundary, "BIN", slot, cycle, True, True,
++        "owner-observation", "route-observation", now, now + 4)
++
++
++def prepare(claimed, *, key="intent", evidence=None, q=None):
++    return delivery.prepare_release(
++        "m", claimed["reservation_id"], expected_reservation_revision=0,
++        request_key=key, qualification=q or qualification(),
++        evidence=evidence or release_evidence())
++
++
++def exit_evidence(attempt, *, piece="piece", pocket=0, boundary=17):
++    return delivery.ExitEvidence(custody(piece, pocket), attempt, boundary,
++                                 True, "marker-confirmation", time.time() + 1)
++
++
++def confirm(claimed, intent, *, key="exit", evidence=None):
++    return delivery.confirm_exit(
++        "m", claimed["reservation_id"], expected_reservation_revision=1,
++        request_key=key, evidence=evidence or exit_evidence(intent["attempt_id"]))
++
++
++def completion_evidence(attempt, *, actual_slot="s0", actual_cycle="c0",
++                        piece="piece", pocket=0, boundary=17):
++    return delivery.CompletionEvidence(
++        custody(piece, pocket), attempt, boundary, "software-drop-complete",
++        time.time() + 2, "BIN", actual_slot, actual_cycle, "session", "runtime-run",
++        {"uuid": piece, "part_id": "raw-3001", "color_id": "raw-5",
++         "category_id": "A", "classification_status": "classified"})
++
++
++def complete(claimed, intent, *, key="complete", evidence=None):
++    return delivery.complete_native(
++        "m", claimed["reservation_id"], expected_reservation_revision=2,
++        request_key=key, evidence=evidence or completion_evidence(intent["attempt_id"]))
++
++
++def snapshot(path):
++    with connect(path) as conn:
++        return {name: conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
++                for name in ("smart_bin_release_attempts", "smart_bin_release_evidence",
++                             "smart_bin_deliveries", "smart_bin_audit_events",
++                             "smart_bin_request_receipts", "smart_bin_discrepancies",
++                             "piece_records") if name != "piece_records" or conn.execute(
++                                 "SELECT 1 FROM sqlite_master WHERE name='piece_records'").fetchone()}
++
++
++def test_valid_lifecycle_atomic_history_capacity_and_replay(prepared):
++    claimed = claim()
++    cycle = migration.read_recorded_contents("c0", prepared)
++    assert cycle["total"] == 0
++    with connect(prepared) as conn:
++        held_before = conn.execute("SELECT sum(quantity) FROM smart_bin_reservations "
++                                   "WHERE intended_cycle_id='c0' AND state='RESERVED'").fetchone()[0]
++    assert held_before == 1
++    piece_records.initialize_piece_records()
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO piece_records "
++                     "(uuid,part_correct,color_corrected_id,part_feedback_submitted) "
++                     "VALUES('piece',0,'corrected',1)")
++    release = release_evidence()
++    route = qualification()
++    first = prepare(claimed, evidence=release, q=route)
++    assert first["code"] == "OK" and first["state"] == "RELEASE_INTENT"
++    assert prepare(claimed, evidence=release, q=route) == first
++    exit_proof = exit_evidence(first["attempt_id"])
++    second = confirm(claimed, first, evidence=exit_proof)
++    assert second["code"] == "OK" and second["state"] == "EXIT_CONFIRMED"
++    assert confirm(claimed, first, evidence=exit_proof) == second
++    assert migration.read_recorded_contents("c0", prepared)["total"] == 0
++    completion = completion_evidence(first["attempt_id"])
++    final = complete(claimed, first, evidence=completion)
++    assert final["code"] == "OK" and final["state"] == "COMPLETED"
++    counts = snapshot(prepared)
++    assert complete(claimed, first, evidence=completion) == final
++    assert snapshot(prepared) == counts
++    assert counts["smart_bin_deliveries"] == 1
++    assert counts["smart_bin_release_attempts"] == 1
++    assert counts["smart_bin_audit_events"] == 4
++    projection = migration.read_recorded_contents("c0", prepared)
++    assert projection["total"] == 1
++    with connect(prepared) as conn:
++        held_after = conn.execute("SELECT count(*) FROM smart_bin_reservations WHERE "
++                                  "intended_cycle_id='c0' AND state IN "
++                                  "('RESERVED','RELEASE_INTENT','EXIT_CONFIRMED','UNCERTAIN')").fetchone()[0]
++        row = conn.execute("SELECT * FROM piece_records WHERE uuid='piece'").fetchone()
++        native = conn.execute("SELECT * FROM smart_bin_deliveries").fetchone()
++    assert held_after == 0 and projection["total"] + held_after == held_before
++    assert row["run_id"] == "runtime-run" and native["run_id"] == "session"
++    assert (row["part_id"], row["part_correct"], row["color_corrected_id"],
++            row["part_feedback_submitted"]) == ("raw-3001", 0, "corrected", 1)
++    assert (row["bin_x"], row["bin_y"], row["bin_z"]) == (0, 0, 0)
++    assert delivery.lookup_request("complete")["result"] == final
++    assert delivery.inspect_recovery("m")["claims"] == []
++
++
++def test_release_refuses_missing_stale_wrong_owner_route_and_destination(prepared):
++    claimed = claim()
++    good = release_evidence()
++    invalid = [replace(good, custody=replace(good.custody, owner_incarnation="other")),
++               replace(good, custody=replace(good.custody, episode_id="other")),
++               replace(good, current_owner=False), replace(good, route_ready=False),
++               replace(good, target_boundary=-1),
++               replace(good, expires_at=time.time() - 1),
++               replace(good, slot_id="s1", cycle_id="c1")]
++    for index, evidence in enumerate(invalid):
++        assert prepare(claimed, key=f"bad-{index}", evidence=evidence)["code"] != "OK"
++    stale = replace(qualification(), machine_state_revision=100)
++    assert prepare(claimed, key="stale-q", q=stale)["code"] == "STALE_REVISION"
++    assert delivery.prepare_release("m", claimed["reservation_id"],
++                                    expected_reservation_revision=9, request_key="stale-row",
++                                    qualification=qualification(), evidence=good)["code"] == "STALE_REVISION"
++    assert snapshot(prepared)["smart_bin_release_attempts"] == 0
++    assert service.lookup_reservation("m", claimed["reservation_id"])["state"] == "RESERVED"
++
++
++def test_duplicate_target_replay_conflict_and_wrong_exit_evidence(prepared):
++    first = claim()
++    release = release_evidence()
++    route = qualification()
++    intent = prepare(first, evidence=release, q=route)
++    before = snapshot(prepared)
++    assert prepare(first, evidence=release, q=route) == intent
++    assert snapshot(prepared) == before
++    assert prepare(first, evidence=replace(release_evidence(), target_boundary=18))["code"] == "IDEMPOTENCY_CONFLICT"
++    other = claim("other", "reserve-other", pocket=1)
++    assert prepare(other, key="intent-other", q=qualification(),
++                   evidence=release_evidence("other", 1))["code"] == "TARGET_ALREADY_USED"
++    bad = exit_evidence(intent["attempt_id"])
++    for index, evidence in enumerate((replace(bad, attempt_id="wrong"),
++                                       replace(bad, target_boundary=18),
++                                       replace(bad, custody=custody("other")),
++                                       replace(bad, marker_confirmed=False))):
++        assert confirm(first, intent, key=f"exit-bad-{index}", evidence=evidence)["code"] != "OK"
++    assert delivery.confirm_exit("m", first["reservation_id"],
++                                 expected_reservation_revision=9, request_key="exit-stale",
++                                 evidence=bad)["code"] == "STALE_REVISION"
++    assert confirm(first, intent)["code"] == "OK"
++    assert confirm(first, intent, evidence=replace(bad, marker_evidence_ref="different"))["code"] == "IDEMPOTENCY_CONFLICT"
++
++
++@pytest.mark.parametrize("stage,table", [
++    ("intent", "smart_bin_release_attempts"),
++    ("exit", "smart_bin_release_evidence"),
++    ("complete", "piece_records"),
++    ("completion_receipt", "smart_bin_request_receipts"),
++])
++def test_injected_write_failure_rolls_back_every_record(prepared, stage, table):
++    claimed = claim()
++    intent = prepare(claimed) if stage != "intent" else None
++    if stage in ("complete", "completion_receipt"):
++        confirm(claimed, intent)
++        piece_records.initialize_piece_records()
++    before = snapshot(prepared)
++    state_before = service.lookup_reservation("m", claimed["reservation_id"])
++    with connect(prepared) as conn:
++        operation = "INSERT" if stage != "exit" else "UPDATE"
++        conn.execute(f"CREATE TRIGGER fail_delivery BEFORE {operation} ON {table} "
++                     "BEGIN SELECT RAISE(ABORT, 'injected delivery failure'); END")
++    with pytest.raises(sqlite3.IntegrityError, match="injected delivery failure"):
++        if stage == "intent":
++            prepare(claimed)
++        elif stage == "exit":
++            confirm(claimed, intent)
++        else:
++            complete(claimed, intent)
++    assert snapshot(prepared) == before
++    assert service.lookup_reservation("m", claimed["reservation_id"]) == state_before
++    assert delivery.lookup_request({"intent": "intent", "exit": "exit",
++                                    "complete": "complete",
++                                    "completion_receipt": "complete"}[stage]) is None
++
++
++def test_lost_ack_recovery_is_read_only_and_same_key_resolves(prepared):
++    claimed = claim()
++    release = release_evidence()
++    route = qualification()
++    intent = prepare(claimed, evidence=release, q=route)
++    before = snapshot(prepared)
++    assert delivery.lookup_request("intent")["result"] == intent
++    report = delivery.inspect_recovery("m")
++    assert report["claims"][0]["attempt"]["id"] == intent["attempt_id"]
++    assert report["claims"][0]["attempt"]["exit"] is None
++    assert snapshot(prepared) == before
++    assert prepare(claimed, evidence=release, q=route) == intent
++    assert snapshot(prepared) == before
++
++
++def test_completion_mismatch_becomes_uncertain_without_credit(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    with connect(prepared) as conn:
++        conn.execute("UPDATE smart_bin_cycles SET slot_id=NULL,closed_at=2 WHERE id='c1'")
++    result = complete(claimed, intent, evidence=completion_evidence(
++        intent["attempt_id"], actual_slot="s1", actual_cycle="c1"))
++    assert result["code"] == "DESTINATION_MISMATCH" and result["state"] == "UNCERTAIN"
++    assert delivery.lookup_request("complete")["result"] == result
++    assert migration.read_recorded_contents("c0", prepared)["total"] == 0
++    assert migration.read_recorded_contents("c1", prepared)["total"] == 0
++    assert snapshot(prepared)["smart_bin_deliveries"] == 0
++    assert snapshot(prepared)["smart_bin_discrepancies"] == 1
++    assert complete(claimed, intent)["code"] == "IDEMPOTENCY_CONFLICT"
++    assert delivery.inspect_recovery("m")["unresolved_discrepancies"][0]["cycle_id"] == "c1"
++
++
++def test_uncertainty_holds_capacity_and_blocks_normal_completion(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirmed = confirm(claimed, intent)
++    uncertainty = delivery.UncertaintyEvidence("piece", "owner", "receipt ambiguous",
++                                                "uncertain-observation", intent["attempt_id"])
++    result = delivery.mark_uncertain("m", claimed["reservation_id"],
++                                     expected_reservation_revision=2, request_key="uncertain",
++                                     evidence=uncertainty)
++    assert result["state"] == "UNCERTAIN" and result["reservation_revision"] == 3
++    assert delivery.mark_uncertain("m", claimed["reservation_id"],
++                                   expected_reservation_revision=2, request_key="uncertain",
++                                   evidence=uncertainty) == result
++    assert complete(claimed, intent)["code"] == "UNSAFE_STATE"
++    assert service.cancel_reserved("m", claimed["reservation_id"],
++                                   expected_reservation_revision=3, request_key="cancel",
++                                   evidence=service.NonDispatchEvidence(
++                                       "owner", "episode", 0, 1, True, True, "false-proof"))["code"] == "UNSAFE_STATE"
++    assert migration.read_recorded_contents("c0", prepared)["total"] == 0
++    assert delivery.inspect_recovery("m")["claims"][0]["state"] == "UNCERTAIN"
++    assert confirmed["state_revision"] < result["state_revision"]
++
++
++def test_terminal_contradiction_preserves_delivery_and_blocks_both_cycles(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    completion = completion_evidence(intent["attempt_id"])
++    final = complete(claimed, intent, evidence=completion)
++    evidence = delivery.ContradictionEvidence("later different destination", "late-observation",
++                                               "BIN", "s1", "c1")
++    result = delivery.record_contradiction(
++        "m", claimed["reservation_id"], expected_reservation_revision=3,
++        request_key="contradiction", evidence=evidence)
++    assert result["code"] == "OK" and result["state"] == "COMPLETED"
++    assert delivery.record_contradiction(
++        "m", claimed["reservation_id"], expected_reservation_revision=3,
++        request_key="contradiction", evidence=evidence) == result
++    assert complete(claimed, intent, evidence=completion) == final
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT actual_cycle_id FROM smart_bin_deliveries").fetchone()[0] == "c0"
++    assert service.lookup_reservation("m", claimed["reservation_id"])["row_revision"] == 3
++    assert service.preview(service.ReservationRequest(
++        "next", "first", "session", "A", owner_incarnation="owner",
++        episode_id="episode", pocket_index=2, pocket_generation=1),
++        qualification(two=True))["code"] == "NO_ELIGIBLE_BIN"
++
++
++def test_harvest_refusal_and_service_v1_rejection(prepared):
++    claimed = claim()
++    evidence = replace(release_evidence(), harvest_allocation_ref="allocation")
++    assert prepare(claimed, evidence=evidence)["code"] == "HARVEST_DEFERRED"
++    assert snapshot(prepared)["smart_bin_release_attempts"] == 0
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    completion = replace(completion_evidence(intent["attempt_id"]),
++                         harvest_allocation_ref="allocation")
++    before = snapshot(prepared)
++    assert complete(claimed, intent, evidence=completion)["code"] == "HARVEST_DEFERRED"
++    assert snapshot(prepared) == before
++    nested = replace(completion_evidence(intent["attempt_id"]),
++                     history_piece={"uuid": "piece", "harvest_allocation_ref": "allocation"})
++    assert complete(claimed, intent, evidence=nested)["code"] == "HARVEST_DEFERRED"
++    assert snapshot(prepared) == before
++    with connect(prepared) as conn:
++        conn.execute("UPDATE smart_bin_service_versions SET version=1")
++    with pytest.raises(RuntimeError, match="unsupported smart-bin service schema version"):
++        service.initialize_service_schema()
++
++
++def test_existing_hold_is_not_counted_twice_at_release(prepared):
++    claimed = claim()
++    with connect(prepared) as conn:
++        raw = json.loads(conn.execute("SELECT json_value FROM state_entries "
++                                      "WHERE key='bin_layout'").fetchone()[0])
++        raw["layers"][0]["max_pieces_per_bin"] = 1
++        conn.execute("UPDATE state_entries SET json_value=? WHERE key='bin_layout'",
++                     (json.dumps(raw, sort_keys=True),))
++    q = qualification()
++    q = replace(q, slots=(replace(q.slots[0], count_limit=1),),
++                config_digest=service.configuration_digest())
++    result = prepare(claimed, q=q)
++    assert result["code"] == "OK"
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT state FROM smart_bin_reservations WHERE id=?",
++                            (claimed["reservation_id"],)).fetchone()[0] == "RELEASE_INTENT"
++
++
++def test_release_refuses_cycle_no_longer_attached(prepared):
++    claimed = claim()
++    with connect(prepared) as conn:
++        conn.execute("UPDATE smart_bin_cycles SET slot_id=NULL,closed_at=2 WHERE id='c0'")
++    result = prepare(claimed)
++    assert result["code"] == "OCCUPIED_INCOMPATIBLE"
++    assert snapshot(prepared)["smart_bin_release_attempts"] == 0
++
++
++def test_release_refuses_unresolved_reservation_discrepancy(prepared):
++    claimed = claim()
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO smart_bin_discrepancies "
++                     "(id,machine_id,reservation_id,cycle_id,kind,status,details_json,created_at) "
++                     "VALUES('issue','m',?,'c0','UNRESOLVED','open','{}',1)",
++                     (claimed["reservation_id"],))
++    assert prepare(claimed)["code"] == "UNRESOLVED_DELIVERY"
++    assert snapshot(prepared)["smart_bin_release_attempts"] == 0
++
++
++def test_completion_uses_historical_cycle_even_after_detachment(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    with connect(prepared) as conn:
++        conn.execute("UPDATE smart_bin_cycles SET slot_id=NULL,closed_at=2 WHERE id='c0'")
++    result = complete(claimed, intent)
++    assert result["code"] == "OK"
++    assert migration.read_recorded_contents("c0", prepared)["total"] == 1
++
++
++def test_completion_identity_checks_leave_exit_hold_unchanged(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    piece_records.initialize_piece_records()
++    before = snapshot(prepared)
++    good = completion_evidence(intent["attempt_id"])
++    bad = (replace(good, attempt_id="wrong"),
++           replace(good, target_boundary=18),
++           replace(good, custody=custody("other")),
++           replace(good, sorting_session_id="runtime-run"),
++           replace(good, history_piece={"uuid": "other"}),
++           replace(good, completion_evidence_ref=""))
++    for index, evidence in enumerate(bad):
++        assert complete(claimed, intent, key=f"bad-complete-{index}",
++                        evidence=evidence)["code"] == "COMPLETION_EVIDENCE_REQUIRED"
++    assert delivery.complete_native(
++        "m", claimed["reservation_id"], expected_reservation_revision=99,
++        request_key="stale-complete", evidence=good)["code"] == "STALE_REVISION"
++    assert snapshot(prepared) == before
++    assert service.lookup_reservation("m", claimed["reservation_id"])["state"] == "EXIT_CONFIRMED"
++
++
++def test_uncertainty_from_reserved_has_no_attempt_and_keeps_hold(prepared):
++    claimed = claim()
++    evidence = delivery.UncertaintyEvidence("piece", "owner", "unverified custody",
++                                            "owner-observation")
++    result = delivery.mark_uncertain("m", claimed["reservation_id"],
++                                     expected_reservation_revision=0,
++                                     request_key="uncertain-before-release", evidence=evidence)
++    assert result["code"] == "OK" and result["state"] == "UNCERTAIN"
++    assert result["attempt_id"] is None
++    assert snapshot(prepared)["smart_bin_release_attempts"] == 0
++    assert prepare(claimed)["code"] == "UNSAFE_STATE"
++    assert migration.read_recorded_contents("c0", prepared)["total"] == 0
++    assert delivery.inspect_recovery("m")["claims"][0]["state"] == "UNCERTAIN"
++
++
++def test_reject_delivery_keeps_virtual_destination(prepared):
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO smart_bin_group_keys "
++                     "(id,kind,namespace,part_id,provenance) "
++                     "VALUES('misc','category','sorter','misc','known')")
++    q = qualification()
++    request = service.ReservationRequest(
++        "reject-piece", "first", "session", "misc", owner_incarnation="owner",
++        episode_id="episode", pocket_index=3, pocket_generation=1)
++    preview = service.preview(request, q)
++    assert preview["code"] == "OK" and preview["destination_kind"] == "REJECT"
++    claimed = service.reserve(request, q, expected_state_revision=preview["state_revision"],
++                              expected_qualification_hash=preview["qualification_hash"],
++                              request_key="reserve-reject")
++    evidence = replace(release_evidence("reject-piece", 3), destination_kind="REJECT",
++                       slot_id=None, cycle_id=None)
++    intent = prepare(claimed, q=qualification(), evidence=evidence)
++    assert intent["code"] == "OK"
++    marker = exit_evidence(intent["attempt_id"], piece="reject-piece", pocket=3)
++    assert confirm(claimed, intent, evidence=marker)["code"] == "OK"
++    completed = replace(completion_evidence(intent["attempt_id"], piece="reject-piece", pocket=3),
++                        actual_kind="REJECT", actual_slot_id=None, actual_cycle_id=None)
++    assert complete(claimed, intent, evidence=completed)["code"] == "OK"
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT actual_kind,actual_slot_id,actual_cycle_id FROM "
++                            "smart_bin_deliveries").fetchone()[:] == ("REJECT", None, None)
++        assert conn.execute("SELECT bin_x,bin_y,bin_z FROM piece_records WHERE "
++                            "uuid='reject-piece'").fetchone()[:] == (None, None, None)
++
++
++def _linked_request(predecessor_id):
++    return service.ReservationRequest(
++        "piece", "second", "session", "A", owner_incarnation="owner",
++        episode_id="episode", pocket_index=1, pocket_generation=1,
++        predecessor_reservation_id=predecessor_id)
++
++
++def _alternative_qualification():
++    q = qualification(two=True)
++    return replace(q, slots=(q.slots[1],))
++
++
++def _cancel_first(claimed):
++    proof = service.NonDispatchEvidence("owner", "episode", 0, 1, True, True,
++                                        "no-release-pending")
++    result = service.cancel_reserved(
++        "m", claimed["reservation_id"], expected_reservation_revision=0,
++        request_key="cancel-first", evidence=proof)
++    assert result["code"] == "OK"
++    return proof, result
++
++
++def _contradict_cancelled(claimed):
++    evidence = delivery.ContradictionEvidence("late physical evidence",
++                                               "late-observation")
++    result = delivery.record_contradiction(
++        "m", claimed["reservation_id"], expected_reservation_revision=1,
++        request_key="contradict-first", evidence=evidence)
++    assert result["code"] == "OK"
++    return evidence, result
++
++
++def test_r2_cancelled_contradiction_fences_alternative_retry_and_preserves_replays(prepared):
++    first = claim()
++    proof, cancelled = _cancel_first(first)
++    evidence, contradiction = _contradict_cancelled(first)
++    linked = _linked_request(first["reservation_id"])
++    alternative = _alternative_qualification()
++    before = snapshot(prepared)
++    with connect(prepared) as conn:
++        revision = conn.execute("SELECT state_revision FROM smart_bin_machines "
++                                "WHERE machine_id='m'").fetchone()[0]
++    assert service.preview(linked, alternative)["code"] == "UNRESOLVED_DELIVERY"
++    assert service.reserve(
++        linked, alternative, expected_state_revision=revision,
++        expected_qualification_hash=service.qualification_digest(alternative),
++        request_key="blocked-retry")["code"] == "UNRESOLVED_DELIVERY"
++    assert snapshot(prepared) == before
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT state_revision FROM smart_bin_machines "
++                            "WHERE machine_id='m'").fetchone()[0] == revision
++    assert service.lookup_reservation("m", first["reservation_id"])["state"] == "CANCELLED"
++    assert service.cancel_reserved(
++        "m", first["reservation_id"], expected_reservation_revision=0,
++        request_key="cancel-first", evidence=proof) == cancelled
++    assert delivery.record_contradiction(
++        "m", first["reservation_id"], expected_reservation_revision=1,
++        request_key="contradict-first", evidence=evidence) == contradiction
++    assert snapshot(prepared) == before
++    unrelated = service.ReservationRequest(
++        "unrelated", "first", "session", "A", owner_incarnation="owner",
++        episode_id="episode", pocket_index=2, pocket_generation=1)
++    preview = service.preview(unrelated, alternative)
++    assert preview["code"] == "OK"
++    assert service.reserve(
++        unrelated, alternative, expected_state_revision=preview["state_revision"],
++        expected_qualification_hash=preview["qualification_hash"],
++        request_key="unrelated-admission")["code"] == "OK"
++
++
++def test_r2_existing_successor_cannot_prepare_after_predecessor_contradiction(prepared):
++    first = claim()
++    _cancel_first(first)
++    linked = _linked_request(first["reservation_id"])
++    alternative = _alternative_qualification()
++    preview = service.preview(linked, alternative)
++    assert preview["code"] == "OK" and preview["slot_id"] == "s1"
++    successor = service.reserve(
++        linked, alternative, expected_state_revision=preview["state_revision"],
++        expected_qualification_hash=preview["qualification_hash"],
++        request_key="successor")
++    assert successor["code"] == "OK"
++    _contradict_cancelled(first)
++    before = snapshot(prepared)
++    current = service.lookup_reservation("m", successor["reservation_id"])
++    with connect(prepared) as conn:
++        revision = conn.execute("SELECT state_revision FROM smart_bin_machines "
++                                "WHERE machine_id='m'").fetchone()[0]
++    release = release_evidence(piece="piece", pocket=1, slot="s1", cycle="c1")
++    assert delivery.prepare_release(
++        "m", successor["reservation_id"], expected_reservation_revision=0,
++        request_key="blocked-intent", qualification=_alternative_qualification(),
++        evidence=release)["code"] == "UNRESOLVED_DELIVERY"
++    assert snapshot(prepared) == before
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT state_revision FROM smart_bin_machines "
++                            "WHERE machine_id='m'").fetchone()[0] == revision
++    assert service.lookup_reservation("m", successor["reservation_id"]) == current
++    assert delivery.lookup_request("blocked-intent") is None
++    # An exact old reservation receipt remains a read-only replay.
++    assert service.reserve(
++        linked, alternative, expected_state_revision=preview["state_revision"],
++        expected_qualification_hash=preview["qualification_hash"],
++        request_key="successor") == successor
++    assert snapshot(prepared) == before
++
++
++def test_r2_ordinary_undisputed_cancelled_retry_still_reserves(prepared):
++    first = claim()
++    _cancel_first(first)
++    linked = _linked_request(first["reservation_id"])
++    alternative = _alternative_qualification()
++    preview = service.preview(linked, alternative)
++    assert preview["code"] == "OK"
++    successor = service.reserve(
++        linked, alternative, expected_state_revision=preview["state_revision"],
++        expected_qualification_hash=preview["qualification_hash"],
++        request_key="normal-retry")
++    assert successor["code"] == "OK" and successor["slot_id"] == "s1"
++
++
++def test_r2_misdelivery_rejects_invalid_destination_references_without_writes(prepared):
++    claimed = claim()
++    intent = prepare(claimed)
++    confirm(claimed, intent)
++    piece_records.initialize_piece_records()
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('other-machine')")
++        conn.execute("INSERT INTO smart_bin_slots "
++                     "(id,machine_id,layout_revision,layer_index,section_index,bin_index) "
++                     "VALUES('other-slot','other-machine','layout',0,0,0)")
++        conn.execute("INSERT INTO smart_bin_cycles "
++                     "(id,machine_id,slot_id,opened_at,provenance) "
++                     "VALUES('other-cycle','other-machine','other-slot',1,'observed')")
++    before = snapshot(prepared)
++    original = service.lookup_reservation("m", claimed["reservation_id"])
++    with connect(prepared) as conn:
++        revision = conn.execute("SELECT state_revision FROM smart_bin_machines "
++                                "WHERE machine_id='m'").fetchone()[0]
++    invalid = (("other-slot", "other-cycle"), ("s1", "other-cycle"),
++               ("other-slot", "c1"), ("s1", "missing-cycle"),
++               ("missing-slot", "c1"))
++    for index, (slot, cycle) in enumerate(invalid):
++        result = complete(claimed, intent, key=f"invalid-destination-{index}",
++                          evidence=completion_evidence(intent["attempt_id"],
++                                                       actual_slot=slot, actual_cycle=cycle))
++        assert result["code"] == "UNQUALIFIED_DESTINATION"
++        assert snapshot(prepared) == before
++        assert service.lookup_reservation("m", claimed["reservation_id"]) == original
++        assert delivery.lookup_request(f"invalid-destination-{index}") is None
++        assert migration.read_recorded_contents("c0", prepared)["total"] == 0
++        assert migration.read_recorded_contents("c1", prepared)["total"] == 0
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT state_revision FROM smart_bin_machines "
++                            "WHERE machine_id='m'").fetchone()[0] == revision
