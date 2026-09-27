@@ -1,0 +1,519 @@
+diff --git a/software/sorter/backend/local_state.py b/software/sorter/backend/local_state.py
+index cf42d32..c05771d 100644
+--- a/software/sorter/backend/local_state.py
++++ b/software/sorter/backend/local_state.py
+@@ -1948,6 +1948,42 @@ def get_current_bin_piece_counts() -> dict[tuple[int, int, int], int]:
+         }
+ 
+ 
++def get_current_bin_occupancy_evidence() -> dict[tuple[int, int, int], tuple[int, dict[str | None, int]]]:
++    """Read current counts and all aggregate categories from one SQLite snapshot.
++
++    Include aggregate-only rows so a missing/zero count cannot make recorded
++    contents appear empty to the bin allocator. Inconsistent evidence is left
++    intact for the allocator to reject; this reader does not repair state.
++    """
++    initialize_local_state()
++    with _connection() as conn:
++        conn.execute("BEGIN")
++        active_session_id = _get_meta(conn, _META_KEY_ACTIVE_SORTING_SESSION_ID)
++        if not active_session_id:
++            return {}
++        result: dict[tuple[int, int, int], tuple[int, dict[str | None, int]]] = {}
++        for row in conn.execute(
++            "SELECT layer_index, section_index, bin_index, piece_count "
++            "FROM bin_state_current WHERE session_id = ?",
++            (active_session_id,),
++        ):
++            key = (int(row["layer_index"]), int(row["section_index"]), int(row["bin_index"]))
++            result[key] = (int(row["piece_count"]), {})
++        for row in conn.execute(
++            "SELECT layer_index, section_index, bin_index, category_id, "
++            "SUM(count) AS quantity, MIN(count) AS minimum_quantity "
++            "FROM bin_item_aggregates WHERE session_id = ? "
++            "GROUP BY layer_index, section_index, bin_index, category_id",
++            (active_session_id,),
++        ):
++            key = (int(row["layer_index"]), int(row["section_index"]), int(row["bin_index"]))
++            _, categories = result.setdefault(key, (0, {}))
++            categories[row["category_id"]] = (
++                int(row["quantity"]) if int(row["minimum_quantity"]) > 0 else 0
++            )
++        return result
++
++
+ def get_current_bin_contents_snapshot() -> dict[str, Any]:
+     initialize_local_state()
+     with _connection() as conn:
+diff --git a/software/sorter/backend/subsystems/distribution/positioning.py b/software/sorter/backend/subsystems/distribution/positioning.py
+index ed4ffcd..6a660be 100644
+--- a/software/sorter/backend/subsystems/distribution/positioning.py
++++ b/software/sorter/backend/subsystems/distribution/positioning.py
+@@ -86,6 +86,7 @@ class Positioning(BaseState):
+         self._harvest_pause_enqueued: bool = False
+         self._chute_move_estimated_ms: int = 0
+         self._restore_chute_target: bool = False
++        self._no_fit_layer_index: int | None = None
+ 
+     def _setOccupancyState(self, state_name: str) -> None:
+         if self._occupancy_state == state_name:
+@@ -212,7 +213,7 @@ class Positioning(BaseState):
+                 )
+             if not harvest_active:
+                 address, _ = self._findOrAssignBinForCategory(
+-                    category_id, not_in_inventory=route_not_in_inventory
++                    category_id, not_in_inventory=route_not_in_inventory, piece=piece
+                 )
+             if address is None and self._servo_bus_pause_enqueued:
+                 # Fatal: the servo bus is offline, so every layer is
+@@ -221,7 +222,8 @@ class Positioning(BaseState):
+                 # through to the passthrough path, which would silently
+                 # send this piece to the discard bucket.
+                 return DistributionState.IDLE
+-            if address is None:
++            no_fit_layer_index = self._no_fit_layer_index if not harvest_active else None
++            if address is None and no_fit_layer_index is None:
+                 # MISC is the intentional reject/default category. It should
+                 # pass through to the bottom tray without claiming a real bin
+                 # and without raising the operator no-bin incident.
+@@ -254,15 +256,16 @@ class Positioning(BaseState):
+                 self._setOccupancyState("positioning.passthrough_no_bin")
+                 return self._finishPassthrough(now)
+ 
+-            if self._exceedsLayerMaxDimension(piece, address.layer_index):
++            if no_fit_layer_index is not None or self._exceedsLayerMaxDimension(piece, address.layer_index):
+                 # The piece fits a real bin by category, but is physically too
+                 # large for that bin's layer. Reroute it to the misc bottom bin
+                 # (center-of-chute passthrough) and mark why. A live Harvest
+                 # allocation is confirmed as an exception after the drop.
+-                layer_max = self._layerMaxDimensionMm(address.layer_index)
++                layer_index = no_fit_layer_index if no_fit_layer_index is not None else address.layer_index
++                layer_max = self._layerMaxDimensionMm(layer_index)
+                 self.logger.info(
+                     f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) exceeds "
+-                    f"layer {address.layer_index} limit ({layer_max}mm) — passthrough to misc bottom bin"
++                    f"layer {layer_index} limit ({layer_max}mm) — passthrough to misc bottom bin"
+                 )
+                 self._clearBinsFullAlertIfOwned()
+                 self._clearChuteJamAlertIfOwned()
+@@ -274,7 +277,7 @@ class Positioning(BaseState):
+                 piece.category_id = MISC_CATEGORY
+                 piece.destination_bin = None
+                 piece.too_big_for_layer = True
+-                piece.intended_layer_index = address.layer_index
++                piece.intended_layer_index = layer_index
+                 if harvest_active:
+                     piece.harvest_exception = True
+                 piece.updated_at = time.time()
+@@ -1008,30 +1011,43 @@ class Positioning(BaseState):
+         )
+         return True
+ 
+-    def _findOrAssignBinForCategory(
+-        self, category_id: str, not_in_inventory: bool = False
++    def _findOrAssignBinForCategory(
++        self, category_id: str, *, piece, not_in_inventory: bool = False
+     ) -> tuple[Optional[BinAddress], bool]:
+         # ``not_in_inventory`` selects which bin pool to search. Pieces absent
+         # from the active .bsx route only among bins flagged not-in-inventory;
+         # everyone else routes only among the normal bins. The two pools never
+         # mix. Within the not-in-inventory pool, overlap (multi-category) is
+         # always allowed as the last resort ("if we run out, overlap them").
+-        from local_state import get_current_bin_piece_counts
++        from local_state import get_current_bin_occupancy_evidence
+ 
+-        piece_counts = get_current_bin_piece_counts()
++        self._no_fit_layer_index = None
++        # Read errors propagate. An unavailable ledger must never look like an
++        # empty set of bins and cause a new assignment.
++        occupancy = get_current_bin_occupancy_evidence()
+         # A category may be assigned to more than one bin (the same category_id
+         # appears in several bins' category_ids). When that happens we spread the
+         # load by picking uniformly at random among every reachable, non-full bin
+         # holding it — so N bins each take ~1/N of the pieces. Collected across
+         # the whole scan; the pick happens after the loop.
+         matching_candidates: list[BinAddress] = []
+-        first_unassigned: Optional[tuple[BinAddress, "Bin"]] = None
++        first_unassigned: Optional[tuple[BinAddress, "Bin", list[str]]] = None
+         # Least-loaded shared-bin candidate, used only when every bin is
+         # already assigned and multi-category bins are enabled: (num_categories,
+         # piece_count, address, bin). Picking the bin with the fewest categories
+         # (tie-break: fewest pieces) spreads new categories evenly.
+         best_combine: Optional[tuple[int, int, BinAddress, "Bin"]] = None
++        no_fit_matching: Optional[int] = None
++        no_fit_unassigned: Optional[int] = None
++        no_fit_combine: Optional[int] = None
+         has_usable_layers = False
++        sharing_allowed: bool | None = None
++
++        def can_share() -> bool:
++            nonlocal sharing_allowed
++            if sharing_allowed is None:
++                sharing_allowed = not_in_inventory or _allowMultiCategoryBins()
++            return sharing_allowed
+ 
+         # Debug trace — categorizes every bin we looked at and why it was
+         # skipped. Dumped below when the whole search comes back empty.
+@@ -1064,30 +1080,60 @@ class Positioning(BaseState):
+                     if not self.chute.isBinReachable(address):
+                         unreachable_bins += 1
+                         continue
+-                    count = piece_counts.get((layer_idx, section_idx, bin_idx), 0)
++                    count, recorded = occupancy.get((layer_idx, section_idx, bin_idx), (0, {}))
+                     is_full = max_per_bin is not None and count >= max_per_bin
++                    if is_full:
++                        full_bins += 1
++                        continue
++                    # A cleared routing label is not a physical empty action.
++                    # All recorded quantities must be accounted for, and all
++                    # recorded categories must be known before reuse.
++                    recorded_categories = set(recorded)
+                     if (
+-                        category_id != MISC_CATEGORY
+-                        and category_id in b.category_ids
+-                        and not is_full
++                        count < 0
++                        or sum(recorded.values()) != count
++                        or any(qty <= 0 or not isinstance(cat, str) or not cat for cat, qty in recorded.items())
+                     ):
+-                        matching_candidates.append(address)
++                        skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=uncertain_contents")
+                         continue
+                     if b.category_ids:
+                         bins_with_cats += 1
+-                    if is_full:
+-                        full_bins += 1
+-                    if not b.category_ids and first_unassigned is None:
+-                        first_unassigned = (address, b)
++                        if not recorded_categories.issubset(set(b.category_ids)):
++                            skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=incompatible_contents")
++                            continue
++                    elif recorded_categories and (
++                        category_id not in recorded_categories
++                        or (len(recorded_categories) > 1 and not can_share())
++                    ):
++                        skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}=incompatible_contents")
++                        continue
++
++                    fits = not self._exceedsLayerMaxDimension(piece, layer_idx)
++                    if category_id != MISC_CATEGORY and category_id in b.category_ids:
++                        if fits:
++                            matching_candidates.append(address)
++                        elif no_fit_matching is None:
++                            no_fit_matching = layer_idx
++                        continue
++                    if b.category_ids:
++                        if category_id == MISC_CATEGORY or MISC_CATEGORY in b.category_ids or not can_share():
++                            continue
++                        if fits:
++                            candidate = (len(b.category_ids), count, address, b)
++                            if best_combine is None or candidate[:2] < best_combine[:2]:
++                                best_combine = candidate
++                        elif no_fit_combine is None:
++                            no_fit_combine = layer_idx
++                        continue
+                     if (
+                         category_id != MISC_CATEGORY
+-                        and b.category_ids
+-                        and not is_full
+-                        and MISC_CATEGORY not in b.category_ids
++                        and not b.category_ids
+                     ):
+-                        candidate = (len(b.category_ids), count, address, b)
+-                        if best_combine is None or candidate[:2] < best_combine[:2]:
+-                            best_combine = candidate
++                        if fits and first_unassigned is None:
++                            categories = sorted(recorded_categories) if recorded_categories else []
++                            first_unassigned = (address, b, categories + ([category_id] if category_id not in categories else []))
++                        elif not fits and no_fit_unassigned is None:
++                            no_fit_unassigned = layer_idx
+ 
+         if not has_usable_layers:
+             self.logger.warning(
+@@ -1116,9 +1162,11 @@ class Positioning(BaseState):
+         # catches misc passthrough; treating MISC as a physical bin category
+         # silently swaps that behavior.
+         if first_unassigned is not None and category_id != MISC_CATEGORY:
+-            address, b = first_unassigned
+-            b.category_ids = [category_id]
+-            setBinCategories(extractCategories(self.layout))
++            address, b, categories = first_unassigned
++            new_assignments = extractCategories(self.layout)
++            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
++            setBinCategories(new_assignments)
++            b.category_ids = categories
+             self.logger.info(
+                 f"Positioning: assigned category {category_id} to bin at layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
+             )
+@@ -1132,11 +1180,13 @@ class Positioning(BaseState):
+         if (
+             category_id != MISC_CATEGORY
+             and best_combine is not None
+-            and (not_in_inventory or _allowMultiCategoryBins())
+         ):
+             _, _, address, b = best_combine
+-            b.category_ids.append(category_id)
+-            setBinCategories(extractCategories(self.layout))
++            categories = [*b.category_ids, category_id]
++            new_assignments = extractCategories(self.layout)
++            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
++            setBinCategories(new_assignments)
++            b.category_ids = categories
+             self.logger.info(
+                 f"Positioning: combined category {category_id} into shared bin at "
+                 f"layer={address.layer_index}, section={address.section_index}, "
+@@ -1144,13 +1194,11 @@ class Positioning(BaseState):
+             )
+             return address, True
+ 
+-        if category_id != MISC_CATEGORY and not not_in_inventory:
+-            # No bin slot available for this category; fall back to MISC,
+-            # which will only succeed if the operator pre-assigned a bin
+-            # to MISC. Otherwise it returns None and the piece passes
+-            # through to the discard bucket. Not-in-inventory pieces never fall
+-            # back to a normal MISC bin — they stay in their pool or pass through.
+-            return self._findOrAssignBinForCategory(MISC_CATEGORY)
++        if category_id != MISC_CATEGORY:
++            self._no_fit_layer_index = next(
++                (layer for layer in (no_fit_matching, no_fit_unassigned, no_fit_combine) if layer is not None),
++                None,
++            )
+ 
+         self.logger.info(
+             f"Positioning: MISC has no assigned bin — passthrough to discard bucket "
+diff --git a/software/sorter/backend/tests/test_local_state.py b/software/sorter/backend/tests/test_local_state.py
+index 91c85f2..cd82297 100644
+--- a/software/sorter/backend/tests/test_local_state.py
++++ b/software/sorter/backend/tests/test_local_state.py
+@@ -120,6 +120,7 @@ class LocalStateMigrationTests(unittest.TestCase):
+         os.environ["LOCAL_STATE_DB_PATH"] = str(self.local_state_db_path)
+ 
+     def tearDown(self) -> None:
++        local_state.close_local_state_keeper()
+         if self._old_machine_params is None:
+             os.environ.pop("MACHINE_SPECIFIC_PARAMS_PATH", None)
+         else:
+diff --git a/software/sorter/backend/tests/test_bin_eligibility.py b/software/sorter/backend/tests/test_bin_eligibility.py
+new file mode 100644
+index 0000000..46b16c8
+--- /dev/null
++++ b/software/sorter/backend/tests/test_bin_eligibility.py
+@@ -0,0 +1,218 @@
++"""Focused selection regressions; no controller, provider, or hardware calls."""
++
++import queue
++import time
++import uuid
++from types import SimpleNamespace as NS
++from unittest.mock import Mock
++
++import pytest
++
++import local_state
++from defs.known_object import KnownObject
++from sorting_profile import MISC_CATEGORY
++from subsystems.distribution.chute import BinAddress
++from subsystems.distribution.positioning import Positioning
++from subsystems.distribution.states import DistributionState
++
++
++def _layer(*bins, limit=2, dimension=50, enabled=True, section_enabled=True):
++    return NS(
++        enabled=enabled,
++        max_pieces_per_bin=limit,
++        max_dimension_mm=dimension,
++        sections=[NS(enabled=section_enabled, bins=list(bins))],
++    )
++
++
++def _bin(*categories, pool=False):
++    return NS(category_ids=list(categories), not_in_inventory=pool)
++
++
++@pytest.fixture
++def selection(monkeypatch):
++    saved = []
++    monkeypatch.setattr("subsystems.distribution.positioning.setBinCategories", lambda categories: saved.append(categories))
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {})
++    gc = NS(logger=Mock(), runtime_stats=Mock(), disable_servos=True)
++    chute = NS(isBinReachable=Mock(return_value=True))
++    state = Positioning(NS(), gc, NS(), chute, NS(layers=[]), Mock(), queue.Queue())
++    return state, saved
++
++
++def _select(state, category="A", dimension=20, pool=False):
++    return state._findOrAssignBinForCategory(
++        category, not_in_inventory=pool, piece=NS(max_dimension_mm=dimension)
++    )
++
++
++def test_full_matching_unassigned_and_shared_are_skipped(selection, monkeypatch):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin("A"), _bin(), _bin("B"), _bin(), limit=1)]
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {
++        (0, 0, 0): (1, {"A": 1}), (0, 0, 1): (1, {"A": 1}),
++        (0, 0, 2): (1, {"B": 1}),
++    })
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: True)
++    assert _select(state) == (BinAddress(0, 0, 3), True)
++    assert state.layout.layers[0].sections[0].bins[1].category_ids == []
++    assert len(saved) == 1
++
++
++@pytest.mark.parametrize("categories,share", [("A", False), (None, False), ("B", True)])
++def test_each_full_candidate_type_is_ineligible(selection, monkeypatch, categories, share):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin(*([categories] if categories else [])), limit=1)]
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {
++        (0, 0, 0): (1, {(categories or "A"): 1})
++    })
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: share)
++    assert _select(state) == (None, False)
++    assert saved == []
++
++
++def test_unlimited_limit_keeps_compatible_occupied_matching_bin(selection, monkeypatch):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin("A"), limit=None)]
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {(0, 0, 0): (1000, {"A": 1000})})
++    assert _select(state) == (BinAddress(0, 0, 0), False)
++    assert saved == []
++
++
++@pytest.mark.parametrize("evidence,allowed", [
++    ((2, {"A": 2}), True),
++    ((1, {"B": 1}), False),
++    ((2, {}), False),
++    ((0, {"A": 1}), False),
++    ((1, {None: 1}), False),
++])
++def test_unlabeled_occupied_requires_complete_compatible_evidence(selection, monkeypatch, evidence, allowed):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin(), limit=None)]
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {(0, 0, 0): evidence})
++    assert _select(state) == ((BinAddress(0, 0, 0), True) if allowed else (None, False))
++    assert state.layout.layers[0].sections[0].bins[0].category_ids == (["A"] if allowed else [])
++    assert len(saved) == int(allowed)
++
++
++def test_no_fit_then_later_fit_and_no_fit_metadata_without_assignment(selection):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin(), dimension=40), _layer(_bin(), dimension=80)]
++    assert _select(state, dimension=60) == (BinAddress(1, 0, 0), True)
++    assert state._no_fit_layer_index is None
++    assert state.layout.layers[0].sections[0].bins[0].category_ids == []
++    assert len(saved) == 1
++    state.layout.layers[1].sections[0].bins[0].category_ids = []
++    state.layout.layers[1].max_dimension_mm = 50
++    saved.clear()
++    assert _select(state, dimension=60) == (None, False)
++    assert state._no_fit_layer_index == 0
++    assert all(not layer.sections[0].bins[0].category_ids for layer in state.layout.layers)
++    assert saved == []
++
++
++def test_matching_preference_searches_later_fitting_match(selection):
++    state, saved = selection
++    state.layout.layers = [
++        _layer(_bin("A"), dimension=40),
++        _layer(_bin("A"), dimension=80),
++        _layer(_bin(), dimension=80),
++    ]
++    assert _select(state, dimension=60) == (BinAddress(1, 0, 0), False)
++    assert saved == []
++
++
++@pytest.mark.parametrize("dimension", [50, None])
++def test_exact_limit_and_unknown_dimension_fit(selection, dimension):
++    state, _ = selection
++    state.layout.layers = [_layer(_bin("A"), dimension=50)]
++    assert _select(state, dimension=dimension) == (BinAddress(0, 0, 0), False)
++
++
++def test_pools_sharing_and_unreachable_or_disabled_bins(selection, monkeypatch):
++    state, saved = selection
++    state.layout.layers = [
++        _layer(_bin(), enabled=False),
++        _layer(_bin(), section_enabled=False),
++        _layer(_bin(), _bin("B", pool=True), _bin("C", pool=True)),
++    ]
++    state.chute.isBinReachable.side_effect = lambda address: address.bin_index != 0
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: False)
++    assert _select(state, pool=False) == (None, False)
++    assert _select(state, pool=True) == (BinAddress(2, 0, 1), True)
++    assert state.layout.layers[2].sections[0].bins[1].category_ids == ["B", "A"]
++    assert len(saved) == 1
++
++
++def test_normal_sharing_requires_policy_and_preserves_recorded_contents(selection, monkeypatch):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin("B"), limit=None)]
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {(0, 0, 0): (1, {"B": 1})})
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: False)
++    assert _select(state) == (None, False)
++    monkeypatch.setattr("subsystems.distribution.positioning._allowMultiCategoryBins", lambda: True)
++    assert _select(state) == (BinAddress(0, 0, 0), True)
++    assert state.layout.layers[0].sections[0].bins[0].category_ids == ["B", "A"]
++    assert len(saved) == 1
++
++
++def test_misc_and_read_or_write_failure_never_assign(selection, monkeypatch):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin())]
++    assert _select(state, category=MISC_CATEGORY) == (None, False)
++    assert saved == []
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", Mock(side_effect=OSError("read failed")))
++    with pytest.raises(OSError, match="read failed"):
++        _select(state)
++    assert state.layout.layers[0].sections[0].bins[0].category_ids == []
++    monkeypatch.setattr(local_state, "get_current_bin_occupancy_evidence", lambda: {})
++    monkeypatch.setattr("subsystems.distribution.positioning.setBinCategories", Mock(side_effect=OSError("write failed")))
++    with pytest.raises(OSError, match="write failed"):
++        _select(state)
++    assert state.layout.layers[0].sections[0].bins[0].category_ids == []
++
++
++@pytest.mark.parametrize("harvest", [False, True])
++def test_no_fit_passthrough_keeps_metadata_and_harvest_destination(selection, monkeypatch, harvest):
++    state, saved = selection
++    state.layout.layers = [_layer(_bin("A") if harvest else _bin(), dimension=40)]
++    piece = KnownObject(part_id="3001", color_id="1")
++    piece.max_dimension_mm = 60
++    state.shared = NS(
++        set_distribution_gate=Mock(),
++        transport=NS(getPieceForDistributionPositioning=Mock(return_value=piece)),
++    )
++    state.sorting_profile.getCategoryIdForPart.return_value = "A"
++    state.sorting_profile.highValueCategoryId.return_value = None
++    state._reserveHarvestRoute = Mock(return_value=(BinAddress(0, 0, 0), "A") if harvest else None)
++    state._clearBinsFullAlertIfOwned = Mock()
++    state._clearChuteJamAlertIfOwned = Mock()
++    state._openAllDoorsForPassthrough = Mock(return_value=True)
++    state._finishPassthrough = Mock(return_value=DistributionState.READY)
++    assert state.step() == DistributionState.READY
++    assert piece.too_big_for_layer is True
++    assert piece.intended_layer_index == 0
++    assert piece.category_id == MISC_CATEGORY
++    assert piece.destination_bin is None
++    assert bool(piece.harvest_exception) is harvest
++    assert saved == []
++
++
++def test_occupancy_reader_uses_current_session_and_detects_aggregate_only_row(tmp_path, monkeypatch):
++    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(tmp_path / "local.sqlite"))
++    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(tmp_path / "machine.toml"))
++    local_state.close_local_state_keeper()
++    local_state.record_piece_distribution({
++        "uuid": str(uuid.uuid4()), "destination_bin": (0, 0, 0),
++        "distributed_at": time.time(), "category_id": "A", "part_id": "3001",
++    })
++    assert local_state.get_current_bin_occupancy_evidence()[(0, 0, 0)] == (1, {"A": 1})
++    with local_state._connection() as conn:
++        session = local_state._get_meta(conn, local_state._META_KEY_ACTIVE_SORTING_SESSION_ID)
++        conn.execute(
++            "UPDATE bin_state_current SET piece_count = 0 WHERE session_id = ? AND layer_index = 0 AND section_index = 0 AND bin_index = 0",
++            (session,),
++        )
++        conn.commit()
++    assert local_state.get_current_bin_occupancy_evidence()[(0, 0, 0)] == (0, {"A": 1})
++    local_state.close_local_state_keeper()
