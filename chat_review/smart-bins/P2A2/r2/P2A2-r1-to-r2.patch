@@ -1,0 +1,491 @@
+diff --git a/software/sorter/backend/smart_bins_migration.py b/software/sorter/backend/smart_bins_migration.py
+index 077aa61bcf0ac1abd5b8715f0415ef4b090ca014..ed122f8a026e1e86ab64ced2ee31d25ccfb6c627 100644
+--- a/software/sorter/backend/smart_bins_migration.py
++++ b/software/sorter/backend/smart_bins_migration.py
+@@ -19,7 +19,7 @@ from local_state import local_state_db_path
+ from smart_bins_storage import check_schema_version, critical_transaction
+ 
+ 
+-EXTENSION_VERSION = 1
++EXTENSION_VERSION = 2
+ _LEGACY_TABLES = (
+     "sorting_sessions", "bin_state_current", "bin_item_aggregates", "piece_events",
+     "bin_events", "bin_snapshots", "bin_snapshot_layers", "bin_snapshot_items",
+@@ -51,12 +51,15 @@ _EXT_DDL = (
+     "id TEXT NOT NULL PRIMARY KEY, import_id TEXT NOT NULL, cycle_id TEXT NOT NULL, "
+     "machine_id TEXT NOT NULL, piece_uuid TEXT NOT NULL, group_key_id TEXT NOT NULL, "
+     "quantity INTEGER NOT NULL CHECK(quantity=1), source_event_ids_json TEXT NOT NULL, "
++    "runtime_run_id TEXT NOT NULL, sorting_session_id TEXT NOT NULL, "
++    "source_distributed_at REAL NOT NULL, "
+     "source_ref TEXT NOT NULL, provenance TEXT NOT NULL, "
+     "UNIQUE(machine_id,piece_uuid), "
+     "FOREIGN KEY(import_id) REFERENCES smart_bin_migration_imports(id), "
+     "FOREIGN KEY(cycle_id) REFERENCES smart_bin_cycles(id), "
+     "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
+-    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id))",
++    "FOREIGN KEY(group_key_id) REFERENCES smart_bin_group_keys(id), "
++    "FOREIGN KEY(sorting_session_id) REFERENCES sorting_sessions(id))",
+     "CREATE TRIGGER smart_bin_migration_no_native_duplicate_insert "
+     "BEFORE INSERT ON smart_bin_historical_contributions WHEN EXISTS ("
+     "SELECT 1 FROM smart_bin_deliveries d WHERE d.machine_id=NEW.machine_id "
+@@ -280,15 +283,34 @@ def _lineage(source: dict[str, Any], anchor: dict[str, Any],
+             return chain, unsupported
+ 
+ 
+-def _history_matches(event: dict[str, Any], history: dict[str, Any] | None) -> bool:
++def _history_matches(event: dict[str, Any], history: dict[str, Any] | None,
++                     session: dict[str, Any]) -> bool:
+     if history is None:
+         return False
+-    return (history["run_id"] == event["session_id"]
++    return (isinstance(history["run_id"], str) and bool(history["run_id"].strip())
++            and history["machine_id"] == session["machine_id"]
+             and history["dead"] == 0
+             and (history["bin_x"], history["bin_y"], history["bin_z"]) == _coords(event)
+             and history["recorded_at"] == event["distributed_at"]
++            and event["distributed_at"] >= session["started_at"]
++            and (session["ended_at"] is None
++                 or event["distributed_at"] <= session["ended_at"])
+             and all(history[name] == event[name]
+-                    for name in ("part_id", "color_id", "category_id")))
++                    for name in ("part_id", "color_id", "category_id",
++                                 "classification_status")))
++
++
++def _clear_between(source: dict[str, Any], sessions: dict[str, dict[str, Any]],
++                   anchor: dict[str, Any], earlier_at: float) -> bool:
++    """A recorded clear is the only supported exclusion for earlier bin stock."""
++    for layer in source["bin_snapshot_layers"]:
++        session = sessions.get(layer["session_id"])
++        if (session is not None and session["machine_id"] == anchor["machine_id"]
++                and _coords(layer) == tuple(anchor["coordinates"])
++                and earlier_at <= layer["flushed_at"] < anchor["anchor_time"]
++                and any(_clear_matches(event, layer) for event in source["bin_events"])):
++            return True
++    return False
+ 
+ 
+ def _group(item: dict[str, Any] | None) -> dict[str, Any]:
+@@ -308,27 +330,56 @@ def _group(item: dict[str, Any] | None) -> dict[str, Any]:
+ 
+ 
+ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
++    _check_extension(conn, required=False)
+     source = _legacy_snapshot(conn)
+     fingerprint = _digest(source)
+     sessions = {row["id"]: row for row in source["sorting_sessions"]}
+     active_id = next((row["value"] for row in source["metadata"]
+                       if row["key"] == "active_sorting_session_id"), None)
++    active = sessions.get(active_id)
++    if active is not None and active["status"] != "active":
++        active = None
+     history = {row["uuid"]: row for row in source["piece_records"] or []}
+     imported_sessions = {row["session_id"] for row in source["bin_events"]
+                          if row["event_type"] == "snapshot_imported"}
+-    native = {(row["machine_id"], row["piece_uuid"]) for row in
+-              _rows(conn, "SELECT machine_id,piece_uuid FROM smart_bin_deliveries")}
++    native_rows = _rows(conn, "SELECT d.id,d.machine_id,d.piece_uuid,d.actual_kind,"
++                        "d.delivered_at,s.layer_index,s.section_index,s.bin_index "
++                        "FROM smart_bin_deliveries d LEFT JOIN smart_bin_slots s "
++                        "ON s.id=d.actual_slot_id ORDER BY d.id")
++    native = {(row["machine_id"], row["piece_uuid"]) for row in native_rows}
+     raw_anchors: list[dict[str, Any]] = []
+-    if active_id in sessions:
++    global_blockers: list[dict[str, Any]] = []
++    state_keys = {(row["session_id"], *_coords(row)) for row in source["bin_state_current"]}
++    for item in source["bin_item_aggregates"]:
++        if (item["session_id"], *_coords(item)) not in state_keys and item["count"] != 0:
++            global_blockers.append({"kind": "orphan_positive_aggregate",
++                                    "source_ref": f"bin_item_aggregates:{item['session_id']}:"
++                                                  f"{_coords(item)}:{item['item_key']}",
++                                    "count": item["count"]})
++    if active is None:
++        occupied_states = [row for row in source["bin_state_current"] if row["piece_count"] != 0]
++        occupied_items = [row for row in source["bin_item_aggregates"] if row["count"] != 0]
++        if occupied_states or occupied_items:
++            global_blockers.append({"kind": "unowned_current_occupancy",
++                                    "active_session_id": active_id,
++                                    "state_refs": sorted(f"{row['session_id']}:{_coords(row)}"
++                                                         for row in occupied_states),
++                                    "aggregate_refs": sorted(
++                                        f"{row['session_id']}:{_coords(row)}:{row['item_key']}"
++                                        for row in occupied_items)})
++    else:
+         for state in source["bin_state_current"]:
+-            if state["session_id"] == active_id and state["piece_count"] != 0:
++            if state["session_id"] == active_id:
+                 coords = _coords(state)
++                items = _source_items(source, active_id, coords)
++                if state["piece_count"] == 0 and not any(item["count"] != 0 for item in items):
++                    continue
+                 raw_anchors.append({"source_ref": f"current:{active_id}:{coords}:{state['bin_epoch']}",
+                                     "source_refs": [f"bin_state_current:{active_id}:{coords}"],
+                                     "session_id": active_id, "coordinates": coords,
+                                     "epoch": state["bin_epoch"], "total": state["piece_count"],
+                                     "anchor_time": state["updated_at"], "closed_at": None,
+-                                    "items": _source_items(source, active_id, coords)})
++                                    "items": items})
+     layers: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+     for layer in source["bin_snapshot_layers"]:
+         layers[(layer["session_id"], *_coords(layer), layer["bin_epoch"])].append(layer)
+@@ -354,7 +405,6 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+                             "clear_proven": any(_clear_matches(event, first) for event in source["bin_events"])})
+     raw_anchors.sort(key=lambda anchor: anchor["source_ref"])
+     anchors: list[dict[str, Any]] = []
+-    global_blockers: list[dict[str, Any]] = []
+     events_by_uuid: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+     for raw in raw_anchors:
+         session = sessions.get(raw["session_id"])
+@@ -445,7 +495,8 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+             if (machine_id, uuid) in native:
+                 problem(anchor, "native_delivery_duplicate", uuid)
+                 continue
+-            if not any(_history_matches(row, history.get(uuid)) for _, row in own):
++            if not any(_history_matches(row, history.get(uuid),
++                                        sessions[row["session_id"]]) for _, row in own):
+                 problem(anchor, "unverified_piece_history", uuid)
+                 continue
+             identity = _event_item_identity(event)
+@@ -460,6 +511,9 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+                                             "piece_uuid": uuid, "group_key_id": group["id"],
+                                             "quantity": 1,
+                                             "source_event_ids": sorted(row["id"] for _, row in own),
++                                            "runtime_run_id": history[uuid]["run_id"],
++                                            "sorting_session_id": event["session_id"],
++                                            "source_distributed_at": event["distributed_at"],
+                                             "source_ref": anchor["source_ref"]})
+         for identity, count in item_counts.items():
+             if linked_counts[identity] > count:
+@@ -468,10 +522,33 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+         if sum(linked_counts.values()) > total:
+             problem(anchor, "negative_total_residual", {"recorded": total,
+                     "linked": sum(linked_counts.values())})
++        if total > sum(linked_counts.values()):
++            own_uuids = {event["piece_uuid"] for event in anchor["events"]}
++            for delivery in native_rows:
++                if (delivery["machine_id"] != anchor["machine_id"]
++                        or delivery["piece_uuid"] in own_uuids):
++                    continue
++                prior_events = [event for _, event in events_by_uuid.get(
++                    (anchor["machine_id"], delivery["piece_uuid"]), [])
++                    if _coords(event) == tuple(anchor["coordinates"])
++                    and event["bin_epoch"] == anchor["epoch"]
++                    and event["distributed_at"] <= anchor["anchor_time"]]
++                same_destination = (
++                    delivery["actual_kind"] == "BIN"
++                    and (delivery["layer_index"], delivery["section_index"],
++                         delivery["bin_index"]) == tuple(anchor["coordinates"])
++                    and delivery["delivered_at"] <= anchor["anchor_time"]
++                    and not _clear_between(source, sessions, anchor, delivery["delivered_at"]))
++                if prior_events or same_destination:
++                    problem(anchor, "potential_native_balance_overlap",
++                            {"native_delivery_id": delivery["id"],
++                             "legacy_event_ids": sorted(row["id"] for row in prior_events),
++                             "basis": "unlinked_event" if prior_events else "same_bin_before_anchor"})
+         hard_blockers = {"conflicting_repeated_snapshot", "missing_clear_evidence",
+                          "unknown_or_negative_quantity", "unknown_or_negative_group_quantity",
+                          "count_group_conflict", "unknown_machine_identity",
+                          "conflicting_piece_identity", "native_delivery_duplicate",
++                         "potential_native_balance_overlap",
+                          "unsupported_piece_group", "negative_group_residual",
+                          "negative_total_residual"}
+         unsafe_credit = any(issue["cycle_id"] == anchor["cycle_id"] and
+@@ -499,7 +576,7 @@ def _build_plan(conn: sqlite3.Connection) -> dict[str, Any]:
+                              "source_ref": anchor["source_ref"]})
+         anchor.pop("items")
+         anchor.pop("events")
+-    plan = {"source_fingerprint": fingerprint, "scope_key": "legacy-bin-backfill-v1",
++    plan = {"source_fingerprint": fingerprint, "scope_key": "legacy-bin-backfill-v2",
+             "anchors": anchors, "groups": sorted(groups.values(), key=lambda item: item["id"]),
+             "contributions": sorted(contributions, key=lambda item: item["id"]),
+             "balances": sorted(balances, key=lambda item: item["id"]),
+@@ -571,10 +648,14 @@ def _write_plan(conn: sqlite3.Connection, plan: dict[str, Any]) -> dict[str, Any
+     for contribution in plan["contributions"]:
+         conn.execute("INSERT INTO smart_bin_historical_contributions "
+                      "(id,import_id,cycle_id,machine_id,piece_uuid,group_key_id,quantity,"
+-                     "source_event_ids_json,source_ref,provenance) VALUES(?,?,?,?,?,?,1,?,?,?)",
++                     "source_event_ids_json,runtime_run_id,sorting_session_id,"
++                     "source_distributed_at,source_ref,provenance) "
++                     "VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?)",
+                      (contribution["id"], import_id, contribution["cycle_id"],
+                       contribution["machine_id"], contribution["piece_uuid"],
+                       contribution["group_key_id"], json.dumps(contribution["source_event_ids"]),
++                      contribution["runtime_run_id"], contribution["sorting_session_id"],
++                      contribution["source_distributed_at"],
+                       contribution["source_ref"], "matched_legacy_event_and_history"))
+     for balance in plan["balances"]:
+         conn.execute("INSERT INTO smart_bin_opening_balances "
+diff --git a/software/sorter/backend/tests/test_smart_bins_migration.py b/software/sorter/backend/tests/test_smart_bins_migration.py
+index ebfe270ae959e72426552842f8045ce761416cd6..b75b732c915a8f30371af1a95d2548a57a84f00b 100644
+--- a/software/sorter/backend/tests/test_smart_bins_migration.py
++++ b/software/sorter/backend/tests/test_smart_bins_migration.py
+@@ -54,7 +54,8 @@ def piece(uuid, session, *, coords=(0, 0, 0), part="3001", color="2", category="
+                "part_id": part, "color_id": color, "category_id": category,
+                "classification_status": "classified"}
+     local_state.record_piece_distribution(payload)
+-    piece_records.recordPiece(payload, run_id=session["id"], machine_id="m")
++    # RunRecorder uses gc.run_id, independently of local_state's session UUID.
++    piece_records.recordPiece(payload, run_id="runtime-run", machine_id="m")
+     return payload
+ 
+ 
+@@ -63,7 +64,7 @@ def install_and_apply(db, plan=None):
+     return migration.apply_legacy_backfill(plan or migration.plan_legacy_backfill(db))
+ 
+ 
+-def native_delivery(session, *, uuid="one", expect_duplicate=False):
++def native_delivery(session, *, uuid="one", expect_duplicate=False, delivered_at=2):
+     with storage.critical_transaction() as conn:
+         conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('m') "
+                      "ON CONFLICT(machine_id) DO NOTHING")
+@@ -91,12 +92,12 @@ def native_delivery(session, *, uuid="one", expect_duplicate=False):
+                      "actual_slot_id,actual_cycle_id,evidence_ref,delivered_at) "
+                      "VALUES('native-delivery','native-reservation','m',?,?,'native-policy',"
+                      "'native-group',1,'BIN','native-slot','native-cycle','BIN',"
+-                     "'native-slot','native-cycle','synthetic-test-evidence',2)")
++                     "'native-slot','native-cycle','synthetic-test-evidence',?)")
+         if expect_duplicate:
+             with pytest.raises(sqlite3.IntegrityError, match="piece already credited by historical contribution"):
+-                conn.execute(statement, (uuid, session["id"]))
++                conn.execute(statement, (uuid, session["id"], delivered_at))
+         else:
+-            conn.execute(statement, (uuid, session["id"]))
++            conn.execute(statement, (uuid, session["id"], delivered_at))
+         conn.commit()
+ 
+ 
+@@ -119,6 +120,47 @@ def test_cross_session_continuity_and_repeated_carry_forward(db):
+     assert not contents["blocked"]
+ 
+ 
++def test_runtime_run_and_sorting_session_are_distinct_provenance(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", session)
++    with connect(db) as conn:
++        history = conn.execute("SELECT run_id,machine_id,recorded_at FROM piece_records "
++                               "WHERE uuid='one'").fetchone()
++    assert history[:2] == ("runtime-run", "m") and history[0] != session["id"]
++    plan = migration.plan_legacy_backfill(db)
++    assert not plan["discrepancies"]
++    assert len(plan["contributions"]) == 1
++    assert plan["contributions"][0]["runtime_run_id"] == history[0]
++    assert plan["contributions"][0]["sorting_session_id"] == session["id"]
++    assert plan["contributions"][0]["source_distributed_at"] == history[2]
++    install_and_apply(db, plan)
++    with connect(db) as conn:
++        assert conn.execute(
++            "SELECT runtime_run_id,sorting_session_id FROM smart_bin_historical_contributions "
++            "WHERE piece_uuid='one'"
++        ).fetchone() == ("runtime-run", session["id"])
++
++
++@pytest.mark.parametrize("change", [
++    "UPDATE piece_records SET machine_id='other' WHERE uuid='one'",
++    "UPDATE piece_records SET bin_x=1 WHERE uuid='one'",
++    "UPDATE piece_records SET recorded_at=recorded_at+1 WHERE uuid='one'",
++    "UPDATE piece_records SET run_id=NULL WHERE uuid='one'",
++])
++def test_conflicting_or_missing_history_evidence_is_uncertain(db, change):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", session)
++    with connect(db) as conn:
++        conn.execute(change)
++        before = conn.execute("SELECT * FROM piece_records WHERE uuid='one'").fetchone()
++    plan = migration.plan_legacy_backfill(db)
++    assert not plan["contributions"]
++    assert any(issue["kind"] == "unverified_piece_history" for issue in plan["discrepancies"])
++    assert plan["anchors"][0]["blocked"]
++    with connect(db) as conn:
++        assert conn.execute("SELECT * FROM piece_records WHERE uuid='one'").fetchone() == before
++
++
+ def test_clear_boundary_and_repeated_snapshot_counted_once(db):
+     session = local_state.start_new_sorting_session(reason="profile_activated")
+     piece("before-clear", session)
+@@ -222,6 +264,63 @@ def test_group_count_conflict_and_negative_residual_block_credit(db):
+     assert contents["total"] == 0 and contents["legacy_total"] == 1 and contents["blocked"]
+ 
+ 
++def test_zero_count_with_positive_aggregates_is_blocked_not_hidden(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", session)
++    with connect(db) as conn:
++        conn.execute("UPDATE bin_state_current SET piece_count=0")
++        before = conn.execute("SELECT * FROM bin_state_current").fetchall(), (
++            conn.execute("SELECT * FROM bin_item_aggregates").fetchall())
++    plan = migration.plan_legacy_backfill(db)
++    assert len(plan["anchors"]) == 1 and plan["anchors"][0]["total"] == 0
++    assert any(issue["kind"] == "count_group_conflict" for issue in plan["discrepancies"])
++    assert not plan["contributions"] and not plan["balances"]
++    install_and_apply(db, plan)
++    with connect(db) as conn:
++        assert before == (conn.execute("SELECT * FROM bin_state_current").fetchall(),
++                          conn.execute("SELECT * FROM bin_item_aggregates").fetchall())
++    assert migration.read_recorded_contents(plan["anchors"][0]["cycle_id"], db)["blocked"]
++
++
++def test_orphan_positive_aggregate_is_plan_blocker(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", session)
++    with connect(db) as conn:
++        conn.execute("DELETE FROM bin_state_current")
++        before = conn.execute("SELECT * FROM bin_item_aggregates").fetchall()
++    plan = migration.plan_legacy_backfill(db)
++    assert any(issue["kind"] == "orphan_positive_aggregate" for issue in plan["global_blockers"])
++    migration.initialize_migration_schema()
++    with pytest.raises(migration.MigrationConflict, match="unowned blockers"):
++        migration.apply_legacy_backfill(plan)
++    with connect(db) as conn:
++        assert conn.execute("SELECT * FROM bin_item_aggregates").fetchall() == before
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_migration_imports").fetchone()[0] == 0
++
++
++@pytest.mark.parametrize("value", [None, "missing-session", "closed-session"])
++def test_unowned_occupancy_with_missing_or_dangling_active_session_is_blocked(db, value):
++    local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", local_state.get_active_sorting_session())
++    with connect(db) as conn:
++        if value is None:
++            conn.execute("DELETE FROM metadata WHERE key='active_sorting_session_id'")
++        elif value == "closed-session":
++            conn.execute("UPDATE sorting_sessions SET status='closed'")
++        else:
++            conn.execute("UPDATE metadata SET value=? WHERE key='active_sorting_session_id'", (value,))
++        before = conn.execute("SELECT * FROM bin_state_current").fetchall()
++    plan = migration.plan_legacy_backfill(db)
++    assert any(issue["kind"] == "unowned_current_occupancy" for issue in plan["global_blockers"])
++    assert not plan["anchors"] and not plan["balances"]
++    migration.initialize_migration_schema()
++    with pytest.raises(migration.MigrationConflict, match="unowned blockers"):
++        migration.apply_legacy_backfill(plan)
++    with connect(db) as conn:
++        assert conn.execute("SELECT * FROM bin_state_current").fetchall() == before
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_migration_imports").fetchone()[0] == 0
++
++
+ def test_group_total_disagreement_and_unsupported_membership(db):
+     session = local_state.start_new_sorting_session(reason="profile_activated")
+     piece("one", session)
+@@ -253,6 +352,93 @@ def test_missing_layout_evidence_limits_cross_session_lineage(db):
+     assert plan["balances"][0]["quantity"] == 1
+ 
+ 
++def test_unlinked_earlier_event_cannot_overlap_native_and_opening_balance(db):
++    first = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("first", first)
++    second = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("second", second)
++    with connect(db) as conn:
++        conn.execute("UPDATE bin_layouts SET updated_at=?", (time.time() + 100,))
++        before = conn.execute("SELECT * FROM bin_state_current").fetchall(), (
++            conn.execute("SELECT * FROM piece_events").fetchall())
++    native_delivery(first, uuid="first")
++    plan = migration.plan_legacy_backfill(db)
++    assert plan["anchors"][0]["linked_sessions"] == [second["id"]]
++    assert {row["piece_uuid"] for row in plan["contributions"]} == set()
++    assert not plan["balances"]
++    assert any(issue["kind"] == "potential_native_balance_overlap"
++               for issue in plan["discrepancies"])
++    install_and_apply(db, plan)
++    with connect(db) as conn:
++        assert before == (conn.execute("SELECT * FROM bin_state_current").fetchall(),
++                          conn.execute("SELECT * FROM piece_events").fetchall())
++    assert migration.read_recorded_contents(plan["anchors"][0]["cycle_id"], db)["blocked"]
++
++
++def test_unlinked_residual_with_later_nonoverlapping_native_delivery(db):
++    first = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("first", first)
++    second = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("second", second)
++    with connect(db) as conn:
++        conn.execute("UPDATE bin_layouts SET updated_at=?", (time.time() + 100,))
++    native_delivery(first, uuid="later-unrelated", delivered_at=time.time() + 100)
++    plan = migration.plan_legacy_backfill(db)
++    assert not plan["discrepancies"]
++    assert plan["anchors"][0]["coverage"] == "historical_unknown"
++    assert {row["piece_uuid"] for row in plan["contributions"]} == {"second"}
++    assert len(plan["balances"]) == 1 and plan["balances"][0]["quantity"] == 1
++    install_and_apply(db, plan)
++    contents = migration.read_recorded_contents(plan["anchors"][0]["cycle_id"], db)
++    assert contents["total"] == 2 and contents["coverage"] == "historical_unknown"
++    assert not contents["blocked"]
++
++
++def test_proven_clear_separates_earlier_native_from_current_balance(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("before-clear", session)
++    native_delivery(session, uuid="unrelated-before-clear")
++    local_state.clear_current_session_bins(scope="bin", layer_index=0, section_index=0,
++                                           bin_index=0)
++    piece("after-clear", session)
++    with connect(db) as conn:
++        conn.execute("INSERT INTO bin_item_aggregates "
++                     "(session_id,layer_index,section_index,bin_index,item_key,part_id,"
++                     "color_id,category_id,classification_status,count) "
++                     "VALUES(?,0,0,0,'3002|5|B|classified','3002','5','B','classified',1)",
++                     (session["id"],))
++        conn.execute("UPDATE bin_state_current SET piece_count=2,unique_item_count=2")
++    plan = migration.plan_legacy_backfill(db)
++    current = next(anchor for anchor in plan["anchors"]
++                   if anchor["source_ref"].startswith("current:"))
++    assert not any(issue["kind"] == "potential_native_balance_overlap"
++                   and issue["cycle_id"] == current["cycle_id"]
++                   for issue in plan["discrepancies"])
++    assert any(row["cycle_id"] == current["cycle_id"] and row["quantity"] == 1
++               for row in plan["balances"])
++
++
++def test_snapshot_own_clear_does_not_hide_native_overlap(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("known", session)
++    with connect(db) as conn:
++        conn.execute("INSERT INTO bin_item_aggregates "
++                     "(session_id,layer_index,section_index,bin_index,item_key,part_id,"
++                     "color_id,category_id,classification_status,count) "
++                     "VALUES(?,0,0,0,'3002|5|B|classified','3002','5','B','classified',1)",
++                     (session["id"],))
++        conn.execute("UPDATE bin_state_current SET piece_count=2,unique_item_count=2")
++    native_delivery(session, uuid="possible-residual")
++    local_state.clear_current_session_bins(scope="bin", layer_index=0, section_index=0,
++                                           bin_index=0)
++    plan = migration.plan_legacy_backfill(db)
++    assert len(plan["anchors"]) == 1
++    assert plan["anchors"][0]["source_ref"].startswith("snapshot:")
++    assert any(issue["kind"] == "potential_native_balance_overlap"
++               for issue in plan["discrepancies"])
++    assert not plan["contributions"] and not plan["balances"]
++
++
+ def test_no_double_credit_across_native_and_historical_origins(db):
+     session = local_state.start_new_sorting_session(reason="profile_activated")
+     piece("one", session)
+@@ -291,6 +477,22 @@ def test_extension_install_is_explicit_and_rejects_incomplete_schema(db):
+         migration.initialize_migration_schema()
+ 
+ 
++def test_old_extension_version_cannot_plan_or_replay(db):
++    session = local_state.start_new_sorting_session(reason="profile_activated")
++    piece("one", session)
++    plan = migration.plan_legacy_backfill(db)
++    assert plan["scope_key"] == "legacy-bin-backfill-v2"
++    migration.initialize_migration_schema()
++    with connect(db) as conn:
++        conn.execute("UPDATE smart_bin_migration_versions SET version=1")
++    with pytest.raises(migration.MigrationConflict, match="unsupported migration extension version"):
++        migration.plan_legacy_backfill(db)
++    with pytest.raises(migration.MigrationConflict, match="unsupported migration extension version"):
++        migration.apply_legacy_backfill(plan)
++    with connect(db) as conn:
++        assert conn.execute("SELECT COUNT(*) FROM smart_bin_migration_imports").fetchone()[0] == 0
++
++
+ def test_duplicate_piece_conflict_and_ambiguous_membership(db):
+     session = local_state.start_new_sorting_session(reason="profile_activated")
+     piece("same", session)
+@@ -365,4 +567,4 @@ def test_legacy_rows_settings_and_corrections_unchanged(db):
+         assert conn.execute("SELECT part_correct,correction_updated_at FROM piece_records "
+                             "WHERE uuid='one'").fetchone() == (0, 17)
+         assert conn.execute("SELECT version FROM smart_bin_schema_versions").fetchone()[0] == 2
+-        assert conn.execute("SELECT version FROM smart_bin_migration_versions").fetchone()[0] == 1
++        assert conn.execute("SELECT version FROM smart_bin_migration_versions").fetchone()[0] == 2
