@@ -18,19 +18,12 @@
 	import ResizeHandle from '$lib/components/ResizeHandle.svelte';
 	import SidebarBottomTabs from '$lib/components/SidebarBottomTabs.svelte';
 	import { buildDashboardFeedCrops, type DashboardFeedCrop } from '$lib/dashboard/crops';
-	import { AlertTriangle, Check, Eye, EyeOff, Info, Play, RotateCcw, X } from 'lucide-svelte';
+	import { AlertTriangle, Check, Eye, EyeOff, Info, RotateCcw, X } from 'lucide-svelte';
 
 	const SIDEBAR_MIN = 300;
 	const SIDEBAR_MAX = 900;
 	const SIDEBAR_DEFAULT = 420;
-	const EXIT_RELEASE_TUNING_STORAGE_KEY = 'sorter:c4-exit-release-tuning:v1';
 	const EXIT_STUCK_INCIDENT_KIND = 'exit_stuck';
-	const EXIT_RELEASE_DEFAULTS = {
-		outputDeg: 1.0,
-		speed: 16000,
-		acceleration: 40000,
-		cycles: 3
-	};
 	const machine = getMachineContext();
 	const manager = getMachinesContext();
 
@@ -50,10 +43,6 @@
 	let stallIncidentActionError = $state<string | null>(null);
 	let rehomeIncidentActionPending = $state(false);
 	let rehomeIncidentActionError = $state<string | null>(null);
-	let exitReleaseOutputDeg = $state(EXIT_RELEASE_DEFAULTS.outputDeg);
-	let exitReleaseSpeed = $state(EXIT_RELEASE_DEFAULTS.speed);
-	let exitReleaseAcceleration = $state(EXIT_RELEASE_DEFAULTS.acceleration);
-	let exitReleaseCycles = $state(EXIT_RELEASE_DEFAULTS.cycles);
 
 	function currentBackendBaseUrl(): string {
 		return machineHttpBaseUrlFromWsUrl(machine.machine?.url) ?? getBackendHttpBase();
@@ -213,13 +202,7 @@
 	function normalizeExitIncident(value: unknown): Record<string, unknown> | null {
 		if (!value || typeof value !== 'object') return null;
 		const incident = value as Record<string, unknown>;
-		return incident.kind === 'classification_exit_release' ||
-			incident.kind === EXIT_STUCK_INCIDENT_KIND ||
-			incident.kind === 'channel_exit_stuck' ||
-			incident.kind === 'channel_dropzone_stuck' ||
-			incident.kind === 'c2_separation_needed' ||
-			incident.kind === 'bulk_feeder_stalled' ||
-			incident.kind === 'feeder_detection_unavailable' ||
+		return incident.kind === EXIT_STUCK_INCIDENT_KIND ||
 			incident.kind === 'feeder_jam' ||
 			incident.kind === 'distribution_chute_jam' ||
 			incident.kind === 'distribution_servo_bus_offline' ||
@@ -284,74 +267,19 @@
 			.map((key) => ({ key, value: formatIncidentDetailValue(key, incident[key]) }));
 	}
 
-	function fmtIncidentNumber(value: number | null, suffix = '', digits = 1): string {
-		return value === null ? '-' : `${value.toFixed(digits)}${suffix}`;
-	}
-
-	function exitIncidentSourceKind(incident: Record<string, unknown> | null): string {
-		const sourceKind = incidentString(incident, 'source_kind');
-		if (sourceKind) return sourceKind;
-		if (incident?.kind === 'classification_exit_release') return 'classification_exit_release';
-		if (incident?.kind === 'channel_exit_stuck') return 'channel_exit_stuck';
-		if (incident?.kind === EXIT_STUCK_INCIDENT_KIND && incidentString(incident, 'piece_uuid')) {
-			return 'classification_exit_release';
-		}
-		if (incident?.kind === EXIT_STUCK_INCIDENT_KIND && incidentString(incident, 'channel')) {
-			return 'channel_exit_stuck';
-		}
-		return '';
-	}
-
-	function isChannelExitStuckIncident(incident: Record<string, unknown> | null): boolean {
-		return exitIncidentSourceKind(incident) === 'channel_exit_stuck';
-	}
-
-	function isClassificationExitStuckIncident(incident: Record<string, unknown> | null): boolean {
-		return exitIncidentSourceKind(incident) === 'classification_exit_release';
-	}
-
 	function isC4StallWatchdogIncident(incident: Record<string, unknown> | null): boolean {
-		return exitIncidentSourceKind(incident) === 'c4_stall_watchdog';
+		return incidentString(incident, 'source_kind') === 'c4_stall_watchdog';
 	}
 
 	function exitIncidentStatusLabel(incident: Record<string, unknown> | null): string {
-		const status = incidentString(incident, 'status', 'waiting_for_operator');
-		if (status === 'approved') return 'Queued';
-		if (status === 'running' || status === 'auto_release_running') return 'Running';
-		if (status === 'manual_test_running') return 'Testing';
-		return 'Waiting';
+		return exitIncidentMotionBusy(incident) ? 'Running' : 'Waiting';
 	}
 
 	function exitIncidentMotionBusy(incident: Record<string, unknown> | null): boolean {
-		const status = incidentString(incident, 'status');
-		return (
-			status === 'running' ||
-			status === 'auto_release_running' ||
-			status === 'approved' ||
-			status === 'manual_test_running'
-		);
-	}
-
-	function exitIncidentCanTestRelease(incident: Record<string, unknown> | null): boolean {
-		return isClassificationExitStuckIncident(incident) || isChannelExitStuckIncident(incident);
+		return incidentString(incident, 'status') === 'auto_release_running';
 	}
 
 	function exitIncidentApiBase(incident: Record<string, unknown>): string {
-		if (isChannelExitStuckIncident(incident)) {
-			return `${currentBackendBaseUrl()}/api/feeder/channel-exit-incident`;
-		}
-		if (incident.kind === 'channel_dropzone_stuck') {
-			return `${currentBackendBaseUrl()}/api/feeder/channel-dropzone-incident`;
-		}
-		if (incident.kind === 'c2_separation_needed') {
-			return `${currentBackendBaseUrl()}/api/feeder/ch2-separation-incident`;
-		}
-		if (incident.kind === 'bulk_feeder_stalled') {
-			return `${currentBackendBaseUrl()}/api/feeder/bulk-feed-incident`;
-		}
-		if (incident.kind === 'feeder_detection_unavailable') {
-			return `${currentBackendBaseUrl()}/api/feeder/detection-incident`;
-		}
 		if (incident.kind === 'feeder_jam') {
 			return `${currentBackendBaseUrl()}/api/feeder/jam-incident`;
 		}
@@ -377,11 +305,6 @@
 		incident: Record<string, unknown>
 	): Record<string, string | number> {
 		if (
-			isChannelExitStuckIncident(incident) ||
-			incident.kind === 'channel_dropzone_stuck' ||
-			incident.kind === 'c2_separation_needed' ||
-			incident.kind === 'bulk_feeder_stalled' ||
-			incident.kind === 'feeder_detection_unavailable' ||
 			incident.kind === 'feeder_jam' ||
 			incident.kind === 'distribution_chute_jam' ||
 			incident.kind === 'distribution_servo_bus_offline' ||
@@ -399,21 +322,6 @@
 	}
 
 	function exitIncidentTitle(incident: Record<string, unknown> | null): string {
-		if (incident?.kind === 'channel_exit_stuck') {
-			return 'Exit Stuck';
-		}
-		if (incident?.kind === 'channel_dropzone_stuck') {
-			return 'Dropzone Stuck';
-		}
-		if (incident?.kind === 'c2_separation_needed') {
-			return 'Slip-Stick Separation';
-		}
-		if (incident?.kind === 'bulk_feeder_stalled') {
-			return 'Bulk Feed Stalled';
-		}
-		if (incident?.kind === 'feeder_detection_unavailable') {
-			return 'Detection Unavailable';
-		}
 		if (incident?.kind === 'distribution_chute_jam') {
 			return 'Chute Jam';
 		}
@@ -446,30 +354,12 @@
 		const channel = incidentString(incident, 'channel');
 		if (role === 'c_channel_2' || channel === 'c2') return 'C2';
 		if (role === 'c_channel_3' || channel === 'c3') return 'C3';
-		if (role === 'bulk_feeder' || channel === 'c1') return 'C1';
-		if (role === 'feeder_detection' || channel === 'feeder') return 'Feeder';
 		if (channel === 'distribution' || role.startsWith('distribution_')) return 'Distribution';
-		if (isClassificationExitStuckIncident(incident) || role === 'carousel' || channel === 'c4')
-			return 'C4';
+		if (role === 'carousel' || channel === 'c4') return 'C4';
 		return '';
 	}
 
 	function exitIncidentDescription(incident: Record<string, unknown> | null): string {
-		if (isChannelExitStuckIncident(incident) || isClassificationExitStuckIncident(incident)) {
-			return 'A piece is not falling off the channel.';
-		}
-		if (incident?.kind === 'channel_dropzone_stuck') {
-			return 'A piece is not moving as expected.';
-		}
-		if (incident?.kind === 'c2_separation_needed') {
-			return 'Pieces are not spreading out as expected.';
-		}
-		if (incident?.kind === 'bulk_feeder_stalled') {
-			return 'No pieces are reaching the next channel.';
-		}
-		if (incident?.kind === 'feeder_detection_unavailable') {
-			return 'Feeder camera detection is not reliable.';
-		}
 		if (incident?.kind === 'feeder_jam') {
 			return incidentString(
 				incident,
@@ -498,10 +388,7 @@
 		if (incident?.kind === 'classification_track_lost') {
 			return 'A tracked piece disappeared before the expected drop flow completed.';
 		}
-		if (isC4StallWatchdogIncident(incident)) {
-			return 'The classification channel stopped making progress with a piece on it. Remove the piece (or clear the jam), then resolve to resume.';
-		}
-		return 'A piece is not falling off the channel.';
+		return 'The classification channel stopped making progress with a piece on it. Remove the piece (or clear the jam), then resolve to resume.';
 	}
 
 	function exitIncidentPrimaryMetricLabel(incident: Record<string, unknown> | null): string {
@@ -513,39 +400,12 @@
 			incident?.kind === 'classification_multi_drop_collision'
 		)
 			return 'Status';
-		if (incident?.kind === 'c2_separation_needed') return 'Tracks';
-		if (incident?.kind === 'bulk_feeder_stalled') return 'Stall';
-		if (incident?.kind === 'feeder_detection_unavailable') return 'Unavailable';
-		if (incident?.kind === 'feeder_jam') return 'Stalled';
 		if (incident?.kind === 'distribution_chute_jam') return 'Elapsed';
 		if (incident?.kind === 'distribution_servo_bus_offline') return 'Offline';
-		if (incident?.kind === 'channel_dropzone_stuck') return 'Motion';
-		if (isC4StallWatchdogIncident(incident)) return 'Stalled';
-		return isChannelExitStuckIncident(incident) ? 'Stall' : 'Offset';
+		return 'Stalled';
 	}
 
 	function exitIncidentPrimaryMetricValue(incident: Record<string, unknown> | null): string {
-		if (incident?.kind === 'c2_separation_needed') {
-			const detections = incidentNumber(incident, 'detection_count');
-			return detections === null ? '-' : detections.toFixed(0);
-		}
-		if (isChannelExitStuckIncident(incident)) {
-			const stall = incidentNumber(incident, 'stall_ms');
-			return stall === null ? '-' : `${stall.toFixed(0)} ms`;
-		}
-		if (incident?.kind === 'channel_dropzone_stuck') {
-			const motion =
-				incidentNumber(incident, 'accumulated_motion_ms') ?? incidentNumber(incident, 'stall_ms');
-			return motion === null ? '-' : `${motion.toFixed(0)} ms`;
-		}
-		if (incident?.kind === 'bulk_feeder_stalled') {
-			const stalled = incidentNumber(incident, 'stalled_ms');
-			return stalled === null ? '-' : `${stalled.toFixed(0)} ms`;
-		}
-		if (incident?.kind === 'feeder_detection_unavailable') {
-			const unavailable = incidentNumber(incident, 'unavailable_ms');
-			return unavailable === null ? '-' : `${unavailable.toFixed(0)} ms`;
-		}
 		if (incident?.kind === 'feeder_jam') {
 			const stalled = incidentNumber(incident, 'no_progress_ms');
 			return stalled === null ? '-' : `${stalled.toFixed(0)} ms`;
@@ -576,11 +436,8 @@
 		) {
 			return incidentString(incident, 'classification_status', '-');
 		}
-		if (isC4StallWatchdogIncident(incident)) {
-			const stalled = incidentNumber(incident, 'stalled_ms');
-			return stalled === null ? '-' : `${(stalled / 1000).toFixed(0)} s`;
-		}
-		return fmtIncidentNumber(incidentNumber(incident, 'center_offset_deg'), ' deg');
+		const stalled = incidentNumber(incident, 'stalled_ms');
+		return stalled === null ? '-' : `${(stalled / 1000).toFixed(0)} s`;
 	}
 
 	function exitIncidentSecondaryMetricLabel(incident: Record<string, unknown> | null): string {
@@ -592,30 +449,16 @@
 			incident?.kind === 'classification_multi_drop_collision'
 		)
 			return 'Reason';
-		if (incident?.kind === 'bulk_feeder_stalled') return 'Pulses';
-		if (incident?.kind === 'feeder_detection_unavailable') return 'Detail';
 		if (
 			incident?.kind === 'distribution_chute_jam' ||
 			incident?.kind === 'distribution_servo_bus_offline'
 		)
 			return 'Detail';
-		if (isC4StallWatchdogIncident(incident)) return 'State';
-		return incident?.kind === 'c2_separation_needed' ? 'Motion' : 'Overlap';
+		if (incident?.kind === 'feeder_jam') return 'Overlap';
+		return 'State';
 	}
 
 	function exitIncidentSecondaryMetricValue(incident: Record<string, unknown> | null): string {
-		if (incident?.kind === 'c2_separation_needed') {
-			return incident.automated_motion_enabled === true ? 'Enabled' : 'Disabled';
-		}
-		if (incident?.kind === 'bulk_feeder_stalled') {
-			const pulses = incidentNumber(incident, 'pulses_since_activity');
-			const minPulses = incidentNumber(incident, 'min_pulses');
-			if (pulses === null) return '-';
-			return minPulses === null ? pulses.toFixed(0) : `${pulses.toFixed(0)} / ${minPulses.toFixed(0)}`;
-		}
-		if (incident?.kind === 'feeder_detection_unavailable') {
-			return incidentString(incident, 'detail', '-');
-		}
 		if (
 			incident?.kind === 'distribution_chute_jam' ||
 			incident?.kind === 'distribution_servo_bus_offline'
@@ -637,121 +480,16 @@
 		) {
 			return incidentString(incident, 'reason', '-');
 		}
-		if (isC4StallWatchdogIncident(incident)) {
-			return incidentString(incident, 'stalled_state', '-');
+		if (incident?.kind === 'feeder_jam') {
+			return `${((incidentNumber(incident, 'overlap_ratio') ?? 0) * 100).toFixed(0)}%`;
 		}
-		return fmtIncidentNumber((incidentNumber(incident, 'overlap_ratio') ?? 0) * 100, '%', 0);
+		return incidentString(incident, 'stalled_state', '-');
 	}
 
-	function exitIncidentStageLabel(incident: Record<string, unknown> | null): string {
-		const stageNumber = incidentNumber(incident, 'stage_number');
-		const stageCount = incidentNumber(incident, 'stage_count');
-		const stageName = incidentString(incident, 'stage_name', 'release');
-		if (stageNumber !== null && stageCount !== null) {
-			return `${stageNumber.toFixed(0)}/${stageCount.toFixed(0)} ${stageName}`;
-		}
-		return stageName;
-	}
-
-	function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
-		const parsed = typeof value === 'number' ? value : Number(value);
-		if (!Number.isFinite(parsed)) return fallback;
-		return Math.min(max, Math.max(min, parsed));
-	}
-
-	function readExitReleaseTuning() {
-		try {
-			const raw = window.localStorage.getItem(EXIT_RELEASE_TUNING_STORAGE_KEY);
-			if (!raw) return null;
-			const parsed = JSON.parse(raw) as Record<string, unknown>;
-			return {
-				outputDeg: clampNumber(
-					parsed.outputDeg ?? parsed.amplitude_output_deg,
-					EXIT_RELEASE_DEFAULTS.outputDeg,
-					0.1,
-					12
-				),
-				speed: clampNumber(
-					parsed.speed ?? parsed.microsteps_per_second,
-					EXIT_RELEASE_DEFAULTS.speed,
-					100,
-					16000
-				),
-				acceleration: Math.round(
-					clampNumber(
-						parsed.acceleration ?? parsed.acceleration_microsteps_per_second_sq,
-						EXIT_RELEASE_DEFAULTS.acceleration,
-						1000,
-						48000
-					)
-				),
-				cycles: Math.round(clampNumber(parsed.cycles, EXIT_RELEASE_DEFAULTS.cycles, 1, 20))
-			};
-		} catch {
-			return null;
-		}
-	}
-
-	function writeExitReleaseTuning() {
-		try {
-			window.localStorage.setItem(
-				EXIT_RELEASE_TUNING_STORAGE_KEY,
-				JSON.stringify({
-					outputDeg: exitReleaseOutputDeg,
-					speed: Math.round(exitReleaseSpeed),
-					acceleration: Math.round(exitReleaseAcceleration),
-					cycles: Math.round(exitReleaseCycles)
-				})
-			);
-		} catch {
-			// Local storage is a convenience only; slider control must keep working.
-		}
-	}
-
-	function setExitReleaseOutputDeg(value: number) {
-		exitReleaseOutputDeg = clampNumber(value, EXIT_RELEASE_DEFAULTS.outputDeg, 0.1, 12);
-		writeExitReleaseTuning();
-	}
-
-	function setExitReleaseSpeed(value: number) {
-		exitReleaseSpeed = Math.round(clampNumber(value, EXIT_RELEASE_DEFAULTS.speed, 100, 16000));
-		writeExitReleaseTuning();
-	}
-
-	function setExitReleaseAcceleration(value: number) {
-		exitReleaseAcceleration = Math.round(
-			clampNumber(value, EXIT_RELEASE_DEFAULTS.acceleration, 1000, 48000)
-		);
-		writeExitReleaseTuning();
-	}
-
-	function setExitReleaseCycles(value: number) {
-		exitReleaseCycles = Math.round(clampNumber(value, EXIT_RELEASE_DEFAULTS.cycles, 1, 20));
-		writeExitReleaseTuning();
-	}
-
-	async function postExitIncidentAction(
-		action: 'continue' | 'acknowledge' | 'clear' | 'auto-resolve'
-	) {
+	async function postExitIncidentAction(action: 'clear' | 'auto-resolve') {
 		const incident = exitIncident;
 		if (!incident || exitIncidentActionPending) return;
 		if (action === 'auto-resolve' && !isC4StallWatchdogIncident(incident)) return;
-		if (
-			incident.kind === 'channel_dropzone_stuck' &&
-			action !== 'acknowledge' &&
-			action !== 'clear'
-		)
-			return;
-		if (
-			(isChannelExitStuckIncident(incident) ||
-				incident.kind === 'c2_separation_needed' ||
-				incident.kind === 'bulk_feeder_stalled' ||
-				incident.kind === 'feeder_detection_unavailable' ||
-				incident.kind === 'distribution_chute_jam' ||
-				incident.kind === 'distribution_servo_bus_offline') &&
-			action !== 'clear'
-		)
-			return;
 		exitIncidentActionPending = true;
 		exitIncidentActionError = null;
 		try {
@@ -767,41 +505,6 @@
 			}
 		} catch (e: any) {
 			exitIncidentActionError = e?.message ?? `Could not ${action} exit incident`;
-		} finally {
-			exitIncidentActionPending = false;
-		}
-	}
-
-	async function postExitIncidentTestRelease() {
-		const incident = exitIncident;
-		if (
-			!incident ||
-			!exitIncidentCanTestRelease(incident) ||
-			exitIncidentActionPending ||
-			exitIncidentMotionBusy(incident)
-		)
-			return;
-		exitIncidentActionPending = true;
-		exitIncidentActionError = null;
-		try {
-			const response = await fetch(`${exitIncidentApiBase(incident)}/test-release`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					...exitIncidentActionBody(incident),
-					amplitude_output_deg: exitReleaseOutputDeg,
-					microsteps_per_second: Math.round(exitReleaseSpeed),
-					acceleration_microsteps_per_second_sq: Math.round(exitReleaseAcceleration),
-					cycles: Math.round(exitReleaseCycles)
-				})
-			});
-			const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-			if (!response.ok || payload?.ok === false) {
-				const detail = payload?.detail;
-				throw new Error(typeof detail === 'string' ? detail : 'Could not run exit release test');
-			}
-		} catch (e: any) {
-			exitIncidentActionError = e?.message ?? 'Could not run exit release test';
 		} finally {
 			exitIncidentActionPending = false;
 		}
@@ -883,13 +586,6 @@
 	}
 
 	onMount(() => {
-		const savedExitReleaseTuning = readExitReleaseTuning();
-		if (savedExitReleaseTuning) {
-			exitReleaseOutputDeg = savedExitReleaseTuning.outputDeg;
-			exitReleaseSpeed = savedExitReleaseTuning.speed;
-			exitReleaseAcceleration = savedExitReleaseTuning.acceleration;
-			exitReleaseCycles = savedExitReleaseTuning.cycles;
-		}
 		if (machine.machine) {
 			const baseUrl = currentBackendBaseUrl();
 			void fetchDashboardCrops(baseUrl);
@@ -1222,132 +918,8 @@
 										{exitIncidentSecondaryMetricValue(exitIncident)}
 									</div>
 								</div>
-								{#if exitIncidentCanTestRelease(exitIncident)}
-									<div class="col-span-2 bg-bg/70 px-2 py-1.5">
-										<div class="text-text-muted">Suggested Release</div>
-										<div class="text-text">{exitIncidentStageLabel(exitIncident)}</div>
-										<div class="mt-0.5 font-mono text-[11px] text-text-muted tabular-nums">
-											{fmtIncidentNumber(
-												incidentNumber(exitIncident, 'amplitude_output_deg'),
-												' deg'
-											)} / {incidentNumber(exitIncident, 'cycles')?.toFixed(0) ?? '-'} cycles / {incidentNumber(
-												exitIncident,
-												'microsteps_per_second'
-											)?.toFixed(0) ?? '-'} usteps/s / {incidentNumber(
-												exitIncident,
-												'acceleration_microsteps_per_second_sq'
-											)?.toFixed(0) ?? '-'} usteps/s2
-										</div>
-									</div>
-								{/if}
 							</div>
-							{#if exitIncidentCanTestRelease(exitIncident)}
-								<div class="mt-3 bg-bg/70 px-3 py-2">
-									<div class="flex items-center justify-between gap-3">
-										<label for="exit-release-deg" class="text-xs font-medium text-text"
-											>Test swing</label
-										>
-										<span class="font-mono text-xs text-text tabular-nums"
-											>{exitReleaseOutputDeg.toFixed(1)} deg</span
-										>
-									</div>
-									<input
-										id="exit-release-deg"
-										type="range"
-										min="0.1"
-										max="12"
-										step="0.1"
-										value={exitReleaseOutputDeg}
-										oninput={(event) =>
-											setExitReleaseOutputDeg(
-												Number((event.currentTarget as HTMLInputElement).value)
-											)}
-										class="mt-2 w-full accent-warning"
-									/>
-									<div class="mt-3 flex items-center justify-between gap-3">
-										<label for="exit-release-speed" class="text-xs font-medium text-text"
-											>Test speed</label
-										>
-										<span class="font-mono text-xs text-text tabular-nums"
-											>{Math.round(exitReleaseSpeed)} usteps/s</span
-										>
-									</div>
-									<input
-										id="exit-release-speed"
-										type="range"
-										min="100"
-										max="16000"
-										step="100"
-										value={exitReleaseSpeed}
-										oninput={(event) =>
-											setExitReleaseSpeed(Number((event.currentTarget as HTMLInputElement).value))}
-										class="mt-2 w-full accent-warning"
-									/>
-									<div class="mt-3 flex items-center justify-between gap-3">
-										<label for="exit-release-acceleration" class="text-xs font-medium text-text"
-											>Acceleration</label
-										>
-										<span class="font-mono text-xs text-text tabular-nums"
-											>{Math.round(exitReleaseAcceleration)} usteps/s2</span
-										>
-									</div>
-									<input
-										id="exit-release-acceleration"
-										type="range"
-										min="1000"
-										max="48000"
-										step="500"
-										value={exitReleaseAcceleration}
-										oninput={(event) =>
-											setExitReleaseAcceleration(
-												Number((event.currentTarget as HTMLInputElement).value)
-											)}
-										class="mt-2 w-full accent-warning"
-									/>
-									<div class="mt-3 flex items-center justify-between gap-3">
-										<label for="exit-release-cycles" class="text-xs font-medium text-text"
-											>Repeats</label
-										>
-										<span class="font-mono text-xs text-text tabular-nums"
-											>{Math.round(exitReleaseCycles)}x</span
-										>
-									</div>
-									<input
-										id="exit-release-cycles"
-										type="range"
-										min="1"
-										max="20"
-										step="1"
-										value={exitReleaseCycles}
-										oninput={(event) =>
-											setExitReleaseCycles(Number((event.currentTarget as HTMLInputElement).value))}
-										class="mt-2 w-full accent-warning"
-									/>
-								</div>
-							{/if}
 							<div class="mt-3 flex flex-wrap gap-2">
-								{#if exitIncidentCanTestRelease(exitIncident)}
-									<button
-										type="button"
-										onclick={postExitIncidentTestRelease}
-										disabled={exitIncidentActionPending || exitIncidentMotionBusy(exitIncident)}
-										class="inline-flex min-h-10 items-center gap-1.5 bg-warning px-3 py-1.5 text-xs font-semibold text-warning-dark transition-transform hover:bg-warning/90 active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
-									>
-										<Play size={13} />
-										Test Wiggle
-									</button>
-								{/if}
-								{#if exitIncident.kind === 'channel_dropzone_stuck'}
-									<button
-										type="button"
-										onclick={() => postExitIncidentAction('acknowledge')}
-										disabled={exitIncidentActionPending}
-										class="inline-flex min-h-10 items-center gap-1.5 bg-warning px-3 py-1.5 text-xs font-semibold text-warning-dark transition-transform hover:bg-warning/90 active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-50"
-									>
-										<Check size={13} />
-										Ignore Until Clear
-									</button>
-								{/if}
 								{#if isC4StallWatchdogIncident(exitIncident)}
 									<button
 										type="button"
