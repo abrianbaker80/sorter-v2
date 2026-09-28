@@ -568,7 +568,7 @@
 	}
 
 	function detectionScopeForChannel(channel: Channel): 'feeder' | 'carousel' {
-		return channel === 'carousel' ? 'carousel' : 'feeder';
+		return channel === 'second' || channel === 'third' ? 'feeder' : 'carousel';
 	}
 
 	function detectionCameraForChannel(channel: Channel): 'c_channel_2' | 'c_channel_3' | 'carousel' {
