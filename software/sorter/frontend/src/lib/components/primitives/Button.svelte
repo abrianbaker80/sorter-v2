@@ -9,6 +9,7 @@
 		variant = 'primary',
 		size = 'md',
 		type = 'button',
+		title,
 		disabled = false,
 		loading = false,
 		class: className = '',
@@ -18,6 +19,7 @@
 		variant?: Variant;
 		size?: Size;
 		type?: 'button' | 'submit' | 'reset';
+		title?: string;
 		disabled?: boolean;
 		loading?: boolean;
 		class?: string;
@@ -48,6 +50,7 @@
 
 <button
 	{type}
+	{title}
 	disabled={isDisabled}
 	{onclick}
 	class="inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 {variantClasses[

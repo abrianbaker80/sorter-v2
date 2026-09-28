@@ -27,9 +27,9 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from blob_manager import BLOB_DIR, getCameraSetup, getChannelPolygons, getClassificationPolygons
+from blob_manager import BLOB_DIR, getChannelPolygons
 from vision.camera_modes import default_capture_mode, list_v4l2_modes, preview_capture_mode
 from vision.channel_alignment import (
     alignmentRotationDeg,
@@ -39,13 +39,10 @@ from vision.channel_alignment import (
 from hardware.macos_camera_registry import refresh_macos_cameras
 from irl.bin_layout import getBinLayout
 from irl.config import (
-    COLOR_CORRECTION_ENABLED,
-    DEFAULT_CAMERA_LAYOUT,
-    cameraColorProfileToDict,
     cameraDeviceSettingsToDict,
-    cameraLayout,
     cameraPictureSettingsToDict,
-    parseCameraColorProfile,
+    cameraSourceForRole,
+    cameraSettingsForRole,
     parseCameraDeviceSettings,
     parseCameraPictureSettings,
 )
@@ -57,9 +54,7 @@ PREVIEW_MAX_WIDTH = int(os.environ.get("SORTER_PREVIEW_MAX_WIDTH", "960"))
 from server import shared_state
 from server.calibration_reference import REFERENCE_TILE_RGB
 from server.camera_calibration import (
-    CalibrationAnalysis,
     analyze_color_plate_target,
-    generate_color_profile_from_analysis,
 )
 from server.camera_discovery import getDiscoveredCameraStreams
 
@@ -71,19 +66,13 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 CAMERA_SETUP_ROLES = {
-    "feeder",
     "c_channel_2",
     "c_channel_3",
     "classification_channel",
     "carousel",
-    "classification_top",
-    "classification_bottom",
 }
 
-_DASHBOARD_CROP_PADDING_FACTOR = 0.14
-_DASHBOARD_CROP_MIN_PADDING_PX = 48.0
 _DASHBOARD_MASK_BACKGROUND_BGR = (230, 230, 230)
-_DASHBOARD_QUAD_PADDING_FACTOR = 0.1
 CALIBRATION_METHOD_TARGET_PLATE = "target_plate"
 CALIBRATION_METHOD_LLM_GUIDED = "llm_guided"
 CALIBRATION_METHOD_EXPOSURE_HISTOGRAM = "exposure_histogram"
@@ -121,46 +110,11 @@ def _get_camera_device_settings_table(config: Dict[str, Any]) -> Dict[str, Any]:
     return device_settings if isinstance(device_settings, dict) else {}
 
 
-def _get_camera_color_profile_table(config: Dict[str, Any]) -> Dict[str, Any]:
-    profiles = config.get("camera_color_profiles", {})
-    return profiles if isinstance(profiles, dict) else {}
-
-
 def _camera_source_for_role(config: Dict[str, Any], role: str) -> int | str | None:
     if role not in CAMERA_SETUP_ROLES:
         raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
 
-    def _normalized_source(value: Any) -> int | str | None:
-        if isinstance(value, int):
-            return value if value >= 0 else None
-        if isinstance(value, str):
-            normalized = value.strip()
-            if not normalized or normalized.lower() in {"none", "null", "-1"}:
-                return None
-            return normalized
-        return None
-
-    cameras = config.get("cameras", {})
-    if isinstance(cameras, dict):
-        source = _normalized_source(cameras.get(role))
-        if source is not None:
-            return source
-        if role == "classification_channel":
-            source = _normalized_source(cameras.get("carousel"))
-            if source is not None:
-                return source
-        if role == "carousel":
-            source = _normalized_source(cameras.get("classification_channel"))
-            if source is not None:
-                return source
-
-    if role in {"feeder", "classification_top", "classification_bottom"}:
-        camera_setup = getCameraSetup()
-        if isinstance(camera_setup, dict):
-            fallback_source = _normalized_source(camera_setup.get(role))
-            if fallback_source is not None:
-                return fallback_source
-    return None
+    return cameraSourceForRole(config.get("cameras"), role)
 
 
 def _android_camera_base_url(source: int | str | None) -> str | None:
@@ -428,14 +382,7 @@ def _picture_settings_for_role(config: Dict[str, Any], role: str) -> Dict[str, A
     if role not in CAMERA_SETUP_ROLES:
         raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
     picture_settings = _get_picture_settings_table(config)
-    return cameraPictureSettingsToDict(parseCameraPictureSettings(picture_settings.get(role)))
-
-
-def _camera_color_profile_for_role(config: Dict[str, Any], role: str) -> Dict[str, Any]:
-    if role not in CAMERA_SETUP_ROLES:
-        raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
-    profiles = _get_camera_color_profile_table(config)
-    return cameraColorProfileToDict(parseCameraColorProfile(profiles.get(role)))
+    return cameraPictureSettingsToDict(parseCameraPictureSettings(cameraSettingsForRole(picture_settings, role)))
 
 
 # ---------------------------------------------------------------------------
@@ -450,16 +397,13 @@ def _capture_frame_for_calibration(
     after_timestamp: float | None = None,
     fallback_settings: Dict[str, int | float | bool] | None = None,
     picture_settings: Dict[str, Any] | None = None,
-    color_profile: Dict[str, Any] | None = None,
 ) -> np.ndarray | None:
     from vision.camera import (
-        apply_camera_color_profile,
         apply_camera_device_settings,
         apply_picture_settings,
     )
 
     parsed_picture_settings = parseCameraPictureSettings(picture_settings)
-    parsed_color_profile = parseCameraColorProfile(color_profile)
 
     if isinstance(source, str):
         best_frame = None
@@ -475,7 +419,6 @@ def _capture_frame_for_calibration(
             if index < 4:
                 time.sleep(0.18)
         if best_frame is not None:
-            best_frame = apply_camera_color_profile(best_frame, parsed_color_profile)
             best_frame = apply_picture_settings(best_frame, parsed_picture_settings)
             return best_frame
         return None
@@ -499,7 +442,6 @@ def _capture_frame_for_calibration(
                 frame = current
         if frame is None:
             return None
-        frame = apply_camera_color_profile(frame, parsed_color_profile)
         frame = apply_picture_settings(frame, parsed_picture_settings)
         return frame.copy()
     finally:
@@ -799,7 +741,6 @@ def _create_camera_calibration_task(
     *,
     method: str = DEFAULT_CAMERA_CALIBRATION_METHOD,
     openrouter_model: str | None = None,
-    apply_color_profile: bool = True,
 ) -> str:
     task_id = uuid4().hex
     task = {
@@ -809,7 +750,6 @@ def _create_camera_calibration_task(
         "source": source,
         "method": method,
         "openrouter_model": openrouter_model,
-        "apply_color_profile": bool(apply_color_profile),
         "status": "queued",
         "stage": "queued",
         "message": "Queued camera calibration.",
@@ -1084,7 +1024,7 @@ def _camera_calibration_allowed_controls(
 # resetting to a neutral baseline before LLM-guided calibration. Everything
 # else (saturation, contrast, sharpness, gamma, hue, white balance, …) is
 # post-processing on the camera ISP and gets reset to the firmware default
-# so the LLM and the downstream CCM see a clean linear-ish signal.
+# so the LLM sees a clean signal.
 _CALIBRATION_PRESERVE_TOKENS = ("exposure", "gain", "iso")
 
 
@@ -1263,13 +1203,10 @@ def _build_llm_calibration_system_prompt(
         "The scene ideally contains a 6-color LEGO calibration plate (white, black, blue, red, green, yellow). "
         "You also have a clean reference image of the intended plate appearance.\n\n"
         "YOUR JOB:\n"
-        "- AFTER your tuning, the system applies a per-camera color correction matrix (CCM) + gamma profile "
-        "derived from the calibration plate. That stage handles fine color accuracy and WB neutrality.\n"
         "- Your PRIMARY focus: deliver a CLEAN, WELL-EXPOSED RAW SIGNAL — exposure (exposure_time / exposure_compensation), "
         "gain / ISO, brightness as fallback.\n"
         "- SECONDARY: if the raw image is clearly unusable (colors indistinguishable, extreme cast, crushed contrast), "
         "you MAY tune saturation, contrast, sharpness, gamma, or white balance — small, conservative nudges.\n"
-        "- Do NOT fuss over small color/WB drift — the CCM cleans that up.\n\n"
         "EXPOSURE PRIORITY:\n"
         "- Aim for white patch ~235–245 (NEVER clip), black patch ~15–30 (don't crush).\n"
         "- If `clipped_white_fraction` > 0.02, lower exposure/gain immediately.\n"
@@ -1571,7 +1508,7 @@ def _calibrate_camera_device_settings_with_llm(
     allowed_controls = _camera_calibration_allowed_controls(provider, current_response)
 
     # Reset color/processing controls to firmware defaults so the LLM and
-    # the downstream CCM start from a clean, neutral signal. Exposure/gain
+    # the hardware tuning starts from a clean, neutral signal. Exposure/gain
     # controls are preserved (real sensor properties — let the LLM tune them).
     baseline_settings, reset_keys = _compute_calibration_neutral_baseline(
         provider, current_response, current_settings
@@ -2044,25 +1981,17 @@ def _build_llm_final_review_prompt(
     *,
     role: str,
     final_settings: Dict[str, Any],
-    profile_present: bool,
     last_loop_summary: str,
 ) -> str:
-    profile_note = (
-        "A per-camera color correction matrix (CCM) and gamma profile derived from the calibration plate "
-        "have just been applied to the image you are reviewing."
-        if profile_present
-        else "No new color profile was generated — the image you are reviewing only reflects the LLM-tuned device settings."
-    )
     summary_note = f"Loop summary so far: {last_loop_summary}\n" if last_loop_summary else ""
     return (
         "You are signing off on a finished camera calibration for a sorting machine.\n\n"
         "WHAT HAPPENED:\n"
         "- The LLM tuning loop finished adjusting exposure / gain / processing controls.\n"
-        f"- {profile_note}\n"
         f"{summary_note}"
         "\nWHAT TO CHECK in the final image (cropped to the working zone):\n"
         "- Exposure: white patch around 235–245, no clipping; black patch around 15–30, not crushed.\n"
-        "- Color separation: red, green, blue, yellow patches are clearly distinct after CCM.\n"
+        "- Color separation: red, green, blue, yellow patches are clearly distinct.\n"
         "- White balance: white patch looks neutral (no obvious blue/yellow/green cast).\n"
         "- Overall: image looks usable for color-based piece sorting.\n\n"
         f"Final device settings:\n{json.dumps(final_settings, indent=2, sort_keys=True)}\n\n"
@@ -2083,12 +2012,11 @@ def _run_llm_final_review(
     openrouter_model: str,
     final_frame: np.ndarray,
     final_settings: Dict[str, Any],
-    profile_present: bool,
     last_loop_summary: str,
     next_iteration_index: int,
     advisor_history_step: int,
 ) -> Dict[str, Any]:
-    """Send the CCM-corrected final frame back to the advisor for sign-off.
+    """Send the final frame back to the advisor for sign-off.
 
     Returns a trace entry dict suitable for appending to ``calibration_metadata["trace"]``.
     Never raises — failures are turned into a status="error" entry so the rest of the
@@ -2109,7 +2037,6 @@ def _run_llm_final_review(
                 "iteration": next_iteration_index,
                 "step": advisor_history_step,
                 "settings": final_settings,
-                "profile_present": profile_present,
             }
             (gallery_dir / f"{prefix}.json").write_text(json.dumps(meta, indent=2, default=str))
             task_id = gallery_dir.name
@@ -2120,13 +2047,11 @@ def _run_llm_final_review(
     prompt = _build_llm_final_review_prompt(
         role=role,
         final_settings=final_settings,
-        profile_present=profile_present,
         last_loop_summary=last_loop_summary,
     )
 
     base_input = {
         "final_settings": dict(final_settings),
-        "profile_present": profile_present,
         "loop_summary": last_loop_summary,
     }
 
@@ -2330,8 +2255,7 @@ def _calibrate_usb_camera_device_settings(
     *,
     report_progress: Callable[[str, float, str, Dict[str, Any] | None], None] | None = None,
     gallery_dir: Path | None = None,
-) -> tuple[Dict[str, int | float | bool], Dict[str, Any], Dict[str, Any] | None]:
-    """Returns (best_settings, analysis_dict, response_curve_data_or_None)."""
+) -> tuple[Dict[str, int | float | bool], Dict[str, Any]]:
     control_by_key = {
         str(control.get("key")): control
         for control in controls
@@ -2405,7 +2329,6 @@ def _calibrate_usb_camera_device_settings(
     # response function, compute optimal exposure from the HDR map.
     # ------------------------------------------------------------------
 
-    response_curve_data: Dict[str, Any] | None = None
 
     if exposure_control is not None:
         exp_min = _as_number(exposure_control.get("min")) or 1.0
@@ -2452,21 +2375,7 @@ def _calibrate_usb_camera_device_settings(
                     hdr = merge_debevec.process(bracket_frames, times_array, response)
                     # hdr shape: (H, W, 3) float32 — radiance map
 
-                    # Build linearization LUT from response curve
-                    # response[z] = ln(E*t), so linear_value = exp(response[z])
-                    response_squeezed = response.squeeze(1)  # (256, 3)
-                    lut_linear = np.exp(response_squeezed).astype(np.float32)  # (256, 3)
-                    # Normalize each channel to [0, 1]
-                    for c in range(3):
-                        ch_max = lut_linear[:, c].max()
-                        if ch_max > 0:
-                            lut_linear[:, c] /= ch_max
-
-                    response_curve_data = {
-                        "lut_r": lut_linear[:, 2].tolist(),  # OpenCV is BGR
-                        "lut_g": lut_linear[:, 1].tolist(),
-                        "lut_b": lut_linear[:, 0].tolist(),
-                    }
+                    response_squeezed = response.squeeze(1)
 
                     # Calculate optimal exposure from HDR map
                     hdr_gray = cv2.cvtColor(hdr, cv2.COLOR_BGR2GRAY)
@@ -2516,7 +2425,6 @@ def _calibrate_usb_camera_device_settings(
                     _report("bracket", f"Debevec failed ({exc}), falling back to binary search.")
                     # Fallback: simple binary search
                     settings["exposure"] = _clamp_control((exp_min + exp_max) / 2.0, exposure_control)
-                    response_curve_data = None
             else:
                 settings["exposure"] = _clamp_control((exp_min + exp_max) / 2.0, exposure_control)
         else:
@@ -2553,8 +2461,6 @@ def _calibrate_usb_camera_device_settings(
 
     # ------------------------------------------------------------------
     # Phase 1: Set WB / saturation / gamma / contrast to neutral
-    # Only exposure + gain matter at the hardware level — everything else
-    # is firmware math that the software CCM can do better with ground truth.
     # ------------------------------------------------------------------
 
     def _control_neutral(ctrl: Dict[str, Any] | None) -> float | None:
@@ -2594,7 +2500,6 @@ def _calibrate_usb_camera_device_settings(
     # ------------------------------------------------------------------
     # Phase 2: Detect the calibration target
     # With good exposure + neutral tone controls, detection should be reliable.
-    # The orchestrator generates the CCM from detected patches afterward.
     # ------------------------------------------------------------------
 
     _report("detection", "Detecting calibration target.")
@@ -2630,7 +2535,7 @@ def _calibrate_usb_camera_device_settings(
         )
 
     _report("detection", "Calibration target detected.", best_analysis)
-    return best_settings, best_analysis, response_curve_data
+    return best_settings, best_analysis
 
 
 # ---------------------------------------------------------------------------
@@ -2809,7 +2714,6 @@ def _run_camera_calibration_sync(
     method: str = DEFAULT_CAMERA_CALIBRATION_METHOD,
     openrouter_model: str | None = None,
     max_iterations: int = DEFAULT_LLM_CALIBRATION_MAX_ITERATIONS,
-    apply_color_profile: bool = True,
     report_progress: Callable[[str, float, str, Dict[str, Any] | None], None] | None = None,
     report_trace: Callable[[List[Dict[str, Any]]], None] | None = None,
     task_id: str | None = None,
@@ -2833,7 +2737,6 @@ def _run_camera_calibration_sync(
 
     _, raw_config = _read_machine_params_config()
     original_picture_settings = _picture_settings_for_role(raw_config, role)
-    original_color_profile = _camera_color_profile_for_role(raw_config, role)
 
     if provider == "android-camera-app":
         original_settings = (
@@ -2847,10 +2750,8 @@ def _run_camera_calibration_sync(
         )
 
     try:
-        response_curve_data: Dict[str, Any] | None = None
         calibration_metadata: Dict[str, Any] = {"method": normalized_method}
 
-        live_color_profile_disabled = False
         if normalized_method == CALIBRATION_METHOD_EXPOSURE_HISTOGRAM:
             controls = current_response.get("controls")
             if not isinstance(controls, list):
@@ -2883,11 +2784,6 @@ def _run_camera_calibration_sync(
         elif normalized_method == CALIBRATION_METHOD_LLM_GUIDED:
             if report_progress is not None:
                 report_progress("preparing", 0.05, "Preparing LLM-guided camera calibration.", None)
-            # Push a disabled color profile to the live capture thread so the
-            # advisor sees the raw, uncorrected sensor signal during the loop.
-            # The persisted config is left untouched — it'll be replaced by the
-            # freshly generated CCM after the loop, or restored on failure.
-            live_color_profile_disabled = _push_live_color_profile(role, {"enabled": False})
             best_settings, analysis, calibration_metadata = _calibrate_camera_device_settings_with_llm(
                 role,
                 str(provider or "unknown"),
@@ -2905,7 +2801,7 @@ def _run_camera_calibration_sync(
                 raise HTTPException(status_code=400, detail="USB camera controls are not available for calibration.")
             if report_progress is not None:
                 report_progress("preparing", 0.05, "Preparing USB camera calibration.", None)
-            best_settings, analysis, response_curve_data = _calibrate_usb_camera_device_settings(
+            best_settings, analysis = _calibrate_usb_camera_device_settings(
                 role,
                 source,
                 controls,
@@ -2937,10 +2833,6 @@ def _run_camera_calibration_sync(
         saved = save_camera_device_settings(role, best_settings)
         time.sleep(1.5 if isinstance(source, str) else 0.2)
 
-        # Histogram mode is exposure-only — we don't look at the 6-colour target
-        # and we don't touch the camera's color profile. Leave whatever CCM the
-        # operator already persisted alone and short-circuit the color-plate
-        # path below.
         if normalized_method == CALIBRATION_METHOD_EXPOSURE_HISTOGRAM:
             return {
                 "ok": True,
@@ -2966,40 +2858,8 @@ def _run_camera_calibration_sync(
         )
         raw_analysis_obj = analyze_color_plate_target(raw_frame) if raw_frame is not None else None
         raw_analysis = raw_analysis_obj.to_dict() if raw_analysis_obj is not None else analysis
-        profile_saved: Dict[str, Any] | None = None
-        if not apply_color_profile:
-            # User opted out of final color correction. Persist a disabled
-            # profile so the live capture pipeline (vision_manager) skips
-            # correction going forward, regardless of what the target analysis
-            # would have suggested.
-            if report_progress is not None:
-                report_progress("profile_generation", 0.95, "Skipping color correction profile per user request.", raw_analysis)
-            profile_saved = _save_camera_color_profile(role, {"enabled": False})
-        elif raw_analysis is not None:
-            if report_progress is not None:
-                report_progress("profile_generation", 0.95, "Generating a color correction profile from the target plate.", raw_analysis)
-            profile_payload = generate_color_profile_from_analysis(raw_analysis, response_curve=response_curve_data)
-            if profile_payload is None and normalized_method == CALIBRATION_METHOD_TARGET_PLATE:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Calibration found the target, but could not generate a color profile from it.",
-                )
-            if profile_payload is not None:
-                profile_saved = _save_camera_color_profile(role, profile_payload)
-        elif normalized_method == CALIBRATION_METHOD_TARGET_PLATE:
-            raise HTTPException(
-                status_code=400,
-                detail="Calibration found device settings, but could not re-analyze the target plate afterwards.",
-            )
-
-        # If we disabled the live color profile for the LLM loop but never
-        # generated a replacement, restore the original profile to the live
-        # capture thread so we don't leave the camera with no correction.
-        if live_color_profile_disabled and profile_saved is None:
-            _push_live_color_profile(role, original_color_profile)
-
         if report_progress is not None:
-            report_progress("verifying", 0.98, "Verifying the calibrated profile on the live feed.", raw_analysis)
+            report_progress("verifying", 0.98, "Verifying the calibrated camera settings.", raw_analysis)
 
         final_frame = raw_frame
         if final_frame is None:
@@ -3009,13 +2869,8 @@ def _run_camera_calibration_sync(
                 fallback_settings=best_settings,
             )
         if final_frame is not None:
-            from vision.camera import apply_camera_color_profile, apply_picture_settings
+            from vision.camera import apply_picture_settings
 
-            if apply_color_profile:
-                final_frame = apply_camera_color_profile(
-                    final_frame,
-                    parseCameraColorProfile(profile_saved.get("profile") if profile_saved is not None else original_color_profile),
-                )
             final_frame = apply_picture_settings(
                 final_frame,
                 parseCameraPictureSettings(original_picture_settings),
@@ -3024,9 +2879,6 @@ def _run_camera_calibration_sync(
         final_analysis = analyze_color_plate_target(final_frame) if final_frame is not None else None
         chosen_analysis = final_analysis.to_dict() if final_analysis is not None else raw_analysis
 
-        # LLM-guided calibration: send the CCM-corrected frame back to the advisor
-        # for a final sign-off so the trace shows whether the finished pipeline is
-        # actually acceptable.
         if (
             normalized_method == CALIBRATION_METHOD_LLM_GUIDED
             and final_frame is not None
@@ -3046,7 +2898,7 @@ def _run_camera_calibration_sync(
                 report_progress(
                     "llm_final_review",
                     0.99,
-                    "Asking the advisor to sign off on the color-corrected result.",
+                    "Asking the advisor to sign off on the camera settings.",
                     chosen_analysis,
                 )
             review_entry = _run_llm_final_review(
@@ -3055,7 +2907,6 @@ def _run_camera_calibration_sync(
                 openrouter_model=normalized_openrouter_model,
                 final_frame=final_frame,
                 final_settings=best_settings,
-                profile_present=profile_saved is not None,
                 last_loop_summary=str(calibration_metadata.get("summary") or ""),
                 next_iteration_index=next_iteration_index,
                 advisor_history_step=advisor_history_step,
@@ -3071,26 +2922,17 @@ def _run_camera_calibration_sync(
             review_obj = calibration_metadata.get("final_review")
             if isinstance(review_obj, dict):
                 review_status = str(review_obj.get("status") or "").strip().lower()
-            if not apply_color_profile:
-                base_msg = "Camera settings were tuned by the LLM advisor. Final color correction was disabled — no color profile is applied."
-            elif profile_saved is not None:
-                base_msg = "Camera settings were tuned by the LLM advisor and a fresh color profile was generated from the target plate."
-            else:
-                base_msg = "Camera settings were tuned by the LLM advisor. The existing color profile was kept because the target plate was not confidently re-analyzed."
+            base_msg = "Camera settings were tuned by the LLM advisor."
             if review_status == "approved":
-                message = f"{base_msg} Advisor signed off on the corrected image."
+                message = f"{base_msg} Advisor signed off on the image."
             elif review_status == "concerns":
                 message = f"{base_msg} Advisor flagged remaining concerns — review the trace."
             else:
                 message = base_msg
         else:
-            if not apply_color_profile:
-                message = "Camera calibrated from the 6-color target plate. Final color correction was disabled per request."
-            else:
-                message = "Camera calibrated from the 6-color target plate, and a color profile was generated."
+            message = "Camera calibrated from the 6-color target plate."
         result = {
             **saved,
-            "color_profile": profile_saved.get("profile") if profile_saved is not None else original_color_profile,
             "analysis": chosen_analysis,
             "gallery_id": gallery_id,
             "message": message,
@@ -3106,11 +2948,9 @@ def _run_camera_calibration_sync(
         return result
     except HTTPException:
         _restore_preview_settings(role, original_settings)
-        _restore_camera_color_profile(role, original_color_profile)
         raise
     except Exception as exc:
         _restore_preview_settings(role, original_settings)
-        _restore_camera_color_profile(role, original_color_profile)
         raise HTTPException(status_code=500, detail=f"Camera calibration failed: {exc}")
 
 
@@ -3121,7 +2961,6 @@ def _run_camera_calibration_task(
     method: str = DEFAULT_CAMERA_CALIBRATION_METHOD,
     openrouter_model: str | None = None,
     max_iterations: int = DEFAULT_LLM_CALIBRATION_MAX_ITERATIONS,
-    apply_color_profile: bool = True,
 ) -> None:
     def report_progress(stage: str, progress: float, message: str, analysis: Dict[str, Any] | None = None) -> None:
         _update_camera_calibration_task(
@@ -3152,7 +2991,6 @@ def _run_camera_calibration_task(
             method=method,
             openrouter_model=openrouter_model,
             max_iterations=max_iterations,
-            apply_color_profile=apply_color_profile,
             report_progress=report_progress,
             report_trace=report_trace,
             task_id=task_id,
@@ -3187,42 +3025,8 @@ def _run_camera_calibration_task(
 
 
 # ---------------------------------------------------------------------------
-# Color profile save / restore helpers
+# Preview settings restore
 # ---------------------------------------------------------------------------
-
-
-def _save_camera_color_profile(
-    role: str,
-    payload: Dict[str, Any] | None,
-) -> Dict[str, Any]:
-    if role not in CAMERA_SETUP_ROLES:
-        raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
-
-    params_path, config = _read_machine_params_config()
-    parsed = parseCameraColorProfile(payload)
-    profile_dict = cameraColorProfileToDict(parsed)
-    profiles = _get_camera_color_profile_table(config)
-    profiles[role] = profile_dict
-    config["camera_color_profiles"] = profiles
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
-
-    applied_live = False
-    if shared_state.vision_manager is not None and hasattr(shared_state.vision_manager, "setColorProfileForRole"):
-        try:
-            applied_live = bool(shared_state.vision_manager.setColorProfileForRole(role, parsed))
-        except Exception:
-            applied_live = False
-
-    return {
-        "ok": True,
-        "role": role,
-        "profile": profile_dict,
-        "applied_live": applied_live,
-    }
 
 
 def _restore_preview_settings(role: str, settings: Dict[str, int | float | bool]) -> None:
@@ -3232,49 +3036,17 @@ def _restore_preview_settings(role: str, settings: Dict[str, int | float | bool]
         pass
 
 
-def _restore_camera_color_profile(role: str, profile: Dict[str, Any]) -> None:
-    try:
-        _save_camera_color_profile(role, profile)
-    except Exception:
-        pass
-
-
-def _push_live_color_profile(role: str, profile: Any) -> bool:
-    """Push a color profile to the running CaptureThread without persisting it.
-
-    Used during LLM-guided calibration so the advisor sees the raw, uncorrected
-    sensor signal — the persisted config is left untouched and either replaced
-    by the freshly generated CCM or restored from the original on failure.
-    """
-    if shared_state.vision_manager is None or not hasattr(
-        shared_state.vision_manager, "setColorProfileForRole"
-    ):
-        return False
-    try:
-        parsed = parseCameraColorProfile(profile)
-        return bool(shared_state.vision_manager.setColorProfileForRole(role, parsed))
-    except Exception:
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
 
 class CameraAssignment(BaseModel):
-    layout: Optional[str] = None
-    feeder: Optional[int | str] = None
+    model_config = ConfigDict(extra="forbid")
     c_channel_2: Optional[int | str] = None
     c_channel_3: Optional[int | str] = None
     classification_channel: Optional[int | str] = None
     carousel: Optional[int | str] = None
-    classification_top: Optional[int | str] = None
-    classification_bottom: Optional[int | str] = None
-
-
-class CameraLayoutPayload(BaseModel):
-    layout: str
 
 
 class CameraPictureSettingsPayload(BaseModel):
@@ -3287,17 +3059,11 @@ class CameraCalibrationStartPayload(BaseModel):
     method: Optional[str] = None
     openrouter_model: Optional[str] = None
     max_iterations: Optional[int] = None
-    apply_color_profile: Optional[bool] = None
 
 
 # ===================================================================
 # Routes
 # ===================================================================
-
-
-# ---------------------------------------------------------------------------
-# Video feed (MJPEG from VisionManager)
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -3320,55 +3086,9 @@ def get_camera_config() -> Dict[str, Any]:
     """Return current camera assignments from TOML."""
     try:
         _, raw = _read_machine_params_config()
-        cameras = raw.get("cameras", {}) if isinstance(raw, dict) else {}
-        if not isinstance(cameras, dict):
-            cameras = {}
-        return {
-            "layout": cameraLayout(cameras),
-            "feeder": _camera_source_for_role(raw, "feeder"),
-            "c_channel_2": _camera_source_for_role(raw, "c_channel_2"),
-            "c_channel_3": _camera_source_for_role(raw, "c_channel_3"),
-            "classification_channel": _camera_source_for_role(raw, "classification_channel"),
-            "carousel": _camera_source_for_role(raw, "carousel"),
-            "classification_top": _camera_source_for_role(raw, "classification_top"),
-            "classification_bottom": _camera_source_for_role(raw, "classification_bottom"),
-        }
+        return {role: _camera_source_for_role(raw, role) for role in CAMERA_SETUP_ROLES}
     except HTTPException:
-        return {
-            "layout": DEFAULT_CAMERA_LAYOUT,
-            "feeder": None,
-            "c_channel_2": None,
-            "c_channel_3": None,
-            "classification_channel": None,
-            "carousel": None,
-            "classification_top": None,
-            "classification_bottom": None,
-        }
-
-
-@router.post("/api/cameras/layout")
-def save_camera_layout(payload: CameraLayoutPayload) -> Dict[str, Any]:
-    if payload.layout not in {"default", "split_feeder"}:
-        raise HTTPException(
-            status_code=400,
-            detail="layout must be 'default' or 'split_feeder'.",
-        )
-
-    params_path, config = _read_machine_params_config()
-    cameras = config.get("cameras", {})
-    if not isinstance(cameras, dict):
-        cameras = {}
-    cameras["layout"] = payload.layout
-    config["cameras"] = cameras
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
-
-    result = get_camera_config()
-    shared_state.publishCamerasConfig(result)
-    return result
+        return dict.fromkeys(CAMERA_SETUP_ROLES)
 
 
 @router.get("/api/cameras/list")
@@ -3513,18 +3233,6 @@ def _dashboard_channel_resolution(
     return fallback
 
 
-def _dashboard_classification_resolution(
-    saved: Dict[str, Any],
-    quad_key: str,
-) -> tuple[float, float]:
-    fallback = _dashboard_polygon_resolution(saved)
-    quad_params = saved.get("quad_params") if isinstance(saved.get("quad_params"), dict) else {}
-    raw_quad = quad_params.get(quad_key)
-    if isinstance(raw_quad, dict):
-        return _dashboard_saved_resolution(raw_quad.get("resolution"), fallback)
-    return fallback
-
-
 def _dashboard_points(raw: Any) -> list[tuple[float, float]]:
     if not isinstance(raw, (list, tuple)):
         return []
@@ -3538,12 +3246,6 @@ def _dashboard_points(raw: Any) -> list[tuple[float, float]]:
             continue
         points.append((float(x), float(y)))
     return points
-
-
-def _dashboard_quad_points(raw: Any) -> list[tuple[float, float]]:
-    if not isinstance(raw, dict):
-        return []
-    return _dashboard_points(raw.get("corners"))
 
 
 def _scale_dashboard_points(
@@ -3610,31 +3312,6 @@ def _dashboard_channel_crop_polygon(
     )
 
 
-def _dashboard_padded_bbox(
-    polygons: list[np.ndarray],
-    frame_w: int,
-    frame_h: int,
-) -> tuple[int, int, int, int] | None:
-    if not polygons:
-        return None
-    merged = np.concatenate(polygons, axis=0)
-    min_x = float(np.min(merged[:, 0]))
-    min_y = float(np.min(merged[:, 1]))
-    max_x = float(np.max(merged[:, 0]))
-    max_y = float(np.max(merged[:, 1]))
-    width = max(1.0, max_x - min_x)
-    height = max(1.0, max_y - min_y)
-    pad_x = max(_DASHBOARD_CROP_MIN_PADDING_PX, width * _DASHBOARD_CROP_PADDING_FACTOR)
-    pad_y = max(_DASHBOARD_CROP_MIN_PADDING_PX, height * _DASHBOARD_CROP_PADDING_FACTOR)
-    x1 = max(0, int(np.floor(min_x - pad_x)))
-    y1 = max(0, int(np.floor(min_y - pad_y)))
-    x2 = min(frame_w, int(np.ceil(max_x + pad_x)))
-    y2 = min(frame_h, int(np.ceil(max_y + pad_y)))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
 def _dashboard_masked_polygons_crop(
     frame: np.ndarray,
     polygons: list[np.ndarray],
@@ -3664,61 +3341,6 @@ def _dashboard_masked_polygons_crop(
     return np.ascontiguousarray(masked)
 
 
-def _dashboard_expand_quad(quad: np.ndarray) -> np.ndarray:
-    # Expand the quad along its *own* local axes (width direction = u, height
-    # direction = v) rather than radially from the centroid. Radial expansion
-    # gives non-uniform padding on the two axes for non-square quads – a tall
-    # quad ends up with far less horizontal padding than vertical, which is
-    # why classification previews appeared clipped on the left/right sides.
-    width_top_vec = quad[1] - quad[0]
-    width_bottom_vec = quad[2] - quad[3]
-    height_right_vec = quad[2] - quad[1]
-    height_left_vec = quad[3] - quad[0]
-
-    avg_width_vec = (width_top_vec + width_bottom_vec) / 2.0
-    avg_height_vec = (height_right_vec + height_left_vec) / 2.0
-    avg_width_len = float(np.linalg.norm(avg_width_vec))
-    avg_height_len = float(np.linalg.norm(avg_height_vec))
-
-    if avg_width_len <= 1e-6 or avg_height_len <= 1e-6:
-        return quad.astype(np.float32)
-
-    padding = max(
-        _DASHBOARD_CROP_MIN_PADDING_PX,
-        max(avg_width_len, avg_height_len) * _DASHBOARD_QUAD_PADDING_FACTOR,
-    )
-
-    u = (avg_width_vec / avg_width_len).astype(np.float32)
-    v = (avg_height_vec / avg_height_len).astype(np.float32)
-
-    # Each corner moves `padding` pixels outward along both local axes.
-    signs = np.array(
-        [
-            [-1.0, -1.0],  # top-left
-            [+1.0, -1.0],  # top-right
-            [+1.0, +1.0],  # bottom-right
-            [-1.0, +1.0],  # bottom-left
-        ],
-        dtype=np.float32,
-    )
-
-    expanded = quad.astype(np.float32).copy()
-    for index in range(4):
-        s_u, s_v = signs[index]
-        expanded[index] = expanded[index] + (s_u * padding) * u + (s_v * padding) * v
-    return expanded
-
-
-def _dashboard_quad_size(quad: np.ndarray) -> tuple[int, int]:
-    width_top = float(np.linalg.norm(quad[1] - quad[0]))
-    width_bottom = float(np.linalg.norm(quad[2] - quad[3]))
-    height_right = float(np.linalg.norm(quad[2] - quad[1]))
-    height_left = float(np.linalg.norm(quad[3] - quad[0]))
-    width = max(1, int(round(max(width_top, width_bottom))))
-    height = max(1, int(round(max(height_right, height_left))))
-    return (width, height)
-
-
 def _dashboard_channel_rotation_deg(role: str, saved: Dict[str, Any] | None) -> float:
     """Rotation (degrees, CCW positive) needed so the drop-zone start of the
     given role sits at 6 o'clock in the rendered dashboard tile. Returns 0
@@ -3727,167 +3349,36 @@ def _dashboard_channel_rotation_deg(role: str, saved: Dict[str, Any] | None) -> 
 
 
 def _dashboard_crop_spec(role: str, frame_w: int, frame_h: int) -> Dict[str, Any] | None:
-    if role in {"feeder", "c_channel_2", "c_channel_3", "carousel", "classification_channel"}:
-        saved = getChannelPolygons() or {}
-        polygons_table = saved.get("polygons") if isinstance(saved.get("polygons"), dict) else {}
-        quad_table = saved.get("quad_params") if isinstance(saved.get("quad_params"), dict) else {}
-        classification_channel_setup = bool(
-            shared_state.vision_manager is not None
-            and hasattr(shared_state.vision_manager, "_usesClassificationChannelSetup")
-            and shared_state.vision_manager._usesClassificationChannelSetup()
-        )
-        carousel_polygon_key = "classification_channel" if classification_channel_setup else "carousel"
-
-        if role == "carousel" and not classification_channel_setup:
-            quad_points = _dashboard_quad_points(quad_table.get("carousel"))
-            if len(quad_points) != 4:
-                quad_points = _dashboard_points(polygons_table.get(carousel_polygon_key))
-            scaled_quad = (
-                _scale_dashboard_points(
-                    quad_points,
-                    _dashboard_channel_resolution(saved, carousel_polygon_key),
-                    frame_w,
-                    frame_h,
-                )
-                if len(quad_points) == 4 else None
-            )
-            if scaled_quad is not None and len(scaled_quad) == 4:
-                expanded_quad = _dashboard_expand_quad(scaled_quad)
-                target_w, target_h = _dashboard_quad_size(expanded_quad)
-                destination = np.array(
-                    [[0, 0], [target_w - 1, 0], [target_w - 1, target_h - 1], [0, target_h - 1]],
-                    dtype=np.float32,
-                )
-                return {
-                    "kind": "rectified",
-                    "matrix": cv2.getPerspectiveTransform(expanded_quad.astype(np.float32), destination),
-                    "size": (target_w, target_h),
-                    "rotation_deg": _dashboard_channel_rotation_deg(role, saved),
-                }
-
-        polygon_keys = {
-            "feeder": ["second_channel", "third_channel", carousel_polygon_key],
-            "c_channel_2": ["second_channel"],
-            "c_channel_3": ["third_channel"],
-            "carousel": [carousel_polygon_key],
-            "classification_channel": ["classification_channel"],
-        }.get(role, [])
-        scaled_polygons = [
-            scaled
-            for key in polygon_keys
-            for scaled in [
-                _dashboard_channel_crop_polygon(saved, key, polygons_table, frame_w, frame_h)
-            ]
-            if scaled is not None
-        ]
-        if not scaled_polygons:
-            return None
-        # The combined "feeder" view shows all channels at once — rotating it
-        # would smear their reference frames against each other, so we keep it
-        # un-rotated and only align single-channel views.
-        single_channel = role in {
-            "c_channel_2", "c_channel_3", "carousel", "classification_channel",
-        }
-        rotation_deg = _dashboard_channel_rotation_deg(role, saved) if single_channel else 0.0
-        return {
-            "kind": "bbox_masked",
-            "polygons": scaled_polygons,
-            "rotation_deg": rotation_deg,
-        }
-
-    if role in {"classification_top", "classification_bottom"}:
-        saved = getClassificationPolygons() or {}
-        polygons_table = saved.get("polygons") if isinstance(saved.get("polygons"), dict) else {}
-        quad_table = saved.get("quad_params") if isinstance(saved.get("quad_params"), dict) else {}
-        quad_key = "class_top" if role == "classification_top" else "class_bottom"
-        polygon_key = "top" if role == "classification_top" else "bottom"
-        quad_points = _dashboard_quad_points(quad_table.get(quad_key))
-        if len(quad_points) != 4:
-            quad_points = _dashboard_points(polygons_table.get(polygon_key))
-        scaled_quad = (
-            _scale_dashboard_points(
-                quad_points,
-                _dashboard_classification_resolution(saved, quad_key),
-                frame_w,
-                frame_h,
-            )
-            if len(quad_points) == 4 else None
-        )
-        if scaled_quad is not None and len(scaled_quad) == 4:
-            expanded_quad = _dashboard_expand_quad(scaled_quad)
-            target_w, target_h = _dashboard_quad_size(expanded_quad)
-            destination = np.array(
-                [[0, 0], [target_w - 1, 0], [target_w - 1, target_h - 1], [0, target_h - 1]],
-                dtype=np.float32,
-            )
-            return {
-                "kind": "rectified",
-                "matrix": cv2.getPerspectiveTransform(expanded_quad.astype(np.float32), destination),
-                "size": (target_w, target_h),
-                "square": True,
-            }
-
-        scaled_polygon = _scale_dashboard_points(
-            _dashboard_points(polygons_table.get(polygon_key)),
-            _dashboard_classification_resolution(saved, quad_key),
-            frame_w,
-            frame_h,
-        )
-        bbox = _dashboard_padded_bbox([scaled_polygon], frame_w, frame_h) if scaled_polygon is not None else None
-        return {"kind": "bbox", "bbox": bbox, "square": True} if bbox is not None else None
-
-    return None
-
-
-def _dashboard_pad_square(frame: np.ndarray) -> np.ndarray:
-    height, width = frame.shape[:2]
-    if height <= 0 or width <= 0 or height == width:
-        return frame
-    target = max(height, width)
-    pad_y = target - height
-    pad_x = target - width
-    top = pad_y // 2
-    bottom = pad_y - top
-    left = pad_x // 2
-    right = pad_x - left
-    return cv2.copyMakeBorder(frame, top, bottom, left, right, cv2.BORDER_REPLICATE)
+    polygon_key = {
+        "c_channel_2": "second_channel",
+        "c_channel_3": "third_channel",
+        "carousel": "classification_channel",
+        "classification_channel": "classification_channel",
+    }.get(role)
+    if polygon_key is None:
+        return None
+    saved = getChannelPolygons() or {}
+    polygons_table = saved.get("polygons") if isinstance(saved.get("polygons"), dict) else {}
+    scaled_polygon = _dashboard_channel_crop_polygon(saved, polygon_key, polygons_table, frame_w, frame_h)
+    if scaled_polygon is None:
+        return None
+    return {
+        "kind": "bbox_masked",
+        "polygons": [scaled_polygon],
+        "rotation_deg": _dashboard_channel_rotation_deg(role, saved),
+    }
 
 
 def _apply_dashboard_crop(frame: np.ndarray, spec: Dict[str, Any] | None) -> np.ndarray:
     if not spec:
         return frame
 
-    processed = frame
-    if spec.get("kind") == "rectified":
-        size = spec.get("size")
-        matrix = spec.get("matrix")
-        if not isinstance(size, tuple) or matrix is None:
-            return frame
-        processed = cv2.warpPerspective(
-            frame,
-            matrix,
-            size,
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REPLICATE,
-        )
-    elif spec.get("kind") == "bbox_masked":
-        polygons = spec.get("polygons")
-        if not isinstance(polygons, list):
-            return frame
-        processed = _dashboard_masked_polygons_crop(frame, polygons)
-        if processed is None:
-            return frame
-    else:
-        bbox = spec.get("bbox")
-        if not isinstance(bbox, tuple) or len(bbox) != 4:
-            return frame
-        x1, y1, x2, y2 = [int(value) for value in bbox]
-        if x2 <= x1 or y2 <= y1:
-            return frame
-        processed = frame[y1:y2, x1:x2]
-
-    if spec.get("square"):
-        processed = _dashboard_pad_square(processed)
+    polygons = spec.get("polygons")
+    if not isinstance(polygons, list):
+        return frame
+    processed = _dashboard_masked_polygons_crop(frame, polygons)
+    if processed is None:
+        return frame
 
     rotation_deg = float(spec.get("rotation_deg") or 0.0)
     if abs(rotation_deg) >= 1e-2:
@@ -3902,53 +3393,28 @@ def camera_feed_by_role(
     layer: str = "annotated",
     direct: bool = False,
     dashboard: bool = False,
-    color_correct: bool = True,
     show_regions: bool = True,
 ):
     """MJPEG stream for a camera role.
 
     ``layer`` controls annotation: ``"annotated"`` (default) or ``"raw"``.
     The legacy ``annotated`` bool param is supported for backward compat.
-    ``color_correct=false`` bypasses the color profile; falls back to the
-    direct capture path since the live service bakes the profile into frames.
-    ``show_regions=false`` keeps detections but hides zone polygons/labels.
     """
     from vision.camera import (
-        apply_camera_color_profile,
         apply_camera_device_settings,
         apply_picture_settings,
     )
     from vision.outputs.mjpeg import MjpegOutput
-    from perception.service import is_perception_role
 
     # Resolve layer — legacy `annotated` param maps into `layer`
     want_annotated = layer == "annotated" and annotated
-    exclude_categories = frozenset({"regions"}) if not show_regions else None
     _, raw = _read_machine_params_config(require_exists=True)
-    cameras_section = raw.get("cameras", {}) if isinstance(raw.get("cameras"), dict) else {}
-    config_role = role
-    if (
-        role == "carousel"
-        and cameras_section.get("carousel") is None
-        and cameras_section.get("classification_channel") is not None
-    ):
-        config_role = "classification_channel"
-    elif (
-        role == "classification_channel"
-        and cameras_section.get("classification_channel") is None
-        and cameras_section.get("carousel") is not None
-    ):
-        config_role = "carousel"
-
-    picture_settings = parseCameraPictureSettings(_get_picture_settings_table(raw).get(config_role))
-    color_profile = parseCameraColorProfile(_get_camera_color_profile_table(raw).get(config_role))
+    picture_settings = parseCameraPictureSettings(cameraSettingsForRole(_get_picture_settings_table(raw), role))
     saved_device_settings = parseCameraDeviceSettings(
-        _get_camera_device_settings_table(raw).get(config_role)
+        cameraSettingsForRole(_get_camera_device_settings_table(raw), role)
     )
-    preview_device_settings = (
-        shared_state.camera_device_preview_overrides.get(role)
-        or shared_state.camera_device_preview_overrides.get(config_role)
-    )
+    settings_role = "classification_channel" if role == "carousel" else role
+    preview_device_settings = shared_state.camera_device_preview_overrides.get(settings_role)
     device_settings = cameraDeviceSettingsToDict(
         preview_device_settings if preview_device_settings is not None else saved_device_settings
     )
@@ -3972,17 +3438,7 @@ def camera_feed_by_role(
             cached_dashboard_shape = shape
         return _apply_dashboard_crop(frame, cached_dashboard_spec)
 
-    # ---- Stack decision: made ONCE, statically, no crossing ------------------
-    # A camera role is on exactly one stack:
-    #   * PERCEPTION stack   -> generate_perception_stack (below)
-    #   * VISIONMANAGER/live -> generate_live
-    # ``is_perception_role`` is a STATIC registry fact — it does NOT depend on
-    # the perception service being built yet. So a perception role is routed to
-    # the perception generator even on a fresh boot before perception is ready;
-    # the generator shows raw video until perception comes up and then upgrades
-    # to its overlay in-place. A perception role can NEVER land on the
-    # VisionManager overlay (the old stack), at boot or any other time.
-    if not direct and is_perception_role(role):
+    if not direct:
         prof = shared_state.gc_ref.profiler if shared_state.gc_ref is not None else None
 
         def generate_perception_stack():
@@ -4014,7 +3470,7 @@ def camera_feed_by_role(
                         else None
                     )
                     frame_obj = (
-                        feed.get_frame(annotated=False, color_correct=color_correct)
+                        feed.get_frame(annotated=False)
                         if feed is not None
                         else None
                     )
@@ -4053,88 +3509,6 @@ def camera_feed_by_role(
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
-    # Live / VisionManager stack — NON-perception roles only.
-    if not direct and shared_state.camera_service is not None:
-        feed = shared_state.camera_service.get_feed(role)
-        if feed is not None:
-            vm_annotated = want_annotated
-            prof = shared_state.gc_ref.profiler if shared_state.gc_ref is not None else None
-
-            def generate_live():
-                last_frame_ts: float | None = None
-                while True:
-                    fetch_started = time.perf_counter()
-                    frame_obj = feed.get_frame(
-                        annotated=vm_annotated,
-                        exclude_categories=exclude_categories,
-                        color_correct=color_correct,
-                    )
-                    shared_state.gc_ref.runtime_stats.observePerfMs(
-                        f"preview.{role}.get_frame_ms",
-                        (time.perf_counter() - fetch_started) * 1000.0,
-                    )
-                    if frame_obj is None:
-                        time.sleep(0.05)
-                        continue
-                    if last_frame_ts == frame_obj.timestamp:
-                        time.sleep(0.01)
-                        continue
-                    last_frame_ts = frame_obj.timestamp
-                    frame = (
-                        frame_obj.annotated
-                        if vm_annotated and frame_obj.annotated is not None
-                        else frame_obj.raw
-                    )
-                    shared_state.gc_ref.runtime_stats.observePerfMs(
-                        f"preview.{role}.frame_age_ms",
-                        max(0.0, (time.time() - float(frame_obj.timestamp)) * 1000.0),
-                    )
-                    process_started = time.perf_counter()
-                    # Downscale FIRST. The dashboard crop is a warpPerspective
-                    # (or polygon mask) on the input frame — on a 4K camera that
-                    # cost ~400 ms/frame, capping the stream at ~2 fps. Doing
-                    # the cheap cv2.resize first means the expensive crop runs
-                    # on a ~960-px frame. _dashboard_frame's spec cache keys on
-                    # the input shape and recomputes from the (smaller) WxH —
-                    # _dashboard_crop_spec already takes (role, frame_w,
-                    # frame_h), so it produces a correctly-scaled spec for the
-                    # downscaled frame automatically.
-                    if PREVIEW_MAX_WIDTH > 0 and frame.shape[1] > PREVIEW_MAX_WIDTH:
-                        scale = PREVIEW_MAX_WIDTH / float(frame.shape[1])
-                        frame = cv2.resize(
-                            frame,
-                            (PREVIEW_MAX_WIDTH, int(round(frame.shape[0] * scale))),
-                            interpolation=cv2.INTER_AREA,
-                        )
-                    frame = _dashboard_frame(frame)
-                    shared_state.gc_ref.runtime_stats.observePerfMs(
-                        f"preview.{role}.process_ms",
-                        (time.perf_counter() - process_started) * 1000.0,
-                    )
-                    if prof is not None:
-                        prof.hit(f"encode.{role}.frames")
-                        prof.mark(f"encode.{role}.interval_ms")
-                        with prof.timer(f"encode.{role}.encode_ms"):
-                            encode_started = time.perf_counter()
-                            chunk = encoder.encode_chunk(frame, quality=55)
-                            shared_state.gc_ref.runtime_stats.observePerfMs(
-                                f"preview.{role}.encode_ms",
-                                (time.perf_counter() - encode_started) * 1000.0,
-                            )
-                    else:
-                        encode_started = time.perf_counter()
-                        chunk = encoder.encode_chunk(frame, quality=55)
-                        shared_state.gc_ref.runtime_stats.observePerfMs(
-                            f"preview.{role}.encode_ms",
-                            (time.perf_counter() - encode_started) * 1000.0,
-                        )
-                    yield chunk
-
-            return StreamingResponse(
-                generate_live(),
-                media_type="multipart/x-mixed-replace; boundary=frame",
-            )
-
     def generate_direct():
         cap = _open_camera_source(source)
         if not cap.isOpened():
@@ -4146,8 +3520,6 @@ def camera_feed_by_role(
                 ret, frame = cap.read()
                 if not ret:
                     break
-                if color_correct:
-                    frame = apply_camera_color_profile(frame, color_profile)
                 frame = apply_picture_settings(frame, picture_settings)
                 frame = _dashboard_frame(frame)
                 yield encoder.encode_chunk(frame, quality=70)
@@ -4169,25 +3541,19 @@ def assign_cameras(assignment: CameraAssignment) -> Dict[str, Any]:
     cameras = config.get("cameras", {})
     if not isinstance(cameras, dict):
         cameras = {}
+    cameras = {role: value for role, value in cameras.items() if role in CAMERA_SETUP_ROLES}
     updates = assignment.model_dump(exclude_unset=True)
-    layout = updates.pop("layout", None)
-    if layout is not None:
-        if layout not in {"default", "split_feeder"}:
-            raise HTTPException(
-                status_code=400,
-                detail="layout must be 'default' or 'split_feeder'.",
-            )
-        cameras["layout"] = layout
-    elif "layout" not in cameras:
-        if "feeder" in updates:
-            cameras["layout"] = "default"
-        elif any(role in updates for role in ("c_channel_2", "c_channel_3", "carousel", "classification_channel")):
-            cameras["layout"] = "split_feeder"
     # A capture mode saved for a role belonged to the camera it had; a new
     # camera starts from its own default mode.
     capture_modes = config.get("camera_capture_modes")
     for key, value in updates.items():
-        if isinstance(capture_modes, dict) and cameras.get(key) != value:
+        previous_source = cameraSourceForRole(cameras, key)
+        if key in {"classification_channel", "carousel"}:
+            alias = "carousel" if key == "classification_channel" else "classification_channel"
+            cameras.pop(alias, None)
+            if isinstance(capture_modes, dict) and previous_source != value:
+                capture_modes.pop(alias, None)
+        if isinstance(capture_modes, dict) and previous_source != value:
             capture_modes.pop(key, None)
         if value is None:
             cameras.pop(key, None)
@@ -4208,16 +3574,7 @@ def assign_cameras(assignment: CameraAssignment) -> Dict[str, Any]:
             except Exception:
                 applied_live[key] = False
 
-    assignment = {
-        "layout": cameraLayout(cameras),
-        "feeder": cameras.get("feeder"),
-        "c_channel_2": cameras.get("c_channel_2"),
-        "c_channel_3": cameras.get("c_channel_3"),
-        "classification_channel": cameras.get("classification_channel"),
-        "carousel": cameras.get("carousel"),
-        "classification_top": cameras.get("classification_top"),
-        "classification_bottom": cameras.get("classification_bottom"),
-    }
+    assignment = {role: _camera_source_for_role(config, role) for role in CAMERA_SETUP_ROLES}
     shared_state.publishCamerasConfig(assignment)
 
     # Perception (rev04 mode pair) binds each channel to a camera role's
@@ -4270,7 +3627,8 @@ def save_camera_picture_settings(
     params_path, config = _read_machine_params_config()
     picture_settings = _get_picture_settings_table(config)
     parsed = parseCameraPictureSettings(payload.model_dump())
-    picture_settings[role] = cameraPictureSettingsToDict(parsed)
+    settings_role = "classification_channel" if role == "carousel" else role
+    picture_settings[settings_role] = cameraPictureSettingsToDict(parsed)
     config["camera_picture_settings"] = picture_settings
 
     try:
@@ -4291,61 +3649,6 @@ def save_camera_picture_settings(
         "settings": cameraPictureSettingsToDict(parsed),
         "applied_live": applied_live,
         "message": "Feed orientation saved.",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Color profile (CCM)
-# ---------------------------------------------------------------------------
-
-
-@router.get("/api/cameras/color-profile/{role}")
-def get_camera_color_profile(role: str) -> Dict[str, Any]:
-    """Return persisted color correction profile (CCM) for a camera role."""
-    if role not in CAMERA_SETUP_ROLES:
-        raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
-    _, config = _read_machine_params_config()
-    profile = _camera_color_profile_for_role(config, role)
-    return {
-        "ok": True,
-        "role": role,
-        "profile": profile,
-        # Saved profiles are still returned when the kill switch is off so the
-        # UI can show what was calibrated while making clear nothing applies.
-        "globally_enabled": COLOR_CORRECTION_ENABLED,
-    }
-
-
-@router.delete("/api/cameras/color-profile/{role}")
-def delete_camera_color_profile(role: str) -> Dict[str, Any]:
-    """Remove persisted color correction profile for a camera role and disable live correction."""
-    if role not in CAMERA_SETUP_ROLES:
-        raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
-    saved = _save_camera_color_profile(role, {"enabled": False})
-    return {
-        "ok": True,
-        "role": role,
-        "profile": saved.get("profile"),
-        "applied_live": saved.get("applied_live", False),
-        "message": "Color correction removed.",
-    }
-
-
-@router.patch("/api/cameras/color-profile/{role}/enabled")
-def patch_camera_color_profile_enabled(role: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Toggle enabled flag on the stored color profile without losing calibration data."""
-    if role not in CAMERA_SETUP_ROLES:
-        raise HTTPException(status_code=404, detail=f"Unknown camera role '{role}'")
-    enabled = bool(body.get("enabled", False))
-    _, config = _read_machine_params_config()
-    existing = _camera_color_profile_for_role(config, role)
-    merged = {**existing, "enabled": enabled}
-    saved = _save_camera_color_profile(role, merged)
-    return {
-        "ok": True,
-        "role": role,
-        "profile": saved.get("profile"),
-        "applied_live": saved.get("applied_live", False),
     }
 
 
@@ -4447,7 +3750,7 @@ def get_camera_device_settings(role: str) -> Dict[str, Any]:
         }
 
     saved_settings = cameraDeviceSettingsToDict(
-        parseCameraDeviceSettings(_get_camera_device_settings_table(config).get(role))
+        parseCameraDeviceSettings(cameraSettingsForRole(_get_camera_device_settings_table(config), role))
     )
     controls, live_settings = _camera_service_usb_device_controls(role, source, saved_settings)
     current_settings = live_settings or saved_settings
@@ -4496,9 +3799,10 @@ def preview_camera_device_settings(role: str, payload: Dict[str, Any]) -> Dict[s
         }
 
     parsed = cameraDeviceSettingsToDict(parseCameraDeviceSettings(payload))
-    shared_state.camera_device_preview_overrides[role] = dict(parsed)
+    settings_role = "classification_channel" if role == "carousel" else role
+    shared_state.camera_device_preview_overrides[settings_role] = dict(parsed)
     applied_settings, applied_live = _apply_live_usb_device_settings(role, parsed, persist=False)
-    shared_state.camera_device_preview_overrides[role] = dict(applied_settings)
+    shared_state.camera_device_preview_overrides[settings_role] = dict(applied_settings)
 
     return {
         "ok": True,
@@ -4537,10 +3841,13 @@ def save_camera_device_settings(role: str, payload: Dict[str, Any]) -> Dict[str,
 
     parsed = cameraDeviceSettingsToDict(parseCameraDeviceSettings(payload))
     device_settings = _get_camera_device_settings_table(config)
+    settings_role = "classification_channel" if role == "carousel" else role
+    if settings_role == "classification_channel":
+        device_settings.pop("carousel", None)
     if parsed:
-        device_settings[role] = dict(parsed)
+        device_settings[settings_role] = dict(parsed)
     else:
-        device_settings.pop(role, None)
+        device_settings.pop(settings_role, None)
     config["camera_device_settings"] = device_settings
 
     try:
@@ -4548,9 +3855,9 @@ def save_camera_device_settings(role: str, payload: Dict[str, Any]) -> Dict[str,
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
 
-    shared_state.camera_device_preview_overrides[role] = dict(parsed)
+    shared_state.camera_device_preview_overrides[settings_role] = dict(parsed)
     applied_settings, applied_live = _apply_live_usb_device_settings(role, parsed, persist=True)
-    shared_state.camera_device_preview_overrides[role] = dict(applied_settings)
+    shared_state.camera_device_preview_overrides[settings_role] = dict(applied_settings)
 
     return {
         "ok": True,
@@ -4605,6 +3912,9 @@ def reset_camera_device_settings_to_defaults(role: str) -> Dict[str, Any]:
 
     device_settings = _get_camera_device_settings_table(config)
     device_settings.pop(role, None)
+    if role in {"classification_channel", "carousel"}:
+        device_settings.pop("classification_channel", None)
+        device_settings.pop("carousel", None)
     config["camera_device_settings"] = device_settings
 
     try:
@@ -4612,7 +3922,8 @@ def reset_camera_device_settings_to_defaults(role: str) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
 
-    shared_state.camera_device_preview_overrides.pop(role, None)
+    settings_role = "classification_channel" if role == "carousel" else role
+    shared_state.camera_device_preview_overrides.pop(settings_role, None)
     applied_settings, applied_live = _apply_live_usb_device_settings(role, auto_settings, persist=False)
     svc = shared_state.camera_service
     if svc is not None and hasattr(svc, "clear_persisted_device_settings_for_role"):
@@ -4694,7 +4005,7 @@ def get_camera_device_settings_diff(role: str) -> Dict[str, Any]:
         }
 
     saved_settings = cameraDeviceSettingsToDict(
-        parseCameraDeviceSettings(_get_camera_device_settings_table(config).get(role))
+        parseCameraDeviceSettings(cameraSettingsForRole(_get_camera_device_settings_table(config), role))
     )
 
     controls: List[Dict[str, Any]] = []
@@ -4870,7 +4181,7 @@ def get_camera_capture_modes(role: str) -> Dict[str, Any]:
         current = svc.get_capture_mode_for_role(role)
     if current is None:
         saved_section = config.get("camera_capture_modes", {}) if isinstance(config.get("camera_capture_modes"), dict) else {}
-        saved_entry = saved_section.get(role) if isinstance(saved_section, dict) else None
+        saved_entry = cameraSettingsForRole(saved_section, role)
         if isinstance(saved_entry, dict):
             current = {
                 "width": int(saved_entry.get("width", 0)) or None,
@@ -4944,7 +4255,8 @@ def save_camera_capture_mode(role: str, payload: CaptureModePayload) -> Dict[str
     capture_modes = config.get("camera_capture_modes", {})
     if not isinstance(capture_modes, dict):
         capture_modes = {}
-    capture_modes[role] = entry
+    settings_role = "classification_channel" if role == "carousel" else role
+    capture_modes[settings_role] = entry
     config["camera_capture_modes"] = capture_modes
 
     try:
@@ -4989,9 +4301,6 @@ def start_camera_device_settings_calibration_from_target(
     method = _normalize_camera_calibration_method(payload.method if payload is not None else None)
     openrouter_model = _normalize_llm_calibration_model(payload.openrouter_model if payload is not None else None)
     max_iterations = _normalize_llm_calibration_iterations(payload.max_iterations if payload is not None else None)
-    apply_color_profile = True
-    if payload is not None and payload.apply_color_profile is not None:
-        apply_color_profile = bool(payload.apply_color_profile)
     if source is None:
         raise HTTPException(status_code=404, detail="No camera is assigned to this role.")
     if not bool(current_response.get("supported")):
@@ -5005,7 +4314,6 @@ def start_camera_device_settings_calibration_from_target(
         source,
         method=method,
         openrouter_model=openrouter_model if method == CALIBRATION_METHOD_LLM_GUIDED else None,
-        apply_color_profile=apply_color_profile,
     )
     thread = threading.Thread(
         target=_run_camera_calibration_task,
@@ -5014,7 +4322,6 @@ def start_camera_device_settings_calibration_from_target(
             "method": method,
             "openrouter_model": openrouter_model if method == CALIBRATION_METHOD_LLM_GUIDED else None,
             "max_iterations": max_iterations,
-            "apply_color_profile": apply_color_profile,
         },
         daemon=True,
     )

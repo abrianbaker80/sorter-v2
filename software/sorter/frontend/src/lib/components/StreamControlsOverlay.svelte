@@ -1,26 +1,22 @@
 <script lang="ts">
-	import { Crop, Expand, Palette, SendToBack, Shapes } from 'lucide-svelte';
+	import { Crop, Expand, SendToBack, Shapes } from 'lucide-svelte';
 
 	let {
 		annotated = $bindable(true),
-		colorCorrect = $bindable(true),
 		cropped = $bindable(false),
 		zones = $bindable(true),
 		fullscreen = $bindable(false),
 		showAnnotations = true,
-		showColor = false,
 		showCrop = false,
 		showZones = false,
 		showFullscreen = false,
 		disabled = false
 	}: {
 		annotated?: boolean;
-		colorCorrect?: boolean;
 		cropped?: boolean;
 		zones?: boolean;
 		fullscreen?: boolean;
 		showAnnotations?: boolean;
-		showColor?: boolean;
 		showCrop?: boolean;
 		showZones?: boolean;
 		showFullscreen?: boolean;
@@ -28,7 +24,7 @@
 	} = $props();
 
 	const hasAny = $derived(
-		showAnnotations || showColor || showCrop || showZones || showFullscreen
+		showAnnotations || showCrop || showZones || showFullscreen
 	);
 </script>
 
@@ -78,15 +74,6 @@
 				zones,
 				zones ? 'Hide zones' : 'Show zones',
 				() => (zones = !zones)
-			)}
-		{/if}
-
-		{#if showColor}
-			{@render togglePill(
-				Palette,
-				colorCorrect,
-				colorCorrect ? 'Disable color correction' : 'Enable color correction',
-				() => (colorCorrect = !colorCorrect)
 			)}
 		{/if}
 

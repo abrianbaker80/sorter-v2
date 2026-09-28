@@ -3,12 +3,13 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import tomllib
 
-from irl.config import mkCameraConfig
+from irl.config import IRLConfig, mkCameraConfig
 from server.routers import cameras
 from vision import camera_service
 from vision.camera_modes import default_capture_mode
@@ -55,6 +56,22 @@ class CameraServiceDefaultTests(unittest.TestCase):
         with patch.object(camera_service, "list_v4l2_modes", return_value=FOUR_K_CAMERA):
             self.assertFalse(camera_service._apply_default_capture_mode(config))
         self.assertEqual((1920, 1080, 60), (config.width, config.height, config.fps))
+
+    def test_classification_channel_aliases_share_one_camera_device(self) -> None:
+        for role in ("carousel", "classification_channel"):
+            with self.subTest(role=role), patch.object(camera_service, "list_v4l2_modes", return_value=[]):
+                config = IRLConfig()
+                config.c_channel_2_camera = mkCameraConfig(device_index=0)
+                config.c_channel_3_camera = mkCameraConfig(device_index=1)
+                service = camera_service.CameraService(config, SimpleNamespace())
+                self.assertTrue(service.set_camera_source_for_role(role, 2))
+                self.assertIs(service.get_device("carousel"), service.get_device("classification_channel"))
+                self.assertEqual(3, len(service._unique_devices()))
+                self.assertIsNone(service.get_feed("feeder"))
+                self.assertIsNone(service.get_feed("classification_top"))
+                self.assertIsNone(service.get_feed("classification_bottom"))
+                self.assertFalse(service.set_camera_source_for_role("feeder", 3))
+
 
 
 class CaptureModeRouterTests(unittest.TestCase):

@@ -100,11 +100,6 @@ class PulsePerceptionFeeding(BaseState):
         # Per-channel monotonic timestamp of the last frame that reported a piece
         # in the drop zone. Drives the C2/C3 drop-zone occupancy latch.
         self._drop_seen_at: dict[int, float] = {}
-        machine_setup = getattr(irl_config, "machine_setup", None)
-        self._classification_setup = bool(
-            machine_setup is not None
-            and getattr(machine_setup, "uses_classification_channel", False)
-        )
 
     def _cfg(self) -> PulsePerceptionConfig:
         now = time.monotonic()
@@ -178,7 +173,7 @@ class PulsePerceptionFeeding(BaseState):
         )
 
     def _classification_ready(self, cfg: PulsePerceptionConfig) -> bool:
-        if not cfg.gate_ch3_on_classification_ready or not self._classification_setup:
+        if not cfg.gate_ch3_on_classification_ready:
             return True
         if time.monotonic() < self._classification_pending_until:
             return False

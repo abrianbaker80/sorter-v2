@@ -107,7 +107,7 @@ def _read_polygons_json() -> dict[str, Any]:
 
 
 def getClassificationChannelRev01Config() -> dict[str, Any]:
-    from subsystems.classification_channel.simple_state_machine_rev01.rev01_config import (
+    from subsystems.classification_channel.two_piece.rev01_config import (
         Rev01Config, configToDict,
     )
     config = _read_toml()
@@ -120,7 +120,7 @@ def getClassificationChannelRev01Config() -> dict[str, Any]:
 
 
 def setClassificationChannelRev01Config(updates: dict[str, Any]) -> dict[str, Any]:
-    from subsystems.classification_channel.simple_state_machine_rev01.rev01_config import (
+    from subsystems.classification_channel.two_piece.rev01_config import (
         Rev01Config, configToDict, configFromDict,
     )
     defaults = configToDict(Rev01Config())
@@ -167,35 +167,6 @@ def setProfilerConfig(updates: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Feeder go-to-angle tuning config
 # ---------------------------------------------------------------------------
-
-
-def getGoToAngleConfig() -> dict[str, Any]:
-    from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict,
-    )
-    config = _read_toml()
-    section = config.get("feeder_go_to_angle")
-    defaults = configToDict(GoToAngleConfig())
-    if isinstance(section, dict):
-        return {**defaults, **{k: v for k, v in section.items() if k in defaults}}
-    return defaults
-
-
-def setGoToAngleConfig(updates: dict[str, Any]) -> dict[str, Any]:
-    from subsystems.feeder.go_to_angle.config import (
-        GoToAngleConfig, configToDict,
-    )
-    defaults = configToDict(GoToAngleConfig())
-    valid = {k: v for k, v in updates.items() if k in defaults}
-
-    def updater(config: dict[str, Any]) -> None:
-        existing = config.get("feeder_go_to_angle")
-        base = dict(existing) if isinstance(existing, dict) else {}
-        base.update(valid)
-        config["feeder_go_to_angle"] = base
-
-    _update_toml(updater)
-    return getGoToAngleConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -331,35 +302,6 @@ def setPulsePerceptionConfig(updates: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Feeder constant-movement tuning config
 # ---------------------------------------------------------------------------
-
-
-def getConstantMovementConfig() -> dict[str, Any]:
-    from subsystems.feeder.constant_movement.config import (
-        ConstantMovementConfig, configToDict,
-    )
-    config = _read_toml()
-    section = config.get("feeder_constant_movement")
-    defaults = configToDict(ConstantMovementConfig())
-    if isinstance(section, dict):
-        return {**defaults, **{k: v for k, v in section.items() if k in defaults}}
-    return defaults
-
-
-def setConstantMovementConfig(updates: dict[str, Any]) -> dict[str, Any]:
-    from subsystems.feeder.constant_movement.config import (
-        ConstantMovementConfig, configToDict,
-    )
-    defaults = configToDict(ConstantMovementConfig())
-    valid = {k: v for k, v in updates.items() if k in defaults}
-
-    def updater(config: dict[str, Any]) -> None:
-        existing = config.get("feeder_constant_movement")
-        base = dict(existing) if isinstance(existing, dict) else {}
-        base.update(valid)
-        config["feeder_constant_movement"] = base
-
-    _update_toml(updater)
-    return getConstantMovementConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +723,7 @@ def setChuteCalibration(calibration: dict[str, float]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Camera setup (for default layout compatibility)
+# Camera setup
 # ---------------------------------------------------------------------------
 
 
@@ -793,8 +735,7 @@ def getCameraSetup() -> dict[str, Any] | None:
         return None
     # Return the roles that have device indices assigned
     result: dict[str, Any] = {}
-    for role in ("feeder", "classification_top", "classification_bottom",
-                 "c_channel_2", "c_channel_3", "carousel"):
+    for role in ("c_channel_2", "c_channel_3", "carousel", "classification_channel"):
         val = cameras.get(role)
         if val is not None:
             result[role] = val
@@ -806,8 +747,9 @@ def setCameraSetup(setup: dict[str, Any]) -> None:
     def updater(config: dict[str, Any]) -> None:
         if "cameras" not in config:
             config["cameras"] = {}
-        for role, val in setup.items():
-            config["cameras"][role] = val
+        for role in ("c_channel_2", "c_channel_3", "carousel", "classification_channel"):
+            if role in setup:
+                config["cameras"][role] = setup[role]
 
     _update_toml(updater)
 

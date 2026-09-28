@@ -4,11 +4,6 @@
 	import { getBackendHttpBase, machineHttpBaseUrlFromWsUrl } from '$lib/backend';
 
 	const EXIT_STUCK_INCIDENT_KIND = 'exit_stuck';
-	const INCIDENT_KIND_ALIASES: Record<string, string> = {
-		classification_exit_release: EXIT_STUCK_INCIDENT_KIND,
-		channel_exit_stuck: EXIT_STUCK_INCIDENT_KIND,
-		classification_exit_stuck: EXIT_STUCK_INCIDENT_KIND
-	};
 
 	type IncidentHandlingMode = 'off' | 'manual' | 'automatic';
 	type IncidentDefinition = {
@@ -88,11 +83,6 @@
 		return machineHttpBaseUrlFromWsUrl(machine.machine?.url) ?? getBackendHttpBase();
 	}
 
-	function canonicalIncidentKind(kind: unknown): string | null {
-		if (typeof kind !== 'string' || kind.length === 0) return null;
-		return INCIDENT_KIND_ALIASES[kind] ?? kind;
-	}
-
 	function normalizeIncidentMode(value: unknown): IncidentHandlingMode {
 		if (value === 'automatic') return 'automatic';
 		if (value === 'off') return 'off';
@@ -106,9 +96,8 @@
 				if (!entry || typeof entry !== 'object') return null;
 				const raw = entry as Record<string, unknown>;
 				if (typeof raw.kind !== 'string' || typeof raw.label !== 'string') return null;
-				const kind = canonicalIncidentKind(raw.kind) ?? raw.kind;
 				return {
-					kind,
+					kind: raw.kind,
 					label: raw.label,
 					scope: typeof raw.scope === 'string' ? raw.scope : '',
 					description:
@@ -131,26 +120,16 @@
 		return deduped.length > 0 ? deduped : INCIDENT_FALLBACK_DEFINITIONS;
 	}
 
-	function incidentHandlingValue(
-		handling: Record<string, unknown>,
-		definition_kind: string
-	): unknown {
-		if (handling[definition_kind] !== undefined) return handling[definition_kind];
-		for (const [alias, canonical] of Object.entries(INCIDENT_KIND_ALIASES)) {
-			if (canonical === definition_kind && handling[alias] !== undefined) return handling[alias];
-		}
-		return undefined;
-	}
-
 	function incidentMode(kind: string): IncidentHandlingMode {
-		return normalizeIncidentMode(incidentHandling[canonicalIncidentKind(kind) ?? kind]);
+		return normalizeIncidentMode(incidentHandling[kind]);
 	}
 
 	const runtimeStats = $derived((machine.machine?.runtimeStats ?? {}) as Record<string, unknown>);
 	const activeIncidentKind = $derived.by(() => {
 		const incident = runtimeStats.active_incident;
 		if (!incident || typeof incident !== 'object') return null;
-		return canonicalIncidentKind((incident as Record<string, unknown>).kind);
+		const kind = (incident as Record<string, unknown>).kind;
+		return typeof kind === 'string' && kind.length > 0 ? kind : null;
 	});
 
 	function incidentDefinitionActive(definition: IncidentDefinition): boolean {
@@ -191,7 +170,7 @@
 				const next: Record<string, IncidentHandlingMode> = {};
 				for (const definition of incidentDefinitions) {
 					next[definition.kind] = normalizeIncidentMode(
-						incidentHandlingValue(handling as Record<string, unknown>, definition.kind)
+						(handling as Record<string, unknown>)[definition.kind]
 					);
 				}
 				incidentHandling = next;
@@ -217,9 +196,7 @@
 					: {};
 			const nextHandling: Record<string, IncidentHandlingMode> = {};
 			for (const definition of definitions) {
-				nextHandling[definition.kind] = normalizeIncidentMode(
-					incidentHandlingValue(handling, definition.kind)
-				);
+				nextHandling[definition.kind] = normalizeIncidentMode(handling[definition.kind]);
 			}
 			incidentHandling = nextHandling;
 		} catch {

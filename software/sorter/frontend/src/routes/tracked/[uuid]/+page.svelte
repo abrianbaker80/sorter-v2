@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { ArrowLeft, ChevronDown, ChevronRight, ExternalLink } from 'lucide-svelte';
+	import { ArrowLeft, ChevronDown, ChevronRight } from 'lucide-svelte';
 	import AppHeader from '$lib/components/AppHeader.svelte';
-	import TrackPathComposite from '$lib/components/TrackPathComposite.svelte';
 	import ImageInfoBadge from '$lib/components/ImageInfoBadge.svelte';
 	import PieceStatusBadge from '$lib/components/PieceStatusBadge.svelte';
 	import ReclassifyPanel from '$lib/components/ReclassifyPanel.svelte';
@@ -230,98 +229,6 @@
 		return source || 'unknown';
 	}
 
-	// --- Tracker-backed crop fetch ----------------------------------------
-	// The "Captured Crops" gallery used to surface just top/bottom/thumbnail.
-	// That missed every sector snapshot gathered on the C-channels, which is
-	// the vast majority of what the piece actually had photographed. We now
-	// fetch the tracker detail and enumerate every sector snapshot — the
-	// subset the backend actually shipped to Brickognize is flagged via
-	// `piece.recognition_used_crop_ts`.
-	type PathPoint = [number, number, number];
-	type SectorSnapshot = {
-		captured_ts: number;
-		start_angle_deg?: number;
-		end_angle_deg?: number;
-		jpeg_b64: string;
-		piece_jpeg_b64?: string;
-	};
-	type Segment = {
-		source_role: string;
-		sector_snapshots?: SectorSnapshot[];
-	};
-	type BurstFrame = {
-		role: string;
-		captured_ts: number;
-		jpeg_b64: string;
-	};
-	type TrackDetail = {
-		global_id: number;
-		segments: Segment[];
-		live?: boolean;
-		burst_frames?: BurstFrame[];
-	};
-
-	let trackDetail = $state<TrackDetail | null>(null);
-	let _loadedGlobalId: number | null = null;
-	let trackPollTimer: ReturnType<typeof setInterval> | null = null;
-
-	// Signature of the fetched track: "live|seg0_snaps,seg1_snaps,..." — used
-	// to gate `trackDetail` reassignment so polls that return identical data
-	// don't trigger a re-render of the crops `$effect` or the composite SVG.
-	function trackSignature(d: TrackDetail | null): string {
-		if (!d) return '';
-		const counts = d.segments.map((s) => s.sector_snapshots?.length ?? 0).join(',');
-		const burstCount = d.burst_frames?.length ?? 0;
-		return `${d.live ? 1 : 0}|${counts}|b${burstCount}`;
-	}
-	let _trackSig = '';
-
-	async function loadTrack(gid: number | null | undefined): Promise<void> {
-		if (gid == null || !Number.isFinite(gid)) {
-			trackDetail = null;
-			_trackSig = '';
-			return;
-		}
-		try {
-			const res = await fetch(`${effectiveBase()}/api/feeder/tracking/history/${gid}`);
-			if (!res.ok) return;
-			const next = (await res.json()) as TrackDetail;
-			const nextSig = trackSignature(next);
-			if (nextSig !== _trackSig) {
-				_trackSig = nextSig;
-				trackDetail = next;
-			}
-		} catch {
-			// Silent — the page still renders without the tracker-crop gallery.
-		}
-	}
-
-	// Only refetch when the *global id* actually changes. `piece` is reassigned
-	// on every WS event so a naive dependency would clear+refetch the track on
-	// every tick, re-rendering the whole crops gallery and composite.
-	$effect(() => {
-		const gid = piece?.tracked_global_id ?? null;
-		if (gid === _loadedGlobalId) return;
-		_loadedGlobalId = gid;
-		trackDetail = null;
-		_trackSig = '';
-		void loadTrack(gid);
-	});
-
-	onMount(() => {
-		// While the piece is still live on the tracker, sector snapshots keep
-		// arriving. Poll at the same cadence the track page uses.
-		trackPollTimer = setInterval(() => {
-			if (trackDetail?.live && piece?.tracked_global_id != null) {
-				void loadTrack(piece.tracked_global_id);
-			}
-		}, 1500);
-	});
-
-	onDestroy(() => {
-		if (trackPollTimer !== null) clearInterval(trackPollTimer);
-	});
-
 	const TS_TOLERANCE_S = 0.005;
 
 	function tsWasUsed(captured_ts: number, usedList: number[]): boolean {
@@ -331,34 +238,13 @@
 		return false;
 	}
 
-	// --- Flicker control --------------------------------------------------
-	// `piece` is re-assigned on every WS event from the machine, which used to
-	// force the `crops` $derived to rebuild and the `{#each}` (keyed by idx)
-	// to re-mount every <img>. We now compute crops into a content-keyed cache
-	// and only publish a new array when the identifying signature actually
-	// changes. We also stabilize the `recognition_used_crop_ts` array reference
-	// passed to the composite so it doesn't see a fresh `[]` every tick.
-	//
-	// A crop's identity is (ts | src) + used flag. Top/bottom snapshots have
-	// no captured_ts, so we fall back to the full src string for keying.
+	// Stable image keys keep live piece updates from remounting the gallery.
 	function cropKey(c: CropEntry): string {
 		return `${c.role}|${c.ts ?? 'no-ts'}|${c.src}`;
 	}
 
 	let _cachedCrops = $state<CropEntry[]>([]);
 	let _cachedCropsSig = '';
-
-	let _cachedUsedTs = $state<number[]>([]);
-	let _cachedUsedTsSig = '';
-
-	$effect(() => {
-		const nextUsed: number[] = piece?.recognition_used_crop_ts ?? [];
-		const sig = nextUsed.length === 0 ? '' : nextUsed.slice().sort().join(',');
-		if (sig !== _cachedUsedTsSig) {
-			_cachedUsedTsSig = sig;
-			_cachedUsedTs = nextUsed.slice();
-		}
-	});
 
 	$effect(() => {
 		if (!piece) {
@@ -369,23 +255,6 @@
 			return;
 		}
 		const entries: CropEntry[] = [];
-		const usedList = _cachedUsedTs;
-
-		if (trackDetail) {
-			for (const seg of trackDetail.segments ?? []) {
-				for (const snap of seg.sector_snapshots ?? []) {
-					const src = dataImageUrl(snap.piece_jpeg_b64 ?? snap.jpeg_b64);
-					if (!src) continue;
-					entries.push({
-						src,
-						role: seg.source_role,
-						ts: snap.captured_ts ?? null,
-						used: snap.captured_ts != null ? tsWasUsed(snap.captured_ts, usedList) : false
-					});
-				}
-			}
-		}
-
 		// Two DELIBERATELY separate lists on the piece:
 		//   recognition_image_set — ground truth, the C4 burst; `used` =
 		//     shipped to Brickognize in the applied request. This list feeds
@@ -431,9 +300,7 @@
 			});
 		}
 
-		// Keep the classification chamber top/bottom snapshots as a fallback;
-		// they aren't in the tracker history (they come from the snapping
-		// station, not the polar tracker).
+		// Older piece records may still carry chamber snapshots.
 		const top = dataImageUrl(piece.top_image);
 		const bottom = dataImageUrl(piece.bottom_image);
 		if (top) {
@@ -456,11 +323,6 @@
 		// Sort by timestamp so the gallery reads chronologically.
 		entries.sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
 
-		// Signature includes key + used flag so the gallery re-renders only
-		// when a new crop arrives or its "used" state flips. Note we omit `src`
-		// on tracker crops (identified by ts) — the b64 payload for a given
-		// captured_ts never changes mid-track and hashing it would defeat the
-		// stabilization.
 		const sig = entries.map((c) => `${cropKey(c)}|${c.used ? 1 : 0}`).join(';');
 		if (sig !== _cachedCropsSig) {
 			_cachedCropsSig = sig;
@@ -469,57 +331,6 @@
 	});
 
 	const crops = $derived(_cachedCrops);
-	const usedCropTs = $derived(_cachedUsedTs);
-	// Latest C4 burst capture time — when the classification chamber snapped its
-	// pics.
-	const c4SnapTs = $derived.by<number | null>(() => {
-		let ref: number | null = null;
-		for (const c of crops) {
-			if (c.role === 'recognition_capture' && typeof c.ts === 'number') {
-				ref = ref === null ? c.ts : Math.max(ref, c.ts);
-			}
-		}
-		return ref;
-	});
-
-	// --- Drop-zone burst --------------------------------------------------
-	// Pre+post-event frames from C3 + carousel captured when the piece fell
-	// into the classification chamber. Rendered as a filmstrip + enlarged
-	// preview. Chronologically pre-sorted on the backend.
-	const burstFrames = $derived<BurstFrame[]>(trackDetail?.burst_frames ?? []);
-	let selectedBurstIdx = $state(0);
-	// Reset the selection whenever the underlying global_id changes so we
-	// don't index past the end of a different piece's burst.
-	$effect(() => {
-		void _loadedGlobalId;
-		selectedBurstIdx = 0;
-	});
-	// Clamp if the frame list shrank (shouldn't happen — entries only grow —
-	// but defensive).
-	$effect(() => {
-		if (selectedBurstIdx >= burstFrames.length) {
-			selectedBurstIdx = Math.max(0, burstFrames.length - 1);
-		}
-	});
-	const selectedBurstFrame = $derived<BurstFrame | null>(burstFrames[selectedBurstIdx] ?? null);
-	const burstDurationLabel = $derived.by<string>(() => {
-		if (burstFrames.length < 2) return '';
-		const first = burstFrames[0].captured_ts;
-		const last = burstFrames[burstFrames.length - 1].captured_ts;
-		const span = Math.max(0, last - first);
-		if (span < 1) return `${(span * 1000).toFixed(0)}ms`;
-		return `${span.toFixed(2)}s`;
-	});
-
-	function burstRoleClass(role: string): string {
-		return role === 'carousel' ? 'text-primary' : 'text-text-muted';
-	}
-
-	function burstRoleLabel(role: string): string {
-		if (role === 'carousel') return 'C4';
-		if (role === 'c_channel_3') return 'C3';
-		return role.toUpperCase();
-	}
 
 	function formatAbsTs(ts: number | null | undefined): string {
 		if (!ts) return '—';
@@ -878,7 +689,7 @@
 		};
 	}
 
-	// The two sources, shown separately: the C4 burst the chamber captured, and
+	// The two sources, shown separately: the C4 burst and
 	// the upstream C2/C3 views of the same piece. In both, `used` (a stroke on
 	// the tile) means the image was actually shipped to Brickognize in the
 	// request whose result was applied.
@@ -886,8 +697,7 @@
 		crops.filter((c) => c.role === 'recognition_capture').map(toThumb)
 	);
 
-	// Link matches first, ranked by the model's probability; then any other
-	// upstream crop the tracker happened to keep, which carries no score.
+	// Link matches are ranked by the model's probability.
 	const otherChannelThumbs = $derived<Thumb<CropEntry>[]>(
 		crops
 			.filter((c) => c.role !== 'recognition_capture')
@@ -913,7 +723,7 @@
 		<header class="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
 			<div class="flex flex-wrap items-center gap-3">
 				<a
-					href="/tracked"
+					href="/records"
 					class="inline-flex items-center gap-1.5 border border-border bg-surface px-2.5 py-1.5 text-sm text-text-muted hover:text-text"
 				>
 					<ArrowLeft size={14} />
@@ -946,18 +756,6 @@
 						status={_diskSummary.classification_status}
 						dead={Boolean(_diskSummary.dead)}
 					/>
-				{/if}
-			</div>
-			<div class="flex flex-wrap items-center gap-3">
-				{#if piece?.tracked_global_id != null}
-					<a
-						href={`/tracked/${piece.tracked_global_id}`}
-						class="inline-flex items-center gap-1.5 border border-border bg-surface px-2.5 py-1.5 text-sm text-text-muted hover:text-text"
-						title="Open tracker-level record (all angular crops)"
-					>
-						<ExternalLink size={14} />
-						Track #{piece.tracked_global_id}
-					</a>
 				{/if}
 			</div>
 		</header>
@@ -1014,8 +812,7 @@
 				<div class="border border-border bg-surface p-4 text-sm text-text-muted">
 					No trace of this piece — it isn't in backend memory, the durable piece records, or the
 					on-disk image store. Go back to the
-					<a href="/tracked" class="text-primary underline">tracker list</a>
-					for persistent track records.
+					<a href="/records" class="text-primary underline">piece records</a>.
 				</div>
 			{:else}
 				<div class="border border-border bg-surface p-4 text-sm text-text-muted">
@@ -1453,87 +1250,6 @@
 						used: c.used
 					}))}
 				/>
-			{/if}
-
-			<!-- Drop burst: fashion-shoot sequence from the C3→C4 fall -->
-			{#if burstFrames.length > 0}
-				<section class="border border-border bg-surface">
-					<div
-						class="flex items-center justify-between border-b border-border bg-bg px-3 py-2 text-sm"
-					>
-						<span class="font-medium text-text">Drop Burst</span>
-						<span class="text-text-muted">
-							<span class="tabular-nums">{burstFrames.length}</span>
-							<span class="mx-1">frames</span>
-							{#if burstDurationLabel}
-								<span class="mx-1">·</span>
-								<span class="tabular-nums">{burstDurationLabel}</span>
-							{/if}
-						</span>
-					</div>
-					{#if selectedBurstFrame}
-						<div class="flex flex-col items-center gap-1 border-b border-border bg-bg p-3">
-							<img
-								src={`data:image/jpeg;base64,${selectedBurstFrame.jpeg_b64}`}
-								alt="burst frame {selectedBurstIdx + 1} of {burstFrames.length}"
-								class="max-h-[480px] max-w-full object-contain"
-								loading="lazy"
-							/>
-							<div class="flex items-center gap-2 text-sm text-text-muted">
-								<span
-									class={`font-semibold tracking-wider uppercase ${burstRoleClass(selectedBurstFrame.role)}`}
-								>
-									{burstRoleLabel(selectedBurstFrame.role)}
-								</span>
-								<span class="tabular-nums">{formatAbsTs(selectedBurstFrame.captured_ts)}</span>
-								<span class="text-text-muted"
-									>· frame {selectedBurstIdx + 1} / {burstFrames.length}</span
-								>
-							</div>
-						</div>
-					{/if}
-					<div class="flex flex-row gap-1 overflow-x-auto px-3 py-2">
-						{#each burstFrames as frame, idx (frame.captured_ts + '|' + idx)}
-							<button
-								type="button"
-								class={`flex h-32 flex-shrink-0 flex-col bg-bg text-left hover:border-primary/70 ${
-									idx === selectedBurstIdx ? 'border-2 border-primary' : 'border border-border'
-								}`}
-								onclick={() => (selectedBurstIdx = idx)}
-								title={`${burstRoleLabel(frame.role)} · ${formatAbsTs(frame.captured_ts)}`}
-							>
-								<img
-									src={`data:image/jpeg;base64,${frame.jpeg_b64}`}
-									alt="burst frame {idx + 1}"
-									class="h-full w-auto flex-shrink-0 object-contain"
-									loading="lazy"
-								/>
-							</button>
-						{/each}
-					</div>
-				</section>
-			{/if}
-
-			<!-- Track path (pie-chart composite) -->
-			{#if piece.tracked_global_id != null}
-				<section class="border border-border bg-surface">
-					<div
-						class="flex items-center justify-between border-b border-border bg-bg px-3 py-2 text-sm"
-					>
-						<span class="font-medium text-text">Track path</span>
-						<a
-							href={`/tracked/${piece.tracked_global_id}`}
-							class="inline-flex items-center gap-1.5 text-text-muted hover:text-text"
-							title="Open the full tracker record"
-						>
-							<ExternalLink size={14} />
-							Track #{piece.tracked_global_id}
-						</a>
-					</div>
-					<div class="p-3">
-						<TrackPathComposite globalId={piece.tracked_global_id} {usedCropTs} />
-					</div>
-				</section>
 			{/if}
 
 			<!-- Lifecycle timeline -->

@@ -6,13 +6,7 @@
 */
 
 export type ClassificationAttemptStrategy = "combined" | "single_burst";
-export type CameraName =
-  | "feeder"
-  | "classification_bottom"
-  | "classification_top"
-  | "c_channel_2"
-  | "c_channel_3"
-  | "carousel";
+export type CameraName = "c_channel_2" | "c_channel_3" | "carousel";
 export type PieceStage = "created" | "distributing" | "distributed";
 export type ClassificationStatus =
   | "pending"
@@ -201,7 +195,6 @@ export interface SetProfilerEnabledEvent {
 }
 export interface SorterStateData {
   state: string;
-  camera_layout?: string | null;
 }
 export interface SorterStateEvent {
   tag: "sorter_state";

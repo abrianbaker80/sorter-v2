@@ -20,8 +20,8 @@ from unittest.mock import patch
 from defs.known_object import ClassificationStatus, KnownObject, PieceStage
 from piece_transport import ClassificationChannelTransport
 from runtime_stats import RuntimeStatsCollector
-from subsystems.classification_channel import two_piece
-from subsystems.classification_channel.two_piece import (
+from subsystems.classification_channel.two_piece import flow as two_piece
+from subsystems.classification_channel.two_piece.flow import (
     TwoPieceClassificationChannel,
     _Phase,
     _TrackedPiece,
@@ -90,7 +90,6 @@ def _mkChannel(transport, shared) -> TwoPieceClassificationChannel:
     ch.gc = SimpleNamespace()
     ch.irl = SimpleNamespace()
     ch.irl_config = SimpleNamespace()
-    ch.cv = SimpleNamespace(_vision=None)
     ch.ctx = SimpleNamespace(reset=lambda: None, known_object=None)
     ch._pieces = {}
     ch._phase = _Phase.WAITING
@@ -200,24 +199,6 @@ def test_ready_goes_idle_when_positioned_piece_is_withdrawn() -> None:
     assert transport.clearPieceForDistribution(obj)
 
     assert ready.step() == DistributionState.IDLE
-
-
-def test_ready_without_slot_handoff_still_treats_slot_change_as_drop() -> None:
-    # Transports that do not promote the positioned piece into a drop slot (the
-    # dynamic channel, the carousel) keep the old rule.
-    slots = SimpleNamespace(wait=KnownObject(), drop=None)
-    transport = SimpleNamespace(
-        getPieceForDistributionPositioning=lambda: slots.wait,
-        getPieceForDistributionDrop=lambda: slots.drop,
-    )
-    shared = _mkShared(transport)
-    shared.distribution_positioned_uuid = slots.wait.uuid
-    ready = Ready(SimpleNamespace(), _mkGc(), shared)  # type: ignore[arg-type]
-    assert ready.step() is None
-
-    slots.wait = KnownObject()
-
-    assert ready.step() == DistributionState.SENDING
 
 
 def test_sending_does_not_record_an_already_committed_piece_again() -> None:

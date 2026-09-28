@@ -10,7 +10,6 @@
 		waitForBackend
 	} from '$lib/backend';
 	import Modal from '$lib/components/Modal.svelte';
-	import NotificationsIndicator from '$lib/components/NotificationsIndicator.svelte';
 	import SortingProfileDropdown from '$lib/components/SortingProfileDropdown.svelte';
 	import { getMachinesContext } from '$lib/machines/context';
 	import { machineDowntime } from '$lib/stores/machineDowntime.svelte';
@@ -488,7 +487,6 @@
 			</div>
 		</div>
 		<div class="flex items-center gap-2">
-			<NotificationsIndicator />
 			{#if machineName}
 				<span
 					class="flex items-center self-stretch border border-border px-2.5 text-sm font-medium text-text-muted"

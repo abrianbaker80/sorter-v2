@@ -15,7 +15,7 @@
 			value: 'target_plate',
 			label: 'Target Plate Search',
 			description:
-				'Uses the built-in search and scoring pipeline to tune exposure and generate a color profile.'
+				'Tunes exposure and white balance against the target plate.'
 		},
 		{
 			value: 'llm_guided',
@@ -27,7 +27,7 @@
 			value: 'exposure_histogram',
 			label: 'Exposure (Histogram)',
 			description:
-				'Proportional-gain loop that drives the manual exposure until the frame mean luminance hits middle-gray (≈128). No color target, no LLM — converges in 4 – 8 iterations. Leaves the existing color profile untouched.'
+				'Proportional-gain loop that drives the manual exposure until the frame mean luminance hits middle-gray (≈128). No color target, no LLM — converges in 4 – 8 iterations.'
 		}
 	];
 
@@ -90,8 +90,6 @@
 				return 'Searching White Balance';
 			case 'white_balance_refine':
 				return 'Refining White Balance';
-			case 'profile_generation':
-				return 'Generating Color Profile';
 			case 'tone_search':
 				return 'Refining Tone Controls';
 			case 'polish_search':
@@ -215,8 +213,6 @@
 
 	let {
 		calibrationMethod = $bindable(),
-		calibrationApplyColorProfile = $bindable(true),
-		colorCorrectionGloballyEnabled = true,
 		calibrating,
 		saving,
 		hasCamera,
@@ -230,8 +226,6 @@
 		onCalibrate
 	}: {
 		calibrationMethod: CameraCalibrationMethod;
-		calibrationApplyColorProfile?: boolean;
-		colorCorrectionGloballyEnabled?: boolean;
 		calibrating: boolean;
 		saving: boolean;
 		hasCamera: boolean;
@@ -369,36 +363,6 @@
 		{selectedCalibrationMethodDescription(calibrationMethod)}
 	</div>
 </label>
-
-{#if calibrationMethod === 'llm_guided'}
-	<label
-		class={`flex items-start gap-2 border border-border bg-surface px-3 py-2 text-sm text-text ${
-			colorCorrectionGloballyEnabled ? '' : 'opacity-60'
-		}`}
-		title={colorCorrectionGloballyEnabled
-			? undefined
-			: 'Color correction is disabled in the software build.'}
-	>
-		<input
-			type="checkbox"
-			class="mt-0.5"
-			bind:checked={calibrationApplyColorProfile}
-			disabled={calibrating || saving || !colorCorrectionGloballyEnabled}
-		/>
-		<span class="flex flex-col gap-0.5">
-			<span class="font-medium">Apply final color correction</span>
-			<span class="text-sm leading-6 text-text-muted">
-				{#if colorCorrectionGloballyEnabled}
-					Generate and save a color profile from the target plate after the advisor finishes.
-					Uncheck to tune device settings only and keep the live feed uncorrected.
-				{:else}
-					Color correction is turned off in this software build, so no generated profile would
-					be applied. Calibration still tunes device settings.
-				{/if}
-			</span>
-		</span>
-	</label>
-{/if}
 
 <button
 	onclick={onCalibrate}

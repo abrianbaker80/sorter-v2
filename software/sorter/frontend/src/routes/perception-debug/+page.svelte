@@ -74,8 +74,7 @@
 					kept (these drive the machine); <span style="color:#cc7a00">orange</span> = raw model
 					detections the filter rejected; cyan = channel polygon mask; white rect = the crop region
 					the model actually saw; magenta dot = rotation center. Runtime zones are overlaid from the
-					actual `ChannelDef` section sets the go-to-angle feeder and rev01 classification state machine
-					read: blue = drop, red = exit-only, magenta fill = precise. The panel also shows the live
+					active channel zones: blue = drop, red = exit-only, magenta fill = precise. The panel also shows the live
 					slot state those pipelines are consuming.
 				</p>
 			{:else}

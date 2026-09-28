@@ -6,9 +6,7 @@
 		| 'second'
 		| 'third'
 		| 'carousel'
-		| 'classification_channel'
-		| 'class_top'
-		| 'class_bottom';
+		| 'classification_channel';
 
 	let {
 		role
@@ -17,9 +15,7 @@
 			| 'c_channel_2'
 			| 'c_channel_3'
 			| 'carousel'
-			| 'classification_channel'
-			| 'classification_top'
-			| 'classification_bottom';
+			| 'classification_channel';
 	} = $props();
 
 	const dispatch = createEventDispatcher<{ saved: void }>();
@@ -41,14 +37,6 @@
 			case 'classification_channel':
 				return {
 					channels: ['classification_channel']
-				};
-			case 'classification_top':
-				return {
-					channels: ['class_top']
-				};
-			case 'classification_bottom':
-				return {
-					channels: ['class_bottom']
 				};
 			default:
 				return {

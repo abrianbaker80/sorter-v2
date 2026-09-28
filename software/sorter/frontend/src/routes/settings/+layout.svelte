@@ -4,17 +4,11 @@
 	import AppHeader from '$lib/components/AppHeader.svelte';
 	import { getMachinesContext } from '$lib/machines/context';
 	import {
-		settingsNavItemsForSetup,
+		settingsNavItems,
 		stepperLabels,
-		type MachineSetupKey,
 		type StepperKey
 	} from '$lib/settings/stations';
-	import {
-		CLASSIFICATION_CHANNEL_STEPPER_LABEL,
-		stepperGearRatioForSetup,
-		triggerStoredStepperPulse
-	} from '$lib/settings/stepper-control';
-	import { onMount } from 'svelte';
+	import { triggerStoredStepperPulse } from '$lib/settings/stepper-control';
 
 	let { children } = $props();
 
@@ -35,9 +29,6 @@
 	let hotkeyErrorMsg = $state<string | null>(null);
 	let hotkeyBusy = $state<Partial<Record<StepperKey, boolean>>>({});
 	let hotkeyStatusTimeout: ReturnType<typeof setTimeout> | null = null;
-	let machineSetup = $state<MachineSetupKey>('classification_channel');
-
-	const visibleSettingsNavItems = $derived(settingsNavItemsForSetup(machineSetup));
 
 	function currentBackendBaseUrl(): string {
 		return (
@@ -67,27 +58,18 @@
 		}, 2200);
 	}
 
-	function stepperHotkeyLabel(stepperKey: StepperKey): string {
-		if (stepperKey === 'carousel' && machineSetup === 'classification_channel') {
-			return CLASSIFICATION_CHANNEL_STEPPER_LABEL;
-		}
-		return stepperLabels[stepperKey];
-	}
-
 	async function triggerGlobalStepperHotkey(stepperKey: StepperKey) {
 		if (hotkeyBusy[stepperKey]) return;
 		hotkeyBusy = { ...hotkeyBusy, [stepperKey]: true };
 		try {
-			const message = await triggerStoredStepperPulse(currentBackendBaseUrl(), stepperKey, 'cw', {
-				gearRatio: stepperGearRatioForSetup(stepperKey, machineSetup)
-			});
-			showHotkeyStatus(`${stepperHotkeyLabel(stepperKey)}: ${message}`);
+			const message = await triggerStoredStepperPulse(currentBackendBaseUrl(), stepperKey, 'cw');
+			showHotkeyStatus(`${stepperLabels[stepperKey]}: ${message}`);
 		} catch (error: unknown) {
 			const detail =
 				error instanceof Error && error.message
 					? error.message
-					: `${stepperHotkeyLabel(stepperKey)} hotkey failed.`;
-			showHotkeyStatus(`${stepperHotkeyLabel(stepperKey)}: ${detail}`, true);
+					: `${stepperLabels[stepperKey]} hotkey failed.`;
+			showHotkeyStatus(`${stepperLabels[stepperKey]}: ${detail}`, true);
 		} finally {
 			hotkeyBusy = { ...hotkeyBusy, [stepperKey]: false };
 		}
@@ -100,25 +82,6 @@
 		event.preventDefault();
 		void triggerGlobalStepperHotkey(stepperKey);
 	}
-
-	async function loadMachineSetup() {
-		try {
-			const res = await fetch(`${currentBackendBaseUrl()}/api/machine-setup`);
-			if (!res.ok) return;
-			const payload = await res.json();
-			if (payload?.setup === 'manual_carousel') {
-				machineSetup = 'manual_carousel';
-			} else if (payload?.setup === 'classification_channel') {
-				machineSetup = 'classification_channel';
-			}
-		} catch {
-			// Ignore transient backend fetch issues in the nav shell.
-		}
-	}
-
-	onMount(() => {
-		void loadMachineSetup();
-	});
 </script>
 
 <svelte:window onkeydown={handleSettingsHotkey} />
@@ -142,7 +105,7 @@
 	<div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
 		<nav class="w-full lg:w-48 lg:flex-shrink-0">
 			<div class="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-1">
-				{#each visibleSettingsNavItems as entry, i (i)}
+				{#each settingsNavItems as entry, i (i)}
 					{#if 'href' in entry}
 						{@const active = page.url.pathname === entry.href}
 						<a

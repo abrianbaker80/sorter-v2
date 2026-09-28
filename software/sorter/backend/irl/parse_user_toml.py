@@ -10,11 +10,6 @@ from global_config import GlobalConfig
 from machine_toml import machine_toml_path
 from hardware.bus import MCUBusError
 from hardware.cobs import DecodeError
-from machine_setup import (
-    get_machine_setup_definition,
-    machine_setup_key_from_feeding_mode,
-    normalize_machine_setup_key,
-)
 
 if TYPE_CHECKING:
     from hardware.sorter_interface import StepperMotor
@@ -46,9 +41,6 @@ DEFAULT_CHUTE_NUM_SECTIONS = 6
 DEFAULT_CHUTE_SECTION_WIDTH_DEG = 51.75
 DEFAULT_CHUTE_FIRST_SECTION_OFFSET_DEG = 8.25
 DEFAULT_CHUTE_OPERATING_SPEED_MICROSTEPS_PER_SEC = 3000
-# Matches the long-running carousel homing wiring used by the stable
-# pre-setup-wizard backend path.
-DEFAULT_CAROUSEL_HOME_PIN_CHANNEL = 2
 # Matches the SKR Pico distribution E0-STOP wiring used by the setup wizard.
 DEFAULT_CHUTE_HOME_PIN_CHANNEL = 3
 # For boards whose profile does not name a polarity (see BoardProfile).
@@ -83,88 +75,6 @@ PHYSICAL_STEPPER_BINDING_NAMES = (
 
 def normalizePhysicalStepperBindingName(stepper_name: str) -> str:
     return PHYSICAL_STEPPER_BINDING_ALIASES.get(stepper_name, stepper_name)
-
-VALID_FEEDING_MODES = {"auto_channels", "manual_carousel"}
-
-
-def _loadLegacyFeedingModeConfig(
-    gc: GlobalConfig,
-    raw: dict[str, object],
-) -> str:
-    feeding_params = raw.get("feeding")
-    if feeding_params is None:
-        return "auto_channels"
-    if not isinstance(feeding_params, dict):
-        gc.logger.warning("Ignoring invalid feeding config: expected object. Using auto channel feeding.")
-        return "auto_channels"
-
-    mode = feeding_params.get("mode", "auto_channels")
-    if not isinstance(mode, str) or mode not in VALID_FEEDING_MODES:
-        gc.logger.warning(
-            "Ignoring invalid feeding.mode=%r; expected one of %s. Using auto channel feeding."
-            % (mode, sorted(VALID_FEEDING_MODES))
-        )
-        return "auto_channels"
-
-    return mode
-
-
-def loadMachineSetupConfig(
-    gc: GlobalConfig,
-    machine_specific_params: dict[str, object] | None = None,
-) -> str:
-    raw: object = machine_specific_params
-    if raw is None:
-        raw = loadMachineSpecificParams(gc)
-
-    if not isinstance(raw, dict):
-        return machine_setup_key_from_feeding_mode("auto_channels")
-
-    machine_setup_params = raw.get("machine_setup")
-    if machine_setup_params is None:
-        return machine_setup_key_from_feeding_mode(_loadLegacyFeedingModeConfig(gc, raw))
-    if not isinstance(machine_setup_params, dict):
-        gc.logger.warning(
-            "Ignoring invalid machine_setup config: expected object. Falling back to feeding mode."
-        )
-        return machine_setup_key_from_feeding_mode(_loadLegacyFeedingModeConfig(gc, raw))
-
-    setup_key = normalize_machine_setup_key(machine_setup_params.get("type"))
-    if setup_key is None:
-        fallback_key = machine_setup_key_from_feeding_mode(_loadLegacyFeedingModeConfig(gc, raw))
-        gc.logger.warning(
-            "Ignoring invalid machine_setup.type=%r; falling back to %r."
-            % (machine_setup_params.get("type"), fallback_key)
-        )
-        return fallback_key
-
-    return setup_key
-
-
-def loadFeedingModeConfig(
-    gc: GlobalConfig,
-    machine_specific_params: dict[str, object] | None = None,
-) -> str:
-    raw: object = machine_specific_params
-    if raw is None:
-        raw = loadMachineSpecificParams(gc)
-
-    if not isinstance(raw, dict):
-        return "auto_channels"
-
-    machine_setup_params = raw.get("machine_setup")
-    if machine_setup_params is not None:
-        if not isinstance(machine_setup_params, dict):
-            gc.logger.warning(
-                "Ignoring invalid machine_setup config for feeding mode: expected object."
-            )
-        else:
-            setup_key = normalize_machine_setup_key(machine_setup_params.get("type"))
-            if setup_key is not None:
-                return get_machine_setup_definition(setup_key).feeding_mode
-
-    return _loadLegacyFeedingModeConfig(gc, raw)
-
 
 @dataclass
 class MachineConfig:
@@ -517,12 +427,6 @@ class WaveshareServoConfig:
 
 
 @dataclass
-class CarouselCalibrationConfig:
-    home_pin_channel: int = DEFAULT_CAROUSEL_HOME_PIN_CHANNEL
-    endstop_active_high: bool = False
-
-
-@dataclass
 class ChuteCalibrationConfig:
     home_pin_channel: int = DEFAULT_CHUTE_HOME_PIN_CHANNEL
     num_sections: int = DEFAULT_CHUTE_NUM_SECTIONS
@@ -789,47 +693,6 @@ def loadChuteCalibrationConfig(
         pillar_width_deg=pillar_width_deg,
         endstop_active_high=endstop_active_high,
         operating_speed_microsteps_per_second=operating_speed_microsteps_per_second,
-    )
-
-
-def loadCarouselCalibrationConfig(
-    gc: GlobalConfig,
-    machine_specific_params: dict[str, object] | None = None,
-) -> CarouselCalibrationConfig:
-    raw = machine_specific_params
-    if raw is None:
-        raw = loadMachineSpecificParams(gc)
-
-    if not isinstance(raw, dict):
-        return CarouselCalibrationConfig()
-
-    carousel_params = raw.get("carousel")
-    if carousel_params is None:
-        return CarouselCalibrationConfig()
-    if not isinstance(carousel_params, dict):
-        gc.logger.warning("Ignoring invalid carousel config: expected object. Using defaults.")
-        return CarouselCalibrationConfig()
-
-    home_pin_channel = carousel_params.get(
-        "home_pin_channel", DEFAULT_CAROUSEL_HOME_PIN_CHANNEL
-    )
-    if not isinstance(home_pin_channel, int) or isinstance(home_pin_channel, bool):
-        gc.logger.warning(
-            "Invalid carousel.home_pin_channel=%r; using default %d."
-            % (home_pin_channel, DEFAULT_CAROUSEL_HOME_PIN_CHANNEL)
-        )
-        home_pin_channel = DEFAULT_CAROUSEL_HOME_PIN_CHANNEL
-
-    endstop_active_high = carousel_params.get("endstop_active_high", False)
-    if not isinstance(endstop_active_high, bool):
-        gc.logger.warning(
-            f"Invalid carousel.endstop_active_high={endstop_active_high!r}; using default False."
-        )
-        endstop_active_high = False
-
-    return CarouselCalibrationConfig(
-        home_pin_channel=home_pin_channel,
-        endstop_active_high=endstop_active_high,
     )
 
 

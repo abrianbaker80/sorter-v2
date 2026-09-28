@@ -23,13 +23,13 @@ from unittest.mock import patch
 
 from defs.known_object import ClassificationStatus, KnownObject, PieceStage
 from piece_transport import ClassificationChannelTransport
-from subsystems.classification_channel import two_piece
-from subsystems.classification_channel.simple_state_machine_rev01 import channel_clear
-from subsystems.classification_channel.simple_state_machine_rev01.channel_clear import (
+from subsystems.classification_channel.two_piece import flow as two_piece
+from subsystems.classification_channel.two_piece import channel_clear
+from subsystems.classification_channel.two_piece.channel_clear import (
     ChannelClearResult,
     clearChannelByAdvancing,
 )
-from subsystems.classification_channel.two_piece import (
+from subsystems.classification_channel.two_piece.flow import (
     _Phase,
     _TrackedPiece,
     TwoPieceClassificationChannel,
@@ -174,7 +174,6 @@ def _mkChannel(transport, shared) -> TwoPieceClassificationChannel:
     ch.gc = SimpleNamespace()
     ch.irl = SimpleNamespace()
     ch.irl_config = SimpleNamespace()
-    ch.cv = SimpleNamespace(_vision=None)
     ch.ctx = SimpleNamespace(reset=lambda: None, known_object=None)
     ch._pieces = {}
     ch._phase = _Phase.WAITING
