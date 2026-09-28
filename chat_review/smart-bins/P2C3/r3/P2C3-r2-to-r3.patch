@@ -1,0 +1,266 @@
+diff --git a/software/sorter/backend/smart_bins_native_completion.py b/software/sorter/backend/smart_bins_native_completion.py
+index 62896b855ad9d4ac559610b58a44e1e5ebcf32b4..aa742749ff77f045fbb54574c16dcbf62f48442b 100644
+--- a/software/sorter/backend/smart_bins_native_completion.py
++++ b/software/sorter/backend/smart_bins_native_completion.py
+@@ -189,6 +189,28 @@ class NativeCompletionAdapter:
+             raise NativeCompletionError("distribution drop carries a foreign delivery receipt")
+         return handoff
+ 
++    def check_drop_ownership(self, transport) -> NativeHandoff | None:
++        """Latch any observed loss against the retained handoff, before caching."""
++        handoff = self._handoff
++        if handoff is None:
++            return None
++        if handoff.ownership_lost:
++            raise NativeCompletionError("guarded distribution drop ownership was lost")
++        if transport is None or transport is not handoff.transport:
++            handoff.ownership_lost = True
++            raise NativeCompletionError("guarded distribution transport changed")
++        try:
++            dynamic = getattr(transport, "dynamic_mode", False)
++            if not dynamic:
++                current = transport.getPieceForDistributionDrop()
++        except Exception as exc:
++            handoff.ownership_lost = True
++            raise NativeCompletionError("guarded distribution drop ownership read failed") from exc
++        if dynamic or current is not handoff.piece:
++            handoff.ownership_lost = True
++            raise NativeCompletionError("guarded distribution drop ownership changed")
++        return handoff
++
+     def blocks_admission(self) -> bool:
+         return self._handoff is not None and (
+             not self._handoff.admission_released or self._handoff.ownership_lost)
+diff --git a/software/sorter/backend/subsystems/distribution/sending.py b/software/sorter/backend/subsystems/distribution/sending.py
+index 6f20d7be5afdc27608114f34c1d0edb7fd881edb..af91ae2f59cd5cdfb403f6819414bb83cae42316 100644
+--- a/software/sorter/backend/subsystems/distribution/sending.py
++++ b/software/sorter/backend/subsystems/distribution/sending.py
+@@ -58,17 +58,31 @@ class Sending(BaseState):
+             state_name,
+         )
+ 
+-    def step(self) -> Optional[DistributionState]:
+-        now = time.time()
+-        if self.piece is None and not self._committed:
++    def step(self) -> Optional[DistributionState]:
++        now = time.time()
++        retained_guard = getattr(self.shared, "native_completion_guard", None)
++        ownership_guard = self.native_completion
++        if (retained_guard is not None
++            and (self.native_completion is not None or self._nativeCompletionPending())):
++            ownership_guard = retained_guard
++        handoff = None
++        if ownership_guard is not None:
++            try:
++                handoff = ownership_guard.check_drop_ownership(self.shared.transport)
++            except Exception as exc:
++                self._holdNative(str(exc))
++                return None
++            if (self.native_completion is not None and retained_guard is not None
++                and self.native_completion is not retained_guard):
++                self._holdNative("guarded completion adapter differs from retained owner")
++                return None
++        if self.piece is None and not self._committed:
+             if self.start_time <= 0.0:
+                 self.start_time = now
+             transport = self.shared.transport
+-            self.piece = (
+-                transport.getPieceForDistributionDrop()
+-                if transport is not None
+-                else None
+-            )
++            self.piece = (handoff.piece if handoff is not None else
++                          transport.getPieceForDistributionDrop() if transport is not None
++                          else None)
+             if self.piece is None:
+                 elapsed_ms = (now - self.start_time) * 1000
+                 self._setOccupancyState("sending.wait_drop_piece")
+@@ -241,21 +255,8 @@ class Sending(BaseState):
+         return DistributionState.IDLE
+ 
+     def _requireCurrentNativeDrop(self, handoff) -> None:
+-        if handoff.ownership_lost:
+-            raise RuntimeError("guarded distribution drop ownership was lost")
+-        transport = self.shared.transport
+-        if (transport is None or transport is not handoff.transport
+-            or getattr(transport, "dynamic_mode", False)):
+-            handoff.ownership_lost = True
+-            raise RuntimeError("guarded distribution drop ownership changed")
+-        try:
+-            current = transport.getPieceForDistributionDrop()
+-        except Exception:
+-            handoff.ownership_lost = True
+-            raise
+-        if current is not self.piece:
+-            handoff.ownership_lost = True
+-            raise RuntimeError("guarded distribution drop ownership changed")
++        if self.native_completion.check_drop_ownership(self.shared.transport) is not handoff:
++            raise RuntimeError("guarded completion handoff changed")
+ 
+     def _nativeCompletionPending(self) -> bool:
+         guard = getattr(self.shared, "native_completion_guard", None)
+diff --git a/software/sorter/backend/tests/test_smart_bins_sending.py b/software/sorter/backend/tests/test_smart_bins_sending.py
+index 9ad51ca873511ac09c5ca79ed468084292e0b77f..171c83511555df410db1bfe5a01b85a4236f247a 100644
+--- a/software/sorter/backend/tests/test_smart_bins_sending.py
++++ b/software/sorter/backend/tests/test_smart_bins_sending.py
+@@ -526,6 +526,8 @@ def test_missing_sending_adapter_holds_guarded_drop(context, identity):
+     assert not ctx.shared.distribution_ready
+     assert ctx.bench.claim()["state"] == "EXIT_CONFIRMED"
+     assert not ctx.bench.runtime.can_admit
++    if identity == "valid":
++        assert not ctx.adapter.require_handoff(ctx.piece).ownership_lost
+ 
+ 
+ def test_missing_adapter_and_drop_does_not_reopen_guarded_gate(context):
+@@ -543,6 +545,151 @@ def test_missing_adapter_and_drop_does_not_reopen_guarded_gate(context):
+     assert not ctx.bench.runtime.can_admit
+ 
+ 
++@pytest.mark.parametrize("loss", ["drop", "transport_absent", "transport_replaced"])
++def test_first_observed_missing_drop_latches_original_handoff(context, loss):
++    ctx = context
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    original_transport = ctx.shared.transport
++    if loss == "drop":
++        original_transport.advanceTransport()
++    elif loss == "transport_absent":
++        ctx.shared.transport = None
++    else:
++        replacement = ClassificationChannelTransport()
++        replacement.placePieceForDistribution(ctx.piece)
++        replacement.advanceTransport()
++        ctx.shared.transport = replacement
++    assert ctx.sending.piece is None
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    assert handoff.ownership_lost
++    ctx.shared.transport = original_transport
++    if loss == "drop":
++        original_transport.placePieceForDistribution(ctx.piece)
++        original_transport.advanceTransport()
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.adapter.require_handoff(ctx.piece) is handoff
++    assert ctx.bench.claim()["state"] == "EXIT_CONFIRMED"
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++    assert progress.calls == 0
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_first_ownership_read_failure_latches_handoff(context, monkeypatch):
++    ctx = context
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    transport = ctx.shared.transport
++    original = transport.getPieceForDistributionDrop
++
++    def unavailable():
++        raise OSError("drop sensor read unavailable")
++
++    monkeypatch.setattr(transport, "getPieceForDistributionDrop", unavailable)
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    assert handoff.ownership_lost
++    monkeypatch.setattr(transport, "getPieceForDistributionDrop", original)
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.adapter.require_handoff(ctx.piece) is handoff
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_first_observed_wrong_drop_survives_fresh_sending(context):
++    ctx = context
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    ctx.shared.transport.placePieceForDistribution(KnownObject())
++    ctx.shared.transport.advanceTransport()
++    assert ctx.sending.piece is None
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    assert handoff.ownership_lost
++    ctx.shared.transport.placePieceForDistribution(ctx.piece)
++    ctx.shared.transport.advanceTransport()
++    ctx.sending = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events,
++                          native_completion=ctx.adapter)
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.adapter.require_handoff(ctx.piece) is handoff
++    assert ctx.bench.claim()["state"] == "EXIT_CONFIRMED"
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++    assert progress.calls == 0
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_missing_adapter_latches_missing_drop_across_restoration(context):
++    ctx = context
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    ctx.shared.transport.advanceTransport()
++    ctx.sending = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events)
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    assert handoff.ownership_lost
++    ctx.shared.transport.placePieceForDistribution(ctx.piece)
++    ctx.shared.transport.advanceTransport()
++    ctx.sending.native_completion = ctx.adapter
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.adapter.require_handoff(ctx.piece) is handoff
++    assert ctx.bench.claim()["state"] == "EXIT_CONFIRMED"
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_waiting_without_native_handoff_does_not_latch_loss(context):
++    ctx = context
++    ctx.clock[0] = time.time() + 2
++    assert ctx.adapter._handoff is None
++    assert ctx.sending.step() is None
++    assert ctx.adapter._handoff is None
++    assert not ctx.adapter.blocks_admission()
++    ctx.shared.set_distribution_gate(True, reason=None)
++    ctx.sending = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events,
++                          native_completion=ctx.adapter)
++    ctx.discharge()
++    assert not ctx.adapter.require_handoff(ctx.piece).ownership_lost
++    assert ctx.settle() is DistributionState.IDLE
++    assert ctx.counts()[:2] == (1, 1)
++
++
++def test_released_native_guard_does_not_claim_later_ordinary_drop(context):
++    ctx = context
++    ctx.discharge()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.settle() is DistributionState.IDLE
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    assert handoff.admission_released and not handoff.ownership_lost
++    ordinary = KnownObject(part_id="raw-3001", color_id="raw-5",
++                           category_id="A", stage=PieceStage.distributing)
++    ctx.shared.transport.placePieceForDistribution(ordinary)
++    ctx.shared.transport.advanceTransport()
++    sender = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events)
++    assert sender.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert sender.step() is DistributionState.IDLE
++    assert ordinary.stage is PieceStage.distributed
++    assert not handoff.ownership_lost
++
++
+ def test_unguarded_drop_still_uses_legacy_sending(context):
+     ctx = context
+     ordinary = KnownObject(part_id="raw-3001", color_id="raw-5",
