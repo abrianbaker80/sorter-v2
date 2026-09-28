@@ -3,24 +3,6 @@
 	import { getMachinesContext } from '$lib/machines/context';
 	import { onMount } from 'svelte';
 
-	type MachineSetupKey = 'standard_carousel' | 'classification_channel' | 'manual_carousel';
-
-	type CarouselLiveStatus = {
-		live_available: boolean;
-		endstop_triggered: boolean | null;
-		raw_endstop_high: boolean | null;
-		endstop_active_high: boolean | null;
-		endstop_error?: string;
-		stepper_direction_inverted: boolean | null;
-		current_position_degrees: number | null;
-		stepper_microsteps: number | null;
-		stepper_stopped: boolean | null;
-		bound_stepper_name: string | null;
-		bound_stepper_channel: number | null;
-		digital_inputs: Array<{ channel: number; raw_high: boolean }>;
-		home_pin_channel: number | null;
-	};
-
 	type ChuteLiveStatus = {
 		live_available: boolean;
 		endstop_triggered: boolean | null;
@@ -42,33 +24,8 @@
 
 	let showEndstopWiringHelp = $state(false);
 	let loadedMachineKey = $state('');
-	let machineSetup = $state<MachineSetupKey>('standard_carousel');
 	const systemState = $derived(manager.selectedMachine?.systemStatus?.hardware_state ?? 'standby');
 	const homingStep = $derived(manager.selectedMachine?.systemStatus?.homing_step ?? null);
-	const usesCarouselEndstop = $derived(machineSetup !== 'classification_channel');
-
-	let carouselLoading = $state(false);
-	let carouselSaving = $state(false);
-	let carouselHoming = $state(false);
-	let carouselCanceling = $state(false);
-	let carouselError = $state<string | null>(null);
-	let carouselStatus = $state('');
-	let carouselEndstopActiveHigh = $state(false);
-	let carouselLive = $state<CarouselLiveStatus>({
-		live_available: false,
-		endstop_triggered: null,
-		raw_endstop_high: null,
-		endstop_active_high: null,
-		stepper_direction_inverted: null,
-		current_position_degrees: null,
-		stepper_microsteps: null,
-		stepper_stopped: null,
-		bound_stepper_name: null,
-		bound_stepper_channel: null,
-		digital_inputs: [],
-		home_pin_channel: null
-	});
-
 	let chuteLoading = $state(false);
 	let chuteSaving = $state(false);
 	let chuteHoming = $state(false);
@@ -121,36 +78,6 @@
 		return 'border-border bg-bg text-text-muted';
 	}
 
-	async function loadCarouselSettings() {
-		carouselLoading = true;
-		try {
-			const [configRes, liveRes] = await Promise.all([
-				fetch(`${currentBackendBaseUrl()}/api/hardware-config/carousel`),
-				fetch(`${currentBackendBaseUrl()}/api/hardware-config/carousel/live`)
-			]);
-			let configuredHomePinChannel: number | null = null;
-			if (configRes.ok) {
-				const configPayload = await configRes.json();
-				carouselEndstopActiveHigh = Boolean(configPayload?.endstop_active_high ?? false);
-				configuredHomePinChannel = optionalChannel(configPayload?.home_pin_channel);
-			}
-			if (liveRes.ok) {
-				const livePayload = (await liveRes.json()) as CarouselLiveStatus;
-				carouselLive = {
-					...livePayload,
-					home_pin_channel: livePayload.home_pin_channel ?? configuredHomePinChannel
-				};
-				if (typeof livePayload.endstop_active_high === 'boolean') {
-					carouselEndstopActiveHigh = livePayload.endstop_active_high;
-				}
-			} else {
-				carouselLive = { ...carouselLive, home_pin_channel: configuredHomePinChannel };
-			}
-		} finally {
-			carouselLoading = false;
-		}
-	}
-
 	async function loadChuteSettings() {
 		chuteLoading = true;
 		try {
@@ -183,72 +110,6 @@
 		}
 	}
 
-	async function loadAll() {
-		await Promise.all([loadMachineSetup(), loadCarouselSettings(), loadChuteSettings()]);
-	}
-
-	async function loadMachineSetup() {
-		try {
-			const res = await fetch(`${currentBackendBaseUrl()}/api/machine-setup`);
-			if (!res.ok) return;
-			const payload = await res.json();
-			machineSetup =
-				payload?.setup === 'classification_channel' || payload?.setup === 'manual_carousel'
-					? payload.setup
-					: 'standard_carousel';
-		} catch {
-			machineSetup = 'standard_carousel';
-		}
-	}
-
-	async function saveCarouselSettings() {
-		carouselSaving = true;
-		carouselError = null;
-		carouselStatus = '';
-		try {
-			const res = await fetch(`${currentBackendBaseUrl()}/api/hardware-config/carousel`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					endstop_active_high: carouselEndstopActiveHigh,
-					stepper_direction_inverted: Boolean(carouselLive.stepper_direction_inverted ?? false)
-				})
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const payload = await res.json();
-			carouselStatus = payload?.message ?? 'Carousel settings saved.';
-			await loadCarouselSettings();
-		} catch (e: any) {
-			carouselError = e.message ?? 'Failed to save carousel settings';
-		} finally {
-			carouselSaving = false;
-		}
-	}
-
-	async function homeCarousel() {
-		carouselHoming = true;
-		carouselError = null;
-		carouselStatus = '';
-		try {
-			const res = await fetch(`${currentBackendBaseUrl()}/api/hardware-config/carousel/home`, {
-				method: 'POST'
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const payload = await res.json();
-			carouselStatus = payload?.message ?? 'Carousel homed.';
-			await loadCarouselSettings();
-		} catch (e: any) {
-			carouselError = e.message ?? 'Failed to home carousel';
-		} finally {
-			carouselHoming = false;
-		}
-	}
-
-	async function flipCarouselPolarity() {
-		carouselEndstopActiveHigh = !carouselEndstopActiveHigh;
-		await saveCarouselSettings();
-	}
-
 	async function flipChutePolarity() {
 		chuteEndstopActiveHigh = !chuteEndstopActiveHigh;
 		await saveChuteSettings();
@@ -275,26 +136,6 @@
 			chuteError = e.message ?? 'Failed to flip chute direction';
 		} finally {
 			chuteSaving = false;
-		}
-	}
-
-	async function cancelCarousel() {
-		carouselCanceling = true;
-		carouselError = null;
-		carouselStatus = '';
-		try {
-			const res = await fetch(
-				`${currentBackendBaseUrl()}/api/hardware-config/carousel/home/cancel`,
-				{ method: 'POST' }
-			);
-			if (!res.ok) throw new Error(await res.text());
-			const payload = await res.json();
-			carouselStatus = payload?.message ?? 'Carousel motion canceled.';
-			await loadCarouselSettings();
-		} catch (e: any) {
-			carouselError = e.message ?? 'Failed to cancel carousel motion';
-		} finally {
-			carouselCanceling = false;
 		}
 	}
 
@@ -378,13 +219,12 @@
 			'__local__';
 		if (machineKey === loadedMachineKey) return;
 		loadedMachineKey = machineKey;
-		void loadAll();
+		void loadChuteSettings();
 	});
 
 	onMount(() => {
 		const interval = setInterval(() => {
 			if (systemState === 'ready' || systemState === 'initialized') {
-				void loadCarouselSettings();
 				void loadChuteSettings();
 			}
 		}, 1200);
@@ -421,19 +261,7 @@
 	<div class="setup-panel px-4 py-3 text-sm text-text-muted">
 		<div class="flex flex-wrap items-start justify-between gap-3">
 			<div class="min-w-0 flex-1">
-				{#if usesCarouselEndstop}
-					Each axis needs its homing endstop verified before the carousel and chute can be homed
-					automatically. The carousel endstop is wired to the <span class="font-medium text-text"
-						>Z-STOP</span
-					>
-					header on the SKR Pico feeder board, the chute endstop to the
-					<span class="font-medium text-text">E0-STOP</span> header on the SKR Pico distributor
-					board.
-				{:else}
-					The selected <span class="font-medium text-text">Classification Channel</span> setup
-					does not use a carousel home sensor. Only the chute endstop needs to be verified here;
-					the former carousel motor port is treated as the classification-channel drive.
-				{/if}
+				Verify the chute endstop before homing.
 			</div>
 			<button
 				onclick={() => (showEndstopWiringHelp = !showEndstopWiringHelp)}
@@ -448,8 +276,7 @@
 		<div class="setup-panel px-4 py-4 text-sm text-text">
 			<div class="text-sm font-semibold text-text">SKR Pico endstop wiring</div>
 			<div class="mt-1 text-sm text-text-muted">
-				Reference for the SKR Pico V1.0 endstop headers used by the feeder and distributor
-				boards.
+				Reference for the SKR Pico V1.0 endstop header used by the distributor board.
 			</div>
 			<div class="mt-3 grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
 				<a
@@ -469,12 +296,6 @@
 					<div class="font-semibold tracking-wide text-text uppercase">Sorter mapping</div>
 					<table class="w-full border-collapse">
 						<tbody>
-							{#if usesCarouselEndstop}
-								<tr class="border-b border-border">
-									<td class="py-1 pr-3 text-text-muted">Carousel endstop</td>
-									<td class="py-1 font-medium text-text">Feeder · Z-STOP</td>
-								</tr>
-							{/if}
 							<tr>
 								<td class="py-1 pr-3 text-text-muted">Chute endstop</td>
 								<td class="py-1 font-medium text-text">Distributor · E0-STOP</td>
@@ -486,120 +307,7 @@
 		</div>
 	{/if}
 
-	<div class="grid gap-4 xl:grid-cols-2">
-		{#if usesCarouselEndstop}
-			<div class="setup-panel p-4">
-				<div class="flex items-start justify-between gap-3">
-					<div>
-						<div class="text-sm font-semibold text-text">Carousel endstop and home</div>
-						<div class="mt-1 text-sm text-text-muted">
-							Confirm the optical endstop polarity, then home and calibrate the carousel.
-						</div>
-					</div>
-				</div>
-
-				<div class="mt-4 text-sm text-text-muted">
-					<span class="font-medium text-text">Step 1:</span> Manually trigger the carousel endstop
-					(block the optical sensor at the home position) and confirm that the indicator below
-					flips to <span class="font-medium text-text">Triggered</span>. If it stays
-					<span class="font-medium text-text">Not triggered</span>, flip the polarity below — by
-					default the input is treated as active-low which matches most SKR Pico wirings.
-				</div>
-
-				<div
-					class={`mt-3 flex items-center justify-between border px-4 py-3 transition-colors ${endstopStatusClass(
-						carouselLive.endstop_triggered,
-						carouselLive.endstop_error
-					)}`}
-				>
-					<span class="text-xs tracking-[0.16em] uppercase">Carousel endstop</span>
-					<span class="text-base font-semibold">
-						{endstopStatusLabel(
-							carouselLive.endstop_triggered,
-							carouselLive.endstop_error,
-							carouselLive.live_available
-						)}
-					</span>
-				</div>
-				<div class="mt-1 text-sm text-text-muted">
-					Input channel
-					<span class="font-medium text-text"> {carouselLive.home_pin_channel ?? '--'}</span>
-					{#if carouselLive.raw_endstop_high !== null}
-						· raw signal
-						<span class="font-medium text-text">
-							{carouselLive.raw_endstop_high ? 'HIGH' : 'LOW'}
-						</span>
-					{/if}
-				</div>
-				{#if carouselLive.endstop_error}
-					<div class="mt-2 border border-danger bg-primary-light px-3 py-2 text-sm text-[#7A0A0B]">
-						Live endstop read failed: {carouselLive.endstop_error}
-					</div>
-				{/if}
-
-				<div class="mt-3">
-					<button
-						onclick={flipCarouselPolarity}
-						disabled={carouselSaving}
-						class="setup-button-secondary inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-text transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-					>
-						{carouselSaving
-							? 'Flipping…'
-							: 'Trigger state looks inverted? Flip polarity'}
-					</button>
-					<div class="mt-1 text-sm text-text-muted">
-						Currently treating the input as
-						<span class="font-medium text-text"
-							>{carouselEndstopActiveHigh ? 'active-high' : 'active-low'}</span
-						>.
-					</div>
-				</div>
-
-				<div class="mt-4 flex flex-wrap gap-2">
-					<button
-						onclick={homeCarousel}
-						disabled={!(systemState === 'ready' || systemState === 'initialized') || carouselHoming}
-						class="border border-success bg-success px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-success/90 disabled:cursor-not-allowed disabled:opacity-60"
-					>
-						{carouselHoming ? 'Homing...' : 'Home carousel'}
-					</button>
-					<button
-						onclick={cancelCarousel}
-						disabled={carouselCanceling}
-						class="setup-button-secondary px-3 py-2 text-sm text-text transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-					>
-						{carouselCanceling ? 'Stopping...' : 'Stop motion'}
-					</button>
-				</div>
-
-				{#if carouselError}
-					<div
-						class="mt-3 border border-danger bg-primary-light px-3 py-2 text-sm text-[#7A0A0B]"
-					>
-						{carouselError}
-					</div>
-				{:else if carouselStatus}
-					<div
-						class="mt-3 border border-success bg-[#D4EDDA] px-3 py-2 text-sm font-medium text-success"
-					>
-						{carouselStatus}
-					</div>
-				{/if}
-			</div>
-		{:else}
-			<div class="setup-panel p-4">
-				<div class="text-sm font-semibold text-text">Classification channel transport</div>
-				<div class="mt-1 text-sm text-text-muted">
-					This setup reuses the former carousel motor port as the classification-channel drive.
-					There is no carousel endstop or carousel homing step in this topology.
-				</div>
-				<div class="mt-3 border border-border bg-bg px-4 py-3 text-sm text-text-muted">
-					Use the motion-direction step to confirm the transport direction, then run the normal
-					system home so only the chute is homed.
-				</div>
-			</div>
-		{/if}
-
+	<div class="grid gap-4">
 		<div class="setup-panel p-4">
 			<div class="flex items-start justify-between gap-3">
 				<div>

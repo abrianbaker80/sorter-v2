@@ -14,7 +14,6 @@
 		cameraRoles,
 		roleLabels,
 		roleDescriptions,
-		optionalRoles,
 		roleSelections,
 		reviewedZones,
 		tunedPictures,
@@ -32,7 +31,6 @@
 		cameraRoles: string[];
 		roleLabels: Record<string, string>;
 		roleDescriptions: Record<string, string>;
-		optionalRoles: Set<string>;
 		roleSelections: Record<string, string>;
 		reviewedZones: Record<string, boolean>;
 		tunedPictures: Record<string, boolean>;
@@ -58,7 +56,7 @@
 				role={role as any}
 				label={roleLabels[role]}
 				description={roleDescriptions[role]}
-				required={!optionalRoles.has(role)}
+				required={true}
 				selectedKey={roleSelections[role] ?? '__none__'}
 				selectedLabel={selectedCameraLabel(roleSelections[role])}
 				zoneReviewed={Boolean(reviewedZones[role])}

@@ -18,7 +18,7 @@
 	import ResizeHandle from '$lib/components/ResizeHandle.svelte';
 	import SidebarBottomTabs from '$lib/components/SidebarBottomTabs.svelte';
 	import { buildDashboardFeedCrops, type DashboardFeedCrop } from '$lib/dashboard/crops';
-	import { AlertTriangle, Check, Eye, EyeOff, Info, RotateCcw, X } from 'lucide-svelte';
+	import { AlertTriangle, Check, Info, RotateCcw, X } from 'lucide-svelte';
 
 	const SIDEBAR_MIN = 300;
 	const SIDEBAR_MAX = 900;
@@ -32,11 +32,6 @@
 	let sidebar_width = $state(SIDEBAR_DEFAULT);
 	let startSystemError = $state<string | null>(null);
 	let startSystemPending = $state(false);
-	let classification_view = $state<'top' | 'bottom'>('top');
-	let classification_layer = $state<'raw' | 'annotated'>('annotated');
-	let machineSetup = $state<'standard_carousel' | 'classification_channel' | 'manual_carousel'>(
-		'standard_carousel'
-	);
 	let exitIncidentActionPending = $state(false);
 	let exitIncidentActionError = $state<string | null>(null);
 	let stallIncidentActionPending = $state(false);
@@ -53,14 +48,6 @@
 	}
 
 	const camera_layout = $derived(machine.machine?.sorterState?.camera_layout ?? 'split_feeder');
-	const cameraConfig = $derived<Record<string, number | string | null>>(
-		machine.machine?.camerasConfig?.cameras ?? {}
-	);
-	const c4CameraRole = $derived(
-		machineSetup === 'classification_channel' || isConfigured('classification_channel')
-			? 'classification_channel'
-			: 'carousel'
-	);
 	const hardwareState = $derived(machine.machine?.systemStatus?.hardware_state ?? 'standby');
 	const hardwareError = $derived(
 		startSystemError ?? machine.machine?.systemStatus?.hardware_error ?? null
@@ -106,37 +93,11 @@
 		}
 	}
 
-	function isConfigured(role: string): boolean {
-		const value = cameraConfig[role];
-		if (typeof value === 'number') return Number.isFinite(value) && value >= 0;
-		if (typeof value === 'string') {
-			const normalized = value.trim().toLowerCase();
-			return normalized.length > 0 && !['none', 'null', '-1'].includes(normalized);
-		}
-		return false;
-	}
-
 	function cropFor(role: string): DashboardFeedCrop | null {
-		if (role === 'carousel' && machineSetup === 'classification_channel') {
+		if (role === 'classification_channel' || role === 'carousel') {
 			return dashboardCrops.classification_channel ?? dashboardCrops.carousel ?? null;
 		}
 		return dashboardCrops[role] ?? null;
-	}
-
-	function preferredClassificationCamera(
-		hasTop: boolean,
-		hasBottom: boolean
-	): 'classification_top' | 'classification_bottom' | null {
-		if (classification_view === 'bottom' && hasBottom) return 'classification_bottom';
-		if (hasTop) return 'classification_top';
-		if (hasBottom) return 'classification_bottom';
-		return null;
-	}
-
-	function classificationTabClass(active: boolean): string {
-		return active
-			? 'border-primary text-text'
-			: 'border-transparent text-text-muted hover:text-text';
 	}
 
 	function stepperStallIncident(value: unknown): Record<string, unknown> | null {
@@ -454,7 +415,7 @@
 			incident?.kind === 'distribution_servo_bus_offline'
 		)
 			return 'Detail';
-		if (incident?.kind === 'feeder_jam') return 'Overlap';
+		if (incident?.kind === 'feeder_jam') return 'Nudges';
 		return 'State';
 	}
 
@@ -481,7 +442,7 @@
 			return incidentString(incident, 'reason', '-');
 		}
 		if (incident?.kind === 'feeder_jam') {
-			return `${((incidentNumber(incident, 'overlap_ratio') ?? 0) * 100).toFixed(0)}%`;
+			return String(incidentNumber(incident, 'nudge_attempts') ?? '-');
 		}
 		return incidentString(incident, 'stalled_state', '-');
 	}
@@ -523,23 +484,6 @@
 		}
 	}
 
-	async function loadMachineSetup(baseUrl: string) {
-		try {
-			const res = await fetch(`${baseUrl}/api/machine-setup`);
-			if (!res.ok) return;
-			const payload = await res.json();
-			if (
-				payload?.setup === 'classification_channel' ||
-				payload?.setup === 'manual_carousel' ||
-				payload?.setup === 'standard_carousel'
-			) {
-				machineSetup = payload.setup;
-			}
-		} catch {
-			// ignore transient shell fetch issues
-		}
-	}
-
 	// A brand-new machine should open on the setup wizard, not an empty Dashboard.
 	// Once per browser session, so Dashboard stays reachable while setting up.
 	async function openSetupIfNew(baseUrl: string) {
@@ -564,7 +508,6 @@
 		if (cropBaseUrl === baseUrl) return;
 		cropBaseUrl = baseUrl;
 		void fetchDashboardCrops(baseUrl);
-		void loadMachineSetup(baseUrl);
 		void openSetupIfNew(baseUrl);
 	});
 
@@ -572,16 +515,11 @@
 		feeder: 'Feeder',
 		c_channel_2: 'C-Channel 2',
 		c_channel_3: 'C-Channel 3',
-		carousel: 'Carousel',
-		classification_channel: 'Classification Channel',
-		classification_top: 'Classification Top',
-		classification_bottom: 'Classification Bottom'
+		carousel: 'Classification Channel',
+		classification_channel: 'Classification Channel'
 	};
 
 	function cameraLabel(role: string): string {
-		if (role === 'carousel' && machineSetup === 'classification_channel') {
-			return 'Classification Channel';
-		}
 		return CAMERA_LABELS[role] ?? role;
 	}
 
@@ -589,7 +527,6 @@
 		if (machine.machine) {
 			const baseUrl = currentBackendBaseUrl();
 			void fetchDashboardCrops(baseUrl);
-			void loadMachineSetup(baseUrl);
 		}
 	});
 </script>
@@ -602,13 +539,6 @@
 		{#if machine.machine}
 			<div class="flex h-[calc(100vh-7rem)] min-h-0 gap-3">
 				{#if camera_layout === 'split_feeder'}
-					{@const uses_chamber = machineSetup !== 'classification_channel'}
-					{@const has_cls_top = uses_chamber && isConfigured('classification_top')}
-					{@const has_cls_bottom = uses_chamber && isConfigured('classification_bottom')}
-					{@const classification_camera = preferredClassificationCamera(
-						has_cls_top,
-						has_cls_bottom
-					)}
 					<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
 						<div class="flex min-h-0 flex-1 gap-3">
 							<div class="min-w-0 flex-1">
@@ -639,9 +569,9 @@
 						<div class="flex min-h-0 flex-1 gap-3">
 							<div class="min-w-0 flex-1">
 								<CameraFeed
-									camera={c4CameraRole}
-									label={cameraLabel(c4CameraRole)}
-									crop={cropFor(c4CameraRole)}
+									camera="classification_channel"
+									label={cameraLabel('classification_channel')}
+									crop={cropFor('classification_channel')}
 									controls={['annotations', 'zones', 'crop', 'fullscreen']}
 								>
 									{#snippet headerActions()}
@@ -649,155 +579,18 @@
 									{/snippet}
 								</CameraFeed>
 							</div>
-							{#if classification_camera}
-								<div class="min-w-0 flex-1">
-									<div class="setup-card-shell flex h-full min-h-0 flex-col border">
-										<div
-											class="setup-card-header flex items-center justify-between px-3 py-2 text-sm"
-										>
-											<span class="font-medium text-text">Classification</span>
-											<div class="flex items-center gap-2">
-												{#if has_cls_top && has_cls_bottom}
-													<div class="flex items-center gap-3 text-xs font-medium">
-														<button
-															type="button"
-															onclick={() => (classification_view = 'top')}
-															class={`border-b-2 pb-1 transition-colors ${classificationTabClass(classification_view === 'top')}`}
-														>
-															Top
-														</button>
-														<button
-															type="button"
-															onclick={() => (classification_view = 'bottom')}
-															class={`border-b-2 pb-1 transition-colors ${classificationTabClass(classification_view === 'bottom')}`}
-														>
-															Bottom
-														</button>
-													</div>
-												{/if}
-												<button
-													type="button"
-													onclick={() =>
-														(classification_layer =
-															classification_layer === 'annotated' ? 'raw' : 'annotated')}
-													class="p-1 text-text transition-colors hover:bg-white/70"
-													title={classification_layer === 'annotated'
-														? 'Show raw'
-														: 'Show annotations'}
-												>
-													{#if classification_layer === 'annotated'}
-														<Eye size={14} />
-													{:else}
-														<EyeOff size={14} />
-													{/if}
-												</button>
-											</div>
-										</div>
-										<div class="min-h-0 flex-1">
-											<CameraFeed
-												camera={classification_camera}
-												label={cameraLabel(classification_camera)}
-												crop={cropFor(classification_camera)}
-												showHeader={false}
-												controls={[]}
-												bind:layer={classification_layer}
-											/>
-										</div>
-									</div>
-								</div>
-							{/if}
+
 						</div>
 					</div>
 				{:else}
-					{@const has_top = isConfigured('classification_top')}
-					{@const has_bottom = isConfigured('classification_bottom')}
-					{@const classification_camera = preferredClassificationCamera(has_top, has_bottom)}
-					{#if classification_camera && (has_top ? 1 : 0) + (has_bottom ? 1 : 0) === 1}
-						<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera="feeder"
-									label={cameraLabel('feeder')}
-									crop={cropFor('feeder')}
-									controls={['annotations', 'zones', 'crop', 'fullscreen']}
-								/>
-							</div>
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera={classification_camera}
-									label={cameraLabel(classification_camera)}
-									crop={cropFor(classification_camera)}
-									controls={['annotations', 'crop', 'fullscreen']}
-								/>
-							</div>
-						</div>
-					{:else}
-						<div class="flex min-h-0 min-w-0 flex-1 gap-3">
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera="feeder"
-									label={cameraLabel('feeder')}
-									crop={cropFor('feeder')}
-									controls={['annotations', 'zones', 'crop', 'fullscreen']}
-								/>
-							</div>
-							{#if classification_camera}
-								<div class="setup-card-shell flex min-h-0 flex-1 flex-col border">
-									<div
-										class="setup-card-header flex items-center justify-between px-3 py-2 text-sm"
-									>
-										<span class="font-medium text-text">Classification</span>
-										<div class="flex items-center gap-2">
-											{#if has_top && has_bottom}
-												<div class="flex items-center gap-3 text-xs font-medium">
-													<button
-														type="button"
-														onclick={() => (classification_view = 'top')}
-														class={`border-b-2 pb-1 transition-colors ${classificationTabClass(classification_view === 'top')}`}
-													>
-														Top
-													</button>
-													<button
-														type="button"
-														onclick={() => (classification_view = 'bottom')}
-														class={`border-b-2 pb-1 transition-colors ${classificationTabClass(classification_view === 'bottom')}`}
-													>
-														Bottom
-													</button>
-												</div>
-											{/if}
-											<button
-												type="button"
-												onclick={() =>
-													(classification_layer =
-														classification_layer === 'annotated' ? 'raw' : 'annotated')}
-												class="p-1 text-text transition-colors hover:bg-white/70"
-												title={classification_layer === 'annotated'
-													? 'Show raw'
-													: 'Show annotations'}
-											>
-												{#if classification_layer === 'annotated'}
-													<Eye size={14} />
-												{:else}
-													<EyeOff size={14} />
-												{/if}
-											</button>
-										</div>
-									</div>
-									<div class="min-h-0 flex-1">
-										<CameraFeed
-											camera={classification_camera}
-											label={cameraLabel(classification_camera)}
-											crop={cropFor(classification_camera)}
-											showHeader={false}
-											controls={[]}
-											bind:layer={classification_layer}
-										/>
-									</div>
-								</div>
-							{/if}
-						</div>
-					{/if}
+					<div class="min-h-0 min-w-0 flex-1">
+						<CameraFeed
+							camera="feeder"
+							label={cameraLabel('feeder')}
+							crop={cropFor('feeder')}
+							controls={['annotations', 'zones', 'crop', 'fullscreen']}
+						/>
+					</div>
 				{/if}
 
 				<ResizeHandle orientation="vertical" onresize={onSidebarResize} />

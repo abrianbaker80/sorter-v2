@@ -9,39 +9,6 @@
 	import type { MachineState } from '$lib/machines/types';
 	import { settings } from '$lib/stores/settings';
 
-	type MachineSetup = 'standard_carousel' | 'classification_channel' | 'manual_carousel';
-
-	type MachineSetupCard = {
-		key: MachineSetup;
-		title: string;
-		description: string;
-		detail: string;
-	};
-
-	const MACHINE_SETUP_CARDS: MachineSetupCard[] = [
-		{
-			key: 'classification_channel',
-			title: 'Classification Channel',
-			description: 'C-Channels + Classification Channel',
-			detail:
-				'Replaces the carousel/chamber pair with a dedicated classification C-channel on the former carousel motor port.'
-		},
-		{
-			key: 'standard_carousel',
-			title: 'Carousel Setup',
-			description: 'FIDA + Carousel + Classification Chamber',
-			detail:
-				'Uses the current automatic path with C-channel feeding, carousel handoff, and chamber classification.'
-		},
-		{
-			key: 'manual_carousel',
-			title: 'Manual Carousel Feed',
-			description: 'Operator-fed carousel',
-			detail:
-				'Skips automatic feeder orchestration and waits for manual part placement into the carousel dropzone.'
-		}
-	];
-
 	// Which cameras the machine has: one over the feeder, or one per C-channel
 	// plus the classification channel. The Dashboard's camera panels follow it.
 	type CameraLayout = 'default' | 'split_feeder';
@@ -58,11 +25,6 @@
 	let nameSaving = $state(false);
 	let nameError = $state<string | null>(null);
 	let nameStatus = $state('');
-	let machineSetup = $state<MachineSetup>('classification_channel');
-	let loadingMachineSetup = $state(false);
-	let savingMachineSetup = $state(false);
-	let machineSetupError = $state<string | null>(null);
-	let machineSetupStatus = $state('');
 
 	let cameraLayout = $state<CameraLayout | null>(null);
 	let savingCameraLayout = $state(false);
@@ -122,35 +84,6 @@
 		}
 	}
 
-	function normalizeMachineSetup(value: unknown): MachineSetup {
-		return value === 'standard_carousel' || value === 'manual_carousel'
-			? value
-			: 'classification_channel';
-	}
-
-	async function loadMachineSetup() {
-		const machine = manager.selectedMachine;
-		const httpBase = machineHttpBase(machine);
-		if (!machine || !httpBase) {
-			machineSetup = 'standard_carousel';
-			return;
-		}
-
-		loadingMachineSetup = true;
-		machineSetupError = null;
-		machineSetupStatus = '';
-		try {
-			const res = await fetch(`${httpBase}/api/machine-setup`);
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			machineSetup = normalizeMachineSetup(data.setup);
-		} catch (e: any) {
-			machineSetupError = e.message ?? 'Failed to load machine setup';
-		} finally {
-			loadingMachineSetup = false;
-		}
-	}
-
 	async function loadCameraLayout() {
 		const httpBase = machineHttpBase(manager.selectedMachine);
 		if (!httpBase) return;
@@ -201,37 +134,6 @@
 		}
 	}
 
-	async function saveMachineSetup(nextSetup: MachineSetup) {
-		const machine = manager.selectedMachine;
-		const httpBase = machineHttpBase(machine);
-		if (!machine || !httpBase) {
-			machineSetupError = 'Select a connected machine before changing the machine setup.';
-			return;
-		}
-
-		savingMachineSetup = true;
-		machineSetupError = null;
-		machineSetupStatus = '';
-		try {
-			const res = await fetch(`${httpBase}/api/machine-setup`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ setup: nextSetup })
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			machineSetup = normalizeMachineSetup(data.setup);
-			machineSetupStatus =
-				data?.machine_setup?.runtime_supported === false
-					? 'Machine setup saved. Reset and re-home the machine before running. Runtime support for this experimental setup is still in progress.'
-					: 'Machine setup saved. Reset and re-home the machine before running.';
-		} catch (e: any) {
-			machineSetupError = e.message ?? 'Failed to save machine setup';
-		} finally {
-			savingMachineSetup = false;
-		}
-	}
-
 	$effect(() => {
 		const machineId = manager.selectedMachineId ?? '';
 		if (machineId !== loadedMachineId) {
@@ -240,13 +142,7 @@
 			nameSaving = false;
 			nameError = null;
 			nameStatus = '';
-			machineSetup = 'standard_carousel';
-			loadingMachineSetup = false;
-			savingMachineSetup = false;
-			machineSetupError = null;
-			machineSetupStatus = '';
 			if (machineId) {
-				void loadMachineSetup();
 				void loadCameraLayout();
 			}
 		}
@@ -358,81 +254,36 @@
 	</div>
 
 	<div>
-		<h3 class="mb-2 text-sm font-medium text-text">Machine Setup</h3>
+		<h3 class="mb-2 text-sm font-medium text-text">Camera Layout</h3>
 		{#if manager.selectedMachine}
-			<div class="flex flex-col gap-3">
-				<div class="text-xs text-text-muted">
-					Choose which physical sorter topology this machine is currently wired and built for. The
-					selected setup controls which hardware path is expected and which homing rules apply.
-				</div>
-				<div class="grid gap-2 lg:grid-cols-3">
-					{#each MACHINE_SETUP_CARDS as card}
-						<button
-							onclick={() => saveMachineSetup(card.key)}
-							disabled={loadingMachineSetup || savingMachineSetup}
-							class={`flex flex-col items-start gap-2 border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-								machineSetup === card.key
-									? 'border-primary bg-primary/10 text-text'
-									: 'border-border bg-bg text-text hover:bg-surface'
-							}`}
-						>
-							<div class="text-sm font-medium">{card.title}</div>
-							<div class="text-xs font-medium text-text">{card.description}</div>
-							<div class="text-xs text-text-muted">
-								{card.detail}
-							</div>
-						</button>
-					{/each}
-				</div>
-				{#if machineSetupError}
-					<div class="text-sm text-danger dark:text-red-400">{machineSetupError}</div>
-				{:else if machineSetupStatus}
-					<div class="text-sm text-text-muted">{machineSetupStatus}</div>
-				{:else if loadingMachineSetup}
-					<div class="text-sm text-text-muted">Loading current machine setup...</div>
-				{/if}
-
-				<div class="mt-4 flex flex-col gap-4">
-					<div>
-						<div class="mb-1.5 text-xs font-medium text-text">Camera Layout</div>
-						<div class="flex flex-wrap gap-2">
-							{#each CAMERA_LAYOUTS as option (option.key)}
-								<button
-									onclick={() => saveCameraLayout(option.key)}
-									disabled={savingCameraLayout || !inStandby}
-									class={`flex items-center gap-1.5 border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-										cameraLayout === option.key
-											? 'border-primary bg-primary/10 text-text'
-											: 'border-border bg-bg text-text hover:bg-surface'
-									}`}
-								>
-									{option.label}
-								</button>
-							{/each}
-						</div>
-						{#if cameraLayoutError}
-							<div class="mt-1 text-xs text-danger">{cameraLayoutError}</div>
-						{:else if cameraLayoutStatus}
-							<div class="mt-1 text-xs text-text-muted">{cameraLayoutStatus}</div>
-						{:else}
-							<div class="mt-1 text-xs text-text-muted">
-								Split Feeder: a camera for C-Channel 2, C-Channel 3 and the classification channel,
-								each on the Dashboard. Single Feeder: one camera over the feeder. Changing it restarts
-								the backend{inStandby ? '.' : ', so reset the machine to standby first.'}
-							</div>
-						{/if}
-					</div>
-
-					<div class="text-xs text-text-muted">
-						Changing the machine setup persists to the machine TOML and takes effect after Reset and
-						Re-Home.
-					</div>
-				</div>
+			<div class="flex flex-wrap gap-2">
+				{#each CAMERA_LAYOUTS as option (option.key)}
+					<button
+						onclick={() => saveCameraLayout(option.key)}
+						disabled={savingCameraLayout || !inStandby}
+						class={`flex items-center gap-1.5 border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+							cameraLayout === option.key
+								? 'border-primary bg-primary/10 text-text'
+								: 'border-border bg-bg text-text hover:bg-surface'
+						}`}
+					>
+						{option.label}
+					</button>
+				{/each}
 			</div>
+			{#if cameraLayoutError}
+				<div class="mt-1 text-xs text-danger">{cameraLayoutError}</div>
+			{:else if cameraLayoutStatus}
+				<div class="mt-1 text-xs text-text-muted">{cameraLayoutStatus}</div>
+			{:else}
+				<div class="mt-1 text-xs text-text-muted">
+					Split Feeder: a camera for C-Channel 2, C-Channel 3 and the classification channel,
+					each on the Dashboard. Single Feeder: one camera over the feeder. Changing it restarts
+					the backend{inStandby ? '.' : ', so reset the machine to standby first.'}
+				</div>
+			{/if}
 		{:else}
-			<div class="text-sm text-text-muted">
-				Connect to a machine before changing the machine setup.
-			</div>
+			<div class="text-sm text-text-muted">Connect to a machine to change its camera layout.</div>
 		{/if}
 	</div>
 

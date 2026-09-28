@@ -75,30 +75,21 @@
 		'c_channel_2',
 		'c_channel_3',
 		'c_channel_4',
-		'carousel',
 		'chute'
 	];
 	const ROLE_LABELS: Record<string, string> = {
 		c_channel_2: 'C-Channel 2',
 		c_channel_3: 'C-Channel 3',
-		classification_channel: 'Classification C-Channel (C4)',
-		carousel: 'Carousel',
-		classification_top: 'Classification Top',
-		classification_bottom: 'Classification Bottom'
+		classification_channel: 'Classification C-Channel (C4)'
 	};
 	const ROLE_DESCRIPTIONS: Record<string, string> = {
 		c_channel_2:
 			'Feeder path for the second C-channel. You can reuse the same camera for multiple areas.',
 		c_channel_3:
 			'Feeder path for the third C-channel. You can reuse the same camera for multiple areas.',
-		classification_channel:
-			'Classification C-channel platter. Use the dedicated C4 view when this machine runs the classification-channel setup.',
-		carousel:
-			'Carousel handoff area. This can share a camera with the feeder paths if the view covers it.',
-		classification_top: 'Required top-down classification view.',
-		classification_bottom: 'Optional crop for underside or second-pass classification.'
+		classification_channel: 'Classification C-channel platter. Use the dedicated C4 view.'
 	};
-	const OPTIONAL_ROLES = new Set(['classification_bottom']);
+	const CAMERA_ROLES = ['c_channel_2', 'c_channel_3', 'classification_channel'];
 	const WIZARD_STEPS: WizardStepDefinition[] = [
 		{
 			id: 'identity',
@@ -134,10 +125,10 @@
 		},
 		{
 			id: 'calibration',
-			title: 'Endstops and Geometry',
+			title: 'Chute Endstop and Geometry',
 			kicker: 'Step 5',
 			description:
-				'Verify each endstop polarity and the chute geometry. Homing itself runs later from the dashboard, right before a sorting run.',
+				'Verify the chute endstop polarity and geometry. Homing itself runs later from the dashboard, right before a sorting run.',
 			requiresManualConfirm: true
 		},
 		{
@@ -335,16 +326,6 @@
 		return [...entries].sort((a, b) => STEP_ORDER.indexOf(a.name) - STEP_ORDER.indexOf(b.name));
 	}
 
-	function cameraRolesForLayout(): string[] {
-		const setup = wizard?.config.machine_setup;
-		const auxiliaryRole = setup?.uses_classification_channel ? 'classification_channel' : 'carousel';
-		const roles = ['c_channel_2', 'c_channel_3', auxiliaryRole];
-		if (setup?.uses_classification_chamber ?? true) {
-			roles.push('classification_top', 'classification_bottom');
-		}
-		return roles;
-	}
-
 	function parseRouteStep(step: string | null): WizardStepId | null {
 		if (!step || !STEP_IDS.has(step as WizardStepId)) return null;
 		return step as WizardStepId;
@@ -480,7 +461,7 @@
 			case 'motion':
 				return 'Directions look correct';
 			case 'calibration':
-				return 'Endstops and geometry look correct';
+				return 'Chute endstop and geometry look correct';
 			case 'servos':
 				return 'Servo setup looks correct';
 			case 'hive':
@@ -780,13 +761,13 @@
 		cameraError = null;
 		cameraStatus = '';
 		try {
-			const changedRoles = cameraRolesForLayout().filter(
+			const changedRoles = CAMERA_ROLES.filter(
 				(role) =>
 					sourceKey(wizard?.config.camera_assignments[role] ?? null) !==
 					(roleSelections[role] ?? '__none__')
 			);
 			const payload: Record<string, number | string | null> = { layout: selectedLayout };
-			for (const role of cameraRolesForLayout()) {
+			for (const role of CAMERA_ROLES) {
 				payload[role] = parseCameraSource(roleSelections[role] ?? '__none__');
 			}
 
@@ -1040,10 +1021,9 @@
 						/>
 					{:else if activeStepId === 'cameras'}
 						<CamerasStep
-							cameraRoles={cameraRolesForLayout()}
+							cameraRoles={CAMERA_ROLES}
 							roleLabels={ROLE_LABELS}
 							roleDescriptions={ROLE_DESCRIPTIONS}
-							optionalRoles={OPTIONAL_ROLES}
 							{roleSelections}
 							{reviewedZones}
 							{tunedPictures}
