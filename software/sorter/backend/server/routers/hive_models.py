@@ -40,12 +40,9 @@ router = APIRouter(prefix="/api/hive", tags=["hive-models"])
 # never in a ``[detection.classification_channel]`` section (which would be
 # dead config nobody picks up).
 _ACTIVE_ASSIGNMENT_SLOTS: tuple[tuple[str, str | None, str, str, str], ...] = (
-    ("classification", None, "Chamber", "classification", "chamber"),
     ("feeder", "c_channel_2", "C-Channel 2", "feeder", "c_channels"),
     ("feeder", "c_channel_3", "C-Channel 3", "feeder", "c_channels"),
-    ("feeder", "carousel", "Carousel feed", "feeder", "carousel"),
     ("carousel", None, "Classification C-Channel (C4)", "carousel", "c_channels"),
-    ("carousel", None, "Carousel detect", "carousel", "carousel"),
 )
 
 
@@ -87,65 +84,11 @@ def _push_to_live_vision_manager(
         )
 
 
-def _slots_for_setup(setup_key: str | None) -> tuple[tuple[str, str | None, str, str, str], ...]:
-    """Filter the slot list to those that exist in the current machine setup.
-
-    A ``classification_channel`` machine has no carousel and no chamber, so
-    surfacing those rows would be misleading. A ``standard_carousel`` machine
-    has no C4. ``manual_carousel`` keeps the same slot set as the standard
-    setup minus the operator-managed feeder.
-    """
-    from machine_setup import get_machine_setup_definition
-
-    setup = get_machine_setup_definition(setup_key)
-    keep_chamber = setup.uses_classification_chamber
-    keep_carousel = setup.uses_carousel_transport
-    keep_c4 = setup.uses_classification_channel
-
-    visible: list[tuple[str, str | None, str, str, str]] = []
-    for slot in _ACTIVE_ASSIGNMENT_SLOTS:
-        toml_section, role, _label, _scope, group = slot
-        if toml_section == "classification" and not keep_chamber:
-            continue
-        if group == "carousel" and not keep_carousel:
-            continue
-        if toml_section == "classification_channel" and not keep_c4:
-            continue
-        # Drop the ``feeder.carousel`` role when carousel transport is gone:
-        # in classification_channel mode no piece ever lands in that slot.
-        if (
-            toml_section == "feeder"
-            and role == "carousel"
-            and not keep_carousel
-        ):
-            continue
-        visible.append(slot)
-    return tuple(visible)
-
-
-def _current_setup_key() -> str | None:
-    try:
-        from toml_config import _read_toml  # type: ignore[attr-defined]
-    except Exception:
-        return None
-    try:
-        cfg = _read_toml()
-    except Exception:
-        return None
-    raw = cfg.get("machine_setup") if isinstance(cfg, dict) else None
-    if isinstance(raw, dict):
-        candidate = raw.get("type")
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    return None
-
-
 def _collect_active_assignments() -> list[dict[str, str | None]]:
     from toml_config import getDetectionConfig
 
-    setup_key = _current_setup_key()
     items: list[dict[str, str | None]] = []
-    for scope, role, label, registry_scope, group in _slots_for_setup(setup_key):
+    for scope, role, label, registry_scope, group in _ACTIVE_ASSIGNMENT_SLOTS:
         cfg = getDetectionConfig(scope)
         if not isinstance(cfg, dict):
             algorithm = None
@@ -184,7 +127,7 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
     by_scope_changes: dict[str, dict[str, dict]] = {}
     live_pushes: list[tuple[str, str | None, str]] = []
 
-    for scope, role, label, registry_scope, _group in _slots_for_setup(_current_setup_key()):
+    for scope, role, label, registry_scope, _group in _ACTIVE_ASSIGNMENT_SLOTS:
         if registry_scope not in registry_scopes:
             skipped.append(label)
             continue
@@ -350,7 +293,7 @@ def _apply_active_assignment_to_slot(
     from toml_config import getDetectionConfig, setDetectionConfig
 
     slot = None
-    for s in _slots_for_setup(_current_setup_key()):
+    for s in _ACTIVE_ASSIGNMENT_SLOTS:
         if s[0] == target_scope and s[1] == target_role:
             slot = s
             break

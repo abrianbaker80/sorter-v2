@@ -461,10 +461,6 @@ def maybeRunSpokeHome(
     irl_config: Any,
     vision: Any,
 ) -> bool:
-    machine_setup = getattr(irl_config, "machine_setup", None)
-    if machine_setup is None or not bool(getattr(machine_setup, "uses_classification_channel", False)):
-        return False
-
     clearPiecesFromChannel(gc, irl, irl_config, vision)
 
     capture = None

@@ -1,4 +1,4 @@
-"""Router for hardware configuration endpoints (servo, chute, carousel, storage layers)."""
+"""Router for hardware configuration endpoints (servo, chute, storage layers)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ from irl.bin_layout import (
 )
 from subsystems.distribution.chute import BinAddress, CHUTE_MAX_ANGLE
 from irl.parse_user_toml import (
-    DEFAULT_CAROUSEL_HOME_PIN_CHANNEL,
     DEFAULT_CHUTE_FIRST_BIN_CENTER,
     DEFAULT_CHUTE_ENDSTOP_ACTIVE_HIGH,
     DEFAULT_CHUTE_FIRST_SECTION_OFFSET_DEG,
@@ -295,11 +294,6 @@ class ChuteVirtualBinPayload(BaseModel):
     bin_index: int
 
 
-class CarouselHardwareSettingsPayload(BaseModel):
-    endstop_active_high: bool = False
-    stepper_direction_inverted: bool = False
-
-
 class ServoSetIdPayload(BaseModel):
     new_id: int
 
@@ -402,9 +396,6 @@ class StorageLayerSettingsPayload(BaseModel):
 
 ALLOWED_STORAGE_LAYER_BIN_COUNTS = [6, 12, 18, 30]
 DEFAULT_STORAGE_LAYER_SECTION_COUNT = 6
-DEFAULT_CAROUSEL_ENDSTOP_ACTIVE_HIGH = False
-CAROUSEL_CALIBRATE_TIMEOUT_MS = 60000
-
 from server.config_helpers import (
     read_machine_params_config as _read_machine_params_config,
     toml_value as _toml_value,
@@ -748,41 +739,6 @@ def _chute_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _carousel_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    carousel = config.get("carousel", {})
-    if not isinstance(carousel, dict):
-        carousel = {}
-
-    endstop_active_high = carousel.get(
-        "endstop_active_high",
-        DEFAULT_CAROUSEL_ENDSTOP_ACTIVE_HIGH,
-    )
-    if not isinstance(endstop_active_high, bool):
-        endstop_active_high = DEFAULT_CAROUSEL_ENDSTOP_ACTIVE_HIGH
-
-    stepper_direction_inverts = config.get("stepper_direction_inverts", {})
-    if not isinstance(stepper_direction_inverts, dict):
-        stepper_direction_inverts = {}
-    stepper_direction_inverted = stepper_direction_inverts.get("carousel", False)
-    if not isinstance(stepper_direction_inverted, bool):
-        stepper_direction_inverted = False
-
-    home_pin_channel = _coerce_int(
-        carousel.get("home_pin_channel"), DEFAULT_CAROUSEL_HOME_PIN_CHANNEL
-    )
-    irl = _active_irl()
-    carousel_hw = getattr(irl, "carousel_hw", None) if irl is not None else None
-    live_home_pin_channel = _pin_channel(getattr(carousel_hw, "home_pin", None))
-    if live_home_pin_channel is not None:
-        home_pin_channel = live_home_pin_channel
-
-    return {
-        "endstop_active_high": endstop_active_high,
-        "stepper_direction_inverted": stepper_direction_inverted,
-        "home_pin_channel": home_pin_channel,
-    }
-
-
 def _storage_layer_settings_from_layout(layout: Any) -> Dict[str, Any]:
     layers: List[Dict[str, Any]] = []
     for index, layer in enumerate(getattr(layout, "layers", []), start=1):
@@ -1002,85 +958,6 @@ def _live_chute_status() -> Dict[str, Any]:
     return status
 
 
-def _live_carousel_status() -> Dict[str, Any]:
-    _, config = _read_machine_params_config()
-    carousel_settings = _carousel_settings_from_config(config)
-    endstop_active_high = bool(
-        carousel_settings.get("endstop_active_high", DEFAULT_CAROUSEL_ENDSTOP_ACTIVE_HIGH)
-    )
-    stepper_direction_inverted = bool(
-        carousel_settings.get("stepper_direction_inverted", False)
-    )
-
-    irl = _active_irl()
-    if irl is None:
-        return {
-            "live_available": False,
-            "endstop_triggered": None,
-            "raw_endstop_high": None,
-            "endstop_active_high": endstop_active_high,
-            "stepper_direction_inverted": stepper_direction_inverted,
-            "current_position_degrees": None,
-            "stepper_microsteps": None,
-            "stepper_stopped": None,
-            "bound_stepper_name": None,
-            "bound_stepper_channel": None,
-            "home_pin_channel": None,
-        }
-
-    carousel_hw = getattr(irl, "carousel_hw", None)
-    stepper = getattr(irl, "carousel_stepper", None)
-    home_pin_channel = _pin_channel(getattr(carousel_hw, "home_pin", None))
-
-    if stepper is None or carousel_hw is None:
-        return {
-            "live_available": False,
-            "endstop_triggered": None,
-            "raw_endstop_high": None,
-            "endstop_active_high": endstop_active_high,
-            "stepper_direction_inverted": stepper_direction_inverted,
-            "current_position_degrees": None,
-            "stepper_microsteps": None,
-            "stepper_stopped": None,
-            "bound_stepper_name": getattr(stepper, "hardware_name", None) if stepper else None,
-            "bound_stepper_channel": getattr(stepper, "channel", None) if stepper else None,
-            "home_pin_channel": home_pin_channel,
-        }
-
-    status: Dict[str, Any] = {
-        "live_available": True,
-        "endstop_triggered": None,
-        "raw_endstop_high": None,
-        "endstop_active_high": endstop_active_high,
-        "stepper_direction_inverted": stepper_direction_inverted,
-        "current_position_degrees": None,
-        "stepper_microsteps": None,
-        "stepper_stopped": None,
-        "bound_stepper_name": getattr(stepper, "hardware_name", None),
-        "bound_stepper_channel": getattr(stepper, "channel", None),
-        "home_pin_channel": home_pin_channel,
-    }
-
-    try:
-        status["raw_endstop_high"] = carousel_hw.raw_endstop_active
-        status["endstop_triggered"] = carousel_hw.endstop_triggered
-    except Exception as e:
-        status["endstop_error"] = str(e)
-
-    try:
-        status["current_position_degrees"] = float(stepper.position_degrees)
-        status["stepper_microsteps"] = int(stepper.position)
-    except Exception as e:
-        status["stepper_position_error"] = str(e)
-
-    try:
-        status["stepper_stopped"] = bool(stepper.stopped)
-    except Exception as e:
-        status["stepper_stopped_error"] = str(e)
-
-    return status
-
-
 def _stop_all_steppers() -> None:
     """Stop all known steppers. Raises HTTPException on failure."""
     halted: list[str] = []
@@ -1121,7 +998,6 @@ def get_hardware_config() -> Dict[str, Any]:
         "storage_layers": storage_layers,
         "servo": _servo_settings_from_config(config),
         "chute": _chute_settings_from_config(config),
-        "carousel": _carousel_settings_from_config(config),
         "issues": _hardware_issues(),
     }
 
@@ -2424,187 +2300,6 @@ def delete_chute_calibration(calibration_id: str) -> Dict[str, Any]:
         )
     deleteChuteCalibrationInstance(calibration_id)
     return {"ok": True, "calibrations": _calibrations_payload()}
-
-
-@router.get("/api/hardware-config/carousel/live")
-def get_live_carousel_status() -> Dict[str, Any]:
-    return _live_carousel_status()
-
-
-@router.get("/api/hardware-config/carousel")
-def get_carousel_hardware_config() -> Dict[str, Any]:
-    _, config = _read_machine_params_config()
-    return _carousel_settings_from_config(config)
-
-
-@router.post("/api/hardware-config/carousel")
-def save_carousel_hardware_config(
-    payload: CarouselHardwareSettingsPayload,
-) -> Dict[str, Any]:
-    endstop_active_high = bool(payload.endstop_active_high)
-    stepper_direction_inverted = bool(payload.stepper_direction_inverted)
-
-    params_path, config = _read_machine_params_config()
-    carousel_config = config.get("carousel", {})
-    if not isinstance(carousel_config, dict):
-        carousel_config = {}
-    carousel_config = {**carousel_config, "endstop_active_high": endstop_active_high}
-    config["carousel"] = carousel_config
-
-    stepper_direction_inverts = config.get("stepper_direction_inverts", {})
-    if not isinstance(stepper_direction_inverts, dict):
-        stepper_direction_inverts = {}
-    stepper_direction_inverts = {
-        **stepper_direction_inverts,
-        "carousel": stepper_direction_inverted,
-    }
-    config["stepper_direction_inverts"] = stepper_direction_inverts
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}")
-
-    live_irl = _active_irl()
-    if live_irl is not None:
-        stepper = getattr(live_irl, "carousel_stepper", None)
-        if stepper is not None and hasattr(stepper, "set_direction_inverted"):
-            try:
-                stepper.set_direction_inverted(stepper_direction_inverted)
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Settings were saved, but live direction inversion could not be applied: {e}",
-                )
-        carousel_hw = getattr(live_irl, "carousel_hw", None)
-        if carousel_hw is not None:
-            try:
-                carousel_hw.endstop_active_high = endstop_active_high
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Settings were saved, but live carousel endstop polarity could not be applied: {e}",
-                )
-
-    return {
-        "ok": True,
-        "settings": _carousel_settings_from_config(config),
-        "status": _live_carousel_status(),
-        "message": "Carousel settings saved.",
-    }
-
-
-@router.post("/api/hardware-config/carousel/home")
-def home_carousel_to_endstop() -> Dict[str, Any]:
-    _ensure_not_homing("home the carousel")
-    irl = _active_irl()
-    if irl is None:
-        raise HTTPException(status_code=503, detail="Hardware not initialized. Open the Motion or Endstops step to power on the steppers first.")
-
-    carousel_hw = getattr(irl, "carousel_hw", None)
-    if carousel_hw is None:
-        raise HTTPException(status_code=503, detail="Carousel hardware not initialized.")
-
-    success = carousel_hw.home()
-    if not success:
-        raise HTTPException(status_code=500, detail="Carousel homing failed.")
-
-    return {
-        "ok": True,
-        "status": _live_carousel_status(),
-        "message": "Carousel homed and zeroed.",
-    }
-
-
-@router.post("/api/hardware-config/carousel/calibrate")
-def calibrate_carousel() -> Dict[str, Any]:
-    """Calibrate carousel by measuring steps for one full revolution."""
-    _ensure_not_homing("calibrate the carousel")
-    irl = _active_irl()
-    if irl is None:
-        raise HTTPException(status_code=503, detail="Hardware not initialized. Open the Motion or Endstops step to power on the steppers first.")
-
-    carousel_hw = getattr(irl, "carousel_hw", None)
-    if carousel_hw is None:
-        raise HTTPException(status_code=503, detail="Carousel hardware not initialized.")
-
-    if not carousel_hw.endstop_triggered:
-        raise HTTPException(
-            status_code=409,
-            detail="Carousel must be homed first (endstop not currently triggered).",
-        )
-
-    from subsystems.classification.carousel_hardware import BACKOFF_STEPS, HOME_SPEED_MICROSTEPS_PER_SEC
-
-    stepper = carousel_hw.stepper
-    home_pin = carousel_hw.home_pin
-
-    try:
-        stepper.enabled = True
-
-        stepper.move_steps_blocking(-BACKOFF_STEPS, timeout_ms=5000)
-
-        stepper.position = 0
-
-        stepper.home(
-            HOME_SPEED_MICROSTEPS_PER_SEC,
-            home_pin,
-            home_pin_active_high=carousel_hw.endstop_active_high,
-        )
-        start = time.monotonic()
-        while not stepper.stopped:
-            if (time.monotonic() - start) * 1000 > CAROUSEL_CALIBRATE_TIMEOUT_MS:
-                stepper.move_at_speed(0)
-                raise TimeoutError("Carousel calibration timed out.")
-            time.sleep(0.01)
-
-        if not carousel_hw.endstop_triggered:
-            raise HTTPException(
-                status_code=409,
-                detail="Calibration failed: endstop did not trigger after full rotation.",
-            )
-
-        measured_steps = abs(stepper.position)
-
-        params_path, config = _read_machine_params_config()
-        carousel_config = config.get("carousel", {})
-        if not isinstance(carousel_config, dict):
-            carousel_config = {}
-        carousel_config["steps_per_revolution"] = measured_steps
-        config["carousel"] = carousel_config
-        _write_machine_params_config(params_path, config)
-
-        stepper.steps_per_revolution = measured_steps
-        stepper.position_degrees = 0.0
-
-    except HTTPException:
-        raise
-    except TimeoutError as e:
-        raise HTTPException(status_code=504, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Calibration failed: {e}")
-
-    return {
-        "ok": True,
-        "steps_per_revolution": measured_steps,
-        "degrees": 360,
-        "status": _live_carousel_status(),
-        "message": f"Calibrated: {measured_steps} steps/revolution.",
-    }
-
-
-@router.post("/api/hardware-config/carousel/home/cancel")
-def cancel_carousel_home_to_endstop() -> Dict[str, Any]:
-    try:
-        _stop_all_steppers()
-    except HTTPException as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail)
-
-    return {
-        "ok": True,
-        "status": _live_carousel_status(),
-        "message": "Carousel homing canceled. All steppers were stopped for safety.",
-    }
 
 
 @router.post("/api/hardware-config/storage-layers")

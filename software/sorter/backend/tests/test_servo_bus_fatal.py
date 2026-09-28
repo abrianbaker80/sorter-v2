@@ -120,7 +120,6 @@ class ServoBusFatalTests(unittest.TestCase):
             profiler=_Profiler(),
             runtime_stats=self.runtime_stats,
             run_recorder=SimpleNamespace(markPaused=lambda: None, markRunning=lambda: None),
-            use_channel_bus=False,
         )
 
     def tearDown(self) -> None:

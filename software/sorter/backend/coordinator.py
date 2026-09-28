@@ -8,8 +8,7 @@ from vision import VisionManager
 from sorting_profile import mkSortingProfile
 import queue
 import time
-from machine_setup import get_machine_setup_definition
-from machine_runtime import build_machine_runtime
+from piece_transport import ClassificationChannelTransport
 from subsystems.bus import TickBus
 
 
@@ -32,43 +31,33 @@ class Coordinator:
         self.bus = TickBus()
         self.gc.runtime_stats.setBusProvider(self.bus)
         self.shared = SharedVariables(gc=gc, bus=self.bus)
-        self.feeding_mode = getattr(irl_config, "feeding_mode", "auto_channels")
-        self.machine_setup = getattr(
-            irl_config,
-            "machine_setup",
-            get_machine_setup_definition(None),
-        )
-        self.machine_runtime = build_machine_runtime(self.machine_setup.key)
-        self.manual_feed_mode = self.machine_setup.manual_feed_mode
-        self.gc.use_channel_bus = bool(
-            getattr(self.gc, "use_channel_bus", False)
-            or getattr(self.machine_setup, "uses_classification_channel", False)
-        )
         self.sorting_profile = mkSortingProfile(gc)
         self._sync_set_progress_tracker()
 
         self.distribution_layout = irl.distribution_layout
 
-        self.transport = self.machine_runtime.create_transport(
-            gc=gc,
-            event_queue=event_queue,
+        from subsystems.classification_channel.state_machine import (
+            ClassificationChannelStateMachine,
         )
-        self.shared.transport = self.transport
-        self.shared.carousel = (
-            self.transport if hasattr(self.transport, "rotate") else None
-        )
+        from subsystems.distribution.state_machine import DistributionStateMachine
+        from subsystems.feeder.state_machine import FeederStateMachine
 
-        self.distribution = self.machine_runtime.create_distribution(
-            irl=irl,
-            irl_config=irl_config,
-            gc=gc,
-            shared=self.shared,
-            sorting_profile=self.sorting_profile,
-            distribution_layout=self.distribution_layout,
-            event_queue=event_queue,
+        self.transport = ClassificationChannelTransport()
+        self.shared.transport = self.transport
+        self.distribution = DistributionStateMachine(
+            irl,
+            gc,
+            self.shared,
+            self.sorting_profile,
+            self.distribution_layout,
+            event_queue,
             vision=vision,
+            post_distribute_cooldown_s=float(
+                getattr(irl_config.classification_channel_config, "post_distribute_cooldown_s", 0.0)
+                or 0.0
+            ),
         )
-        self.classification = self.machine_runtime.create_classification(
+        self.classification = ClassificationChannelStateMachine(
             irl=irl,
             irl_config=irl_config,
             gc=gc,
@@ -77,23 +66,7 @@ class Coordinator:
             event_queue=event_queue,
             transport=self.transport,
         )
-        self.feeder = self.machine_runtime.create_feeder(
-            irl=irl,
-            irl_config=irl_config,
-            gc=gc,
-            shared=self.shared,
-            vision=vision,
-        )
-        if self.manual_feed_mode:
-            self.logger.info(
-                "Coordinator: manual carousel feed mode enabled; automatic C-channel feeding is disabled."
-            )
-        elif not self.machine_setup.runtime_supported:
-            self.logger.warning(
-                "Coordinator: machine setup %r is persisted, but runtime orchestration "
-                "is not implemented yet."
-                % self.machine_setup.key
-            )
+        self.feeder = FeederStateMachine(irl, irl_config, gc, self.shared, vision)
 
     def _sync_set_progress_tracker(self) -> None:
         existing_tracker = getattr(self.gc, "set_progress_tracker", None)
@@ -200,10 +173,7 @@ class Coordinator:
                 )
             with prof.timer("coordinator.step.feeder_ms"):
                 feeder_started = time.perf_counter()
-                if self.manual_feed_mode:
-                    prof.hit("coordinator.step.feeder_skipped.manual_feed_mode")
-                else:
-                    self.feeder.step()
+                self.feeder.step()
                 self.gc.runtime_stats.observePerfMs(
                     "coordinator.step.feeder_ms",
                     (time.perf_counter() - feeder_started) * 1000.0,

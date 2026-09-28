@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 import threading
 import time
 from typing import Any, Dict, Literal, cast
@@ -9,14 +8,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import serial.tools.list_ports
 
-from machine_setup import (
-    CLASSIFICATION_CHANNEL_SETUP,
-    MANUAL_CAROUSEL_SETUP,
-    get_machine_setup_definition,
-    get_machine_setup_options,
-    machine_setup_key_from_feeding_mode,
-    normalize_machine_setup_key,
-)
 from blob_manager import getMachineId, getMachineNickname
 from hardware.bus import MCUBus
 from hardware.firmware_flash import bootloaderPresent
@@ -26,7 +17,6 @@ from irl.config import (
 )
 from irl.parse_user_toml import (
     LOGICAL_STEPPER_BINDING_BASES,
-    loadMachineSetupConfig,
     loadStepperBindingOverrides,
 )
 from machine_platform.control_board import discover_control_boards
@@ -58,14 +48,6 @@ class StepperDirectionPayload(BaseModel):
 
 class CameraLayoutPayload(BaseModel):
     layout: Literal["default", "split_feeder"]
-
-
-class FeedingModePayload(BaseModel):
-    mode: Literal["auto_channels", "manual_carousel"]
-
-
-class MachineSetupPayload(BaseModel):
-    setup: Literal["classification_channel", "manual_carousel"]
 
 
 def _board_summary(board: Any) -> dict[str, Any]:
@@ -129,54 +111,6 @@ def _camera_assignments_complete(camera_assignments: dict[str, Any]) -> bool:
     return all(camera_assignments.get(role) is not None for role in required_roles)
 
 
-def _legacy_feeding_mode_from_config(config: Dict[str, Any]) -> str:
-    feeding = config.get("feeding", {})
-    if not isinstance(feeding, dict):
-        return "auto_channels"
-    mode = feeding.get("mode", "auto_channels")
-    if mode not in {"auto_channels", "manual_carousel"}:
-        return "auto_channels"
-    return cast(str, mode)
-
-
-def _machine_setup_key_from_config(config: Dict[str, Any]) -> str:
-    machine_setup = config.get("machine_setup", {})
-    if isinstance(machine_setup, dict):
-        setup_key = normalize_machine_setup_key(machine_setup.get("type"))
-        if setup_key is not None:
-            return setup_key
-    return machine_setup_key_from_feeding_mode(_legacy_feeding_mode_from_config(config))
-
-
-def _machine_setup_payload(setup_key: str) -> dict[str, Any]:
-    return get_machine_setup_definition(setup_key).to_dict()
-
-
-def _feeding_mode_from_config(config: Dict[str, Any]) -> str:
-    return get_machine_setup_definition(_machine_setup_key_from_config(config)).feeding_mode
-
-
-def _persist_machine_setup(config: Dict[str, Any], setup_key: str) -> Dict[str, Any]:
-    definition = get_machine_setup_definition(setup_key)
-
-    machine_setup = config.get("machine_setup", {})
-    if not isinstance(machine_setup, dict):
-        machine_setup = {}
-    config["machine_setup"] = {
-        **machine_setup,
-        "type": definition.key,
-    }
-
-    feeding = config.get("feeding", {})
-    if not isinstance(feeding, dict):
-        feeding = {}
-    config["feeding"] = {
-        **feeding,
-        "mode": definition.feeding_mode,
-    }
-    return config
-
-
 def _current_stepper_direction_payload() -> list[dict[str, Any]]:
     _, config = _read_machine_params_config()
     inverts = config.get("stepper_direction_inverts", {})
@@ -185,12 +119,10 @@ def _current_stepper_direction_payload() -> list[dict[str, Any]]:
 
     active_irl = shared_state.getActiveIRL()
     entries: list[dict[str, Any]] = []
-    logical_names = list(LOGICAL_STEPPER_BINDING_BASES.keys())
-    if _machine_setup_key_from_config(config) == CLASSIFICATION_CHANNEL_SETUP:
-        logical_names = [
-            C4_LOGICAL_STEPPER if name == C4_BACKING_STEPPER else name
-            for name in logical_names
-        ]
+    logical_names = [
+        C4_LOGICAL_STEPPER if name == C4_BACKING_STEPPER else name
+        for name in LOGICAL_STEPPER_BINDING_BASES
+    ]
 
     for logical_name in logical_names:
         attr_base = _stepper_attr_base(logical_name)
@@ -482,13 +414,10 @@ def _build_discovery_payload(
     }
     gc = shared_state.gc_ref
     try:
-        machine_setup_key = loadMachineSetupConfig(gc) if gc is not None else None
         binding_overrides = loadStepperBindingOverrides(gc) if gc is not None else {}
     except Exception:
-        machine_setup_key = None
         binding_overrides = {}
-    machine_setup = get_machine_setup_definition(machine_setup_key)
-    required_stepper_names = _requiredCanonicalStepperNames(machine_setup, binding_overrides)
+    required_stepper_names = _requiredCanonicalStepperNames(binding_overrides)
     missing_required_steppers = sorted(
         stepper_name
         for stepper_name in required_stepper_names
@@ -587,17 +516,6 @@ def _build_discovery_payload(
     }
 
 
-def _serialize_machine_profile(active_irl: Any | None) -> dict[str, Any] | None:
-    if active_irl is None:
-        return None
-    profile = getattr(active_irl, "machine_profile", None)
-    if profile is None:
-        return None
-    if is_dataclass(profile):
-        return asdict(cast(Any, profile))
-    return None
-
-
 @router.get("/api/setup-wizard/needed")
 def get_setup_wizard_needed() -> Dict[str, bool]:
     # A machine that has never been through the wizard has neither a name nor a
@@ -617,11 +535,8 @@ def get_setup_wizard_needed() -> Dict[str, bool]:
 def get_setup_wizard_summary() -> Dict[str, Any]:
     _, config = _read_machine_params_config()
     camera_assignments = _camera_assignments_from_config(config)
-    feeding_mode = _feeding_mode_from_config(config)
-    machine_setup_key = _machine_setup_key_from_config(config)
     servo_settings = _servo_settings_from_config(config)
     discovery = _discover_control_board_summary()
-    active_irl = shared_state.getActiveIRL()
 
     readiness = {
         "machine_named": bool(getMachineNickname()),
@@ -645,14 +560,9 @@ def get_setup_wizard_summary() -> Dict[str, Any]:
             "state": shared_state.hardware_state,
             "error": shared_state.hardware_error,
             "homing_step": shared_state.hardware_homing_step,
-            "machine_profile": _serialize_machine_profile(active_irl),
         },
         "config": {
             "camera_assignments": camera_assignments,
-            "feeding": {
-                "mode": feeding_mode,
-            },
-            "machine_setup": _machine_setup_payload(machine_setup_key),
             "servo": {
                 "backend": servo_settings["backend"],
                 "layer_count": servo_settings["layer_count"],
@@ -665,71 +575,6 @@ def get_setup_wizard_summary() -> Dict[str, Any]:
             "recommended_camera_layout": cameraLayout(config.get("cameras")),
         },
         "readiness": readiness,
-    }
-
-
-@router.get("/api/feeding-mode")
-def get_feeding_mode() -> Dict[str, Any]:
-    _, config = _read_machine_params_config()
-    machine_setup_key = _machine_setup_key_from_config(config)
-    return {
-        "mode": _feeding_mode_from_config(config),
-        "machine_setup": _machine_setup_payload(machine_setup_key),
-        "requires_rehome": True,
-    }
-
-
-@router.post("/api/feeding-mode")
-def set_feeding_mode(payload: FeedingModePayload) -> Dict[str, Any]:
-    params_path, config = _read_machine_params_config()
-    if payload.mode == "manual_carousel":
-        next_setup_key = MANUAL_CAROUSEL_SETUP
-    else:
-        next_setup_key = CLASSIFICATION_CHANNEL_SETUP
-
-    config = _persist_machine_setup(config, next_setup_key)
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
-
-    return {
-        "ok": True,
-        "mode": get_machine_setup_definition(next_setup_key).feeding_mode,
-        "machine_setup": _machine_setup_payload(next_setup_key),
-        "requires_rehome": True,
-    }
-
-
-@router.get("/api/machine-setup")
-def get_machine_setup() -> Dict[str, Any]:
-    _, config = _read_machine_params_config()
-    setup_key = _machine_setup_key_from_config(config)
-    return {
-        "setup": setup_key,
-        "machine_setup": _machine_setup_payload(setup_key),
-        "options": get_machine_setup_options(),
-        "requires_rehome": True,
-    }
-
-
-@router.post("/api/machine-setup")
-def set_machine_setup(payload: MachineSetupPayload) -> Dict[str, Any]:
-    params_path, config = _read_machine_params_config()
-    config = _persist_machine_setup(config, payload.setup)
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
-
-    return {
-        "ok": True,
-        "setup": payload.setup,
-        "machine_setup": _machine_setup_payload(payload.setup),
-        "options": get_machine_setup_options(),
-        "requires_rehome": True,
     }
 
 

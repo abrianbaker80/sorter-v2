@@ -19,6 +19,7 @@ COLOR_CORRECTION_ENABLED = False
 # runs, under the names Hive's control data and telemetry record them by.
 FEEDER_FLOW = "pulse_perception_rev01"
 CLASSIFICATION_CHANNEL_FLOW = "two_piece_state_machine_rev01"
+MACHINE_SETUP = "classification_channel"
 # The camera layout when machine.toml names none: a camera per C-channel plus
 # the carousel. "default" is the single feeder camera, run only when named.
 DEFAULT_CAMERA_LAYOUT = "split_feeder"
@@ -34,23 +35,15 @@ from hardware.bus import MCUBus, MCUBusError
 from hardware.cobs import DecodeError
 from hardware.sorter_interface import SorterInterface
 from machine_platform import (
-    build_machine_profile,
     build_servo_controller,
     discover_control_boards,
-)
-from machine_setup import (
-    DEFAULT_MACHINE_SETUP,
-    MachineSetupDefinition,
-    get_machine_setup_definition,
 )
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from machine_platform.control_board import ControlBoard
-    from machine_platform.machine_profile import MachineProfile
     from machine_platform.servo_controller import ServoController
     from hardware.sorter_interface import StepperMotor, ServoMotor, DigitalInputPin
-    from subsystems.classification.carousel_hardware import CarouselHardware
     from subsystems.distribution.chute import Chute
 
 from .bin_layout import (
@@ -63,7 +56,6 @@ from .bin_layout import (
 )
 from .parse_user_toml import (
     LOGICAL_STEPPER_BINDING_BASES,
-    loadMachineSetupConfig,
     loadMachineConfig,
     loadMachineSpecificParams,
     loadStepperBindingOverrides,
@@ -71,7 +63,6 @@ from .parse_user_toml import (
     loadStepperDirectionInverts,
     loadServoChannelConfig,
     loadWaveshareServoConfig,
-    loadCarouselCalibrationConfig,
     loadChuteCalibrationConfig,
     applyStepperCurrentOverride,
     applyStepperStallguard,
@@ -588,8 +579,6 @@ class IRLConfig:
     bin_layout_config: BinLayoutConfig
     feeder_config: FeederConfig
     classification_channel_config: ClassificationChannelConfig
-    feeding_mode: str
-    machine_setup: MachineSetupDefinition
 
     def __init__(self):
         self.camera_layout = DEFAULT_CAMERA_LAYOUT
@@ -598,16 +587,12 @@ class IRLConfig:
         self.carousel_camera = None
         self.feeder_config = FeederConfig()
         self.classification_channel_config = ClassificationChannelConfig()
-        self.feeding_mode = "auto_channels"
-        self.machine_setup = get_machine_setup_definition(DEFAULT_MACHINE_SETUP)
 
 
 class IRLInterface:
     carousel_stepper: "StepperMotor"
     c_channel_4_rotor_stepper: "StepperMotor"
     classification_channel_rotor_stepper: "StepperMotor"
-    carousel_home_pin: "DigitalInputPin"
-    carousel_hw: "CarouselHardware"
     chute_stepper: "StepperMotor"
     c_channel_1_rotor_stepper: "StepperMotor"
     c_channel_2_rotor_stepper: "StepperMotor"
@@ -619,14 +604,12 @@ class IRLInterface:
     interfaces: dict[str, SorterInterface]
     control_boards: dict[str, "ControlBoard"]
     servo_controller: "ServoController | None"
-    machine_profile: "MachineProfile | None"
     led_controller: "LedController | None"
 
     def __init__(self):
         self.interfaces: dict[str, SorterInterface] = {}
         self.control_boards = {}
         self.servo_controller = None
-        self.machine_profile = None
         self.led_controller = None
 
     def enableSteppers(self) -> None:
@@ -951,29 +934,12 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     from machine_toml import machine_toml_path
     from toml_config import loadTomlFile
     from .toml_migrations import applyTomlMigrations
-    feeding_mode = "auto_channels"
-    machine_setup_key = DEFAULT_MACHINE_SETUP
     raw_toml: dict[str, object] = {}
     params_path = machine_toml_path()
     if params_path.exists():
         raw_toml = loadTomlFile(params_path)
         applyTomlMigrations(raw_toml)
     camera_layout_type = cameraLayout(raw_toml.get("cameras"))
-
-    class _SilentLogger:
-        def warning(self, *args: object, **kwargs: object) -> None:
-            return None
-
-        def info(self, *args: object, **kwargs: object) -> None:
-            return None
-
-    class _SilentGlobalConfig:
-        def __init__(self) -> None:
-            self.logger = _SilentLogger()
-
-    machine_setup_key = loadMachineSetupConfig(cast(Any, _SilentGlobalConfig()), raw_toml)
-    machine_setup = get_machine_setup_definition(machine_setup_key)
-    feeding_mode = machine_setup.feeding_mode
 
     picture_settings_section = {}
     if isinstance(raw_toml, dict):
@@ -1030,8 +996,6 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
         return config
 
     irl_config.camera_layout = camera_layout_type
-    irl_config.feeding_mode = feeding_mode
-    irl_config.machine_setup = machine_setup
 
     if camera_layout_type == "split_feeder":
         # split_feeder: per-channel cameras from TOML, no single feeder or classification
@@ -1042,15 +1006,10 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
         classification_channel_source = cameras_section.get("classification_channel")
         carousel_source = (
             classification_channel_source
-            if machine_setup.key == "classification_channel"
-            and classification_channel_source is not None
+            if classification_channel_source is not None
             else cameras_section.get("carousel")
         )
-        aux_camera_role = (
-            "classification_channel"
-            if machine_setup.key == "classification_channel"
-            else "carousel"
-        )
+        aux_camera_role = "classification_channel"
 
         if isinstance(c_ch2_idx, int):
             irl_config.c_channel_2_camera = _mkCameraConfigForRole(
@@ -1211,13 +1170,7 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
             color_profile=_color_profile("classification_top"),
         )
     
-    classification_channel_setup = machine_setup.key == "classification_channel"
-    carousel_microsteps = 8 if classification_channel_setup else 16
-    carousel_speed = 4000 if classification_channel_setup else 1000
-    irl_config.carousel_stepper = mkStepperConfig(
-        default_steps_per_second=carousel_speed,
-        microsteps=carousel_microsteps,
-    )
+    irl_config.carousel_stepper = mkStepperConfig(default_steps_per_second=4000, microsteps=8)
     irl_config.c_channel_4_rotor_stepper = irl_config.carousel_stepper
     irl_config.chute_stepper = mkStepperConfig(default_steps_per_second=3000, microsteps=8)
     irl_config.c_channel_1_rotor_stepper = mkStepperConfig(default_steps_per_second=4000, microsteps=8)
@@ -1232,15 +1185,8 @@ HARDWARE_DISCOVERY_ATTEMPTS = 8
 HARDWARE_DISCOVERY_RETRY_DELAY_S = 0.75
 
 
-def _requiredCanonicalStepperNames(
-    machine_setup: MachineSetupDefinition,
-    stepper_binding_overrides: dict[str, str],
-) -> list[str]:
-    logical_required: list[str] = ["chute"]
-    if machine_setup.automatic_feeder:
-        logical_required.extend(["c_channel_1", "c_channel_2", "c_channel_3"])
-    if machine_setup.uses_carousel_transport:
-        logical_required.append("carousel")
+def _requiredCanonicalStepperNames(stepper_binding_overrides: dict[str, str]) -> list[str]:
+    logical_required = ["chute", "c_channel_1", "c_channel_2", "c_channel_3"]
     return [
         stepper_binding_overrides.get(logical, LOGICAL_STEPPER_BINDING_BASES[logical])
         for logical in logical_required
@@ -1282,13 +1228,8 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     stepper_direction_inverts = loadStepperDirectionInverts(gc, machine_specific_params)
     servo_channel_config = loadServoChannelConfig(gc, machine_specific_params)
     mcu_ports = MCUBus.enumerate_buses()
-    required_stepper_names = _requiredCanonicalStepperNames(
-        config.machine_setup, stepper_binding_overrides
-    )
-    gc.logger.info(
-        f"Required steppers for machine_setup={config.machine_setup.key}: "
-        f"{required_stepper_names}"
-    )
+    required_stepper_names = _requiredCanonicalStepperNames(stepper_binding_overrides)
+    gc.logger.info(f"Required steppers: {required_stepper_names}")
     control_boards = discover_control_boards(
         gc,
         required_stepper_names,
@@ -1442,8 +1383,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
 
     if hasattr(irl_interface, "carousel_stepper"):
         irl_interface.c_channel_4_rotor_stepper = irl_interface.carousel_stepper
-        if config.machine_setup.uses_classification_channel:
-            irl_interface.classification_channel_rotor_stepper = irl_interface.carousel_stepper
+        irl_interface.classification_channel_rotor_stepper = irl_interface.carousel_stepper
 
     _apply_stepper_software_disable(gc, irl_interface)
 
@@ -1491,15 +1431,6 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
                 servo.apply_homing_speed()
         restore_servo_states(irl_interface.servos, gc)
 
-    irl_interface.machine_profile = build_machine_profile(
-        camera_layout=config.camera_layout,
-        feeding_mode=config.feeding_mode,
-        machine_setup=config.machine_setup.key,
-        servo_backend=irl_interface.servo_controller.backend_name if irl_interface.servo_controller else "none",
-        stepper_bindings=stepper_binding_overrides,
-        stepper_direction_inverts=stepper_direction_inverts,
-        control_boards=control_boards,
-    )
 
     saved_categories = getBinCategories()
     if saved_categories is not None:
@@ -1518,29 +1449,6 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
             gc.logger.info("Loaded not-in-inventory bin flags from storage")
         else:
             gc.logger.warn("Saved not-in-inventory bin flags don't match layout, ignoring")
-
-    from subsystems.classification.carousel_hardware import CarouselHardware
-    carousel_calibration = loadCarouselCalibrationConfig(gc, machine_specific_params)
-
-    if config.machine_setup.uses_carousel_transport:
-        carousel_input_board = feeder_board or distribution_board
-        if carousel_input_board is None:
-            raise RuntimeError("No control board available for carousel homing")
-        carousel_home_pin = carousel_input_board.get_input(carousel_calibration.home_pin_channel)
-        if carousel_home_pin is None:
-            raise RuntimeError(
-                f"Carousel home input channel {carousel_calibration.home_pin_channel} is unavailable."
-            )
-        irl_interface.carousel_home_pin = carousel_home_pin
-        irl_interface.carousel_hw = CarouselHardware(
-            gc,
-            irl_interface.carousel_stepper,
-            carousel_home_pin,
-            endstop_active_high=carousel_calibration.endstop_active_high,
-        )
-    else:
-        irl_interface.carousel_home_pin = None
-        irl_interface.carousel_hw = None
 
     from subsystems.distribution.chute import Chute
 

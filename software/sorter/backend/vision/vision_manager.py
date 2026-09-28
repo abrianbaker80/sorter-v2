@@ -97,7 +97,6 @@ class FeederDynamicOverlayPath(enum.Enum):
 
 @dataclass(frozen=True)
 class VisionPathConfig:
-    uses_classification_channel_setup: bool
     feeder_tracker_roles: tuple[str, ...]
     run_auxiliary_detection: bool
     feeder_detection_path: FeederDetectionPath
@@ -275,24 +274,13 @@ class VisionManager:
         self._started = False
 
     def _buildPathConfig(self) -> VisionPathConfig:
-        irl_config = getattr(self, "_irl_config", None)
-        machine_setup = getattr(irl_config, "machine_setup", None)
-        uses_classification_channel_setup = bool(
-            machine_setup is not None
-            and getattr(machine_setup, "uses_classification_channel", False)
-        )
-        feeder_tracker_roles = (
-            ("c_channel_2", "c_channel_3", "carousel")
-            if uses_classification_channel_setup
-            else ("c_channel_2", "c_channel_3")
-        )
+        feeder_tracker_roles = ("c_channel_2", "c_channel_3", "carousel")
         # The perception service owns detection on every machine: no legacy
         # auxiliary detection, and the feeder reads object detections.
         run_auxiliary_detection = False
         feeder_detection_path = FeederDetectionPath.OBJECT_DETECTIONS
         feeder_dynamic_overlay_path = FeederDynamicOverlayPath.RAW_DETECTIONS
         return VisionPathConfig(
-            uses_classification_channel_setup=uses_classification_channel_setup,
             feeder_tracker_roles=feeder_tracker_roles,
             run_auxiliary_detection=run_auxiliary_detection,
             feeder_detection_path=feeder_detection_path,
@@ -300,7 +288,9 @@ class VisionManager:
         )
 
     def _usesClassificationChannelSetup(self) -> bool:
-        return self._path_config.uses_classification_channel_setup
+        # Every machine is a classification-channel machine; folded away with
+        # the legacy vision stack.
+        return True
 
     def _shouldRunAuxiliaryDetection(self) -> bool:
         return self._path_config.run_auxiliary_detection
@@ -434,7 +424,7 @@ class VisionManager:
         _ROLE_TO_POLY_KEY = {
             "c_channel_2": "second_channel",
             "c_channel_3": "third_channel",
-            "carousel": "classification_channel" if self._usesClassificationChannelSetup() else "carousel",
+            "carousel": "classification_channel",
         }
 
         def _feed_aliases_for_tracker_role(role: str) -> tuple[str, ...]:
@@ -1003,7 +993,7 @@ class VisionManager:
         saved: dict[str, Any] | None = None,
     ) -> bool:
         self._carousel_polygon = None
-        polygon_key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+        polygon_key = "classification_channel"
         carousel_pts = polygon_data.get(polygon_key)
         if self._usesClassificationChannelSetup():
             try:
@@ -1051,7 +1041,7 @@ class VisionManager:
         saved = getChannelPolygons()
         if saved is not None:
             polygon_data = saved.get("polygons", {})
-            polygon_key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+            polygon_key = "classification_channel"
             src_w, src_h = self._channelSavedResolution(saved, polygon_key)
             self._loadCarouselPolygon(polygon_data, source_resolution=(src_w, src_h), saved=saved)
             # Configure handoff zones right away so the tracker works even
@@ -1180,7 +1170,7 @@ class VisionManager:
                     ),
                 )
 
-    def initFeederDetection(self, *, manual_feed_mode: bool = False) -> bool:
+    def initFeederDetection(self) -> bool:
         from blob_manager import getChannelPolygons
         from subsystems.feeder.analysis import (
             channelArcCropPolygon,
@@ -1221,24 +1211,13 @@ class VisionManager:
             elif pts:
                 polys[key] = np.array(pts, dtype=np.int32)
 
-        carousel_key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+        carousel_key = "classification_channel"
         src_w, src_h = self._channelSavedResolution(saved, carousel_key)
-        carousel_ready = self._loadCarouselPolygon(
+        self._loadCarouselPolygon(
             polygon_data,
             source_resolution=(src_w, src_h),
             saved=saved,
         )
-
-        if manual_feed_mode:
-            if carousel_ready:
-                self.gc.logger.info(
-                    "Feeder detection initialized in manual carousel feed mode; channel automation stays disabled."
-                )
-            else:
-                self.gc.logger.warning(
-                    "Manual carousel feed mode is enabled, but no carousel trigger polygon is configured."
-                )
-            return carousel_ready
 
         if not polys:
             self.gc.logger.warn("Channel polygons empty. Draw them from the Settings → Zones editor.")
@@ -2037,7 +2016,7 @@ class VisionManager:
 
     def _carouselRegionCrop(self, frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
         h, w = frame.shape[:2]
-        key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+        key = "classification_channel"
         polygon = self._loadSavedPolygon(key, w, h)
         if polygon is None or len(polygon) < 3:
             if self._carousel_polygon is None or len(self._carousel_polygon) < 3:
@@ -2441,7 +2420,7 @@ class VisionManager:
             return self._channelPolygonForFrame(role, frame_shape)
 
         if scope == "carousel":
-            key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+            key = "classification_channel"
             polygon = self._loadSavedPolygon(key, w, h)
             if polygon is not None and len(polygon) >= 3:
                 return np.asarray(polygon, dtype=np.int32)

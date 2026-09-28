@@ -223,7 +223,7 @@ class Discharging(Rev01BaseState):
         if self._released:
             return
         obj = self.ctx.known_object
-        # advanceTransport (non-dynamic) shifts wait -> exit so the piece
+        # advanceTransport shifts wait -> exit so the piece
         # distribution positioned now occupies the drop slot it reads from.
         # Distribution watches that slot transition itself (Ready -> Sending) to
         # know the piece was flung. Classification does NOT touch

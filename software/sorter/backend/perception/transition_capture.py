@@ -272,10 +272,9 @@ class ControlDataCollector:
         except Exception:
             pass
         try:
-            machine_setup = getattr(self._irl_config, "machine_setup", None)
-            meta["machine_setup"] = getattr(machine_setup, "key", None)
-            from irl.config import CLASSIFICATION_CHANNEL_FLOW, FEEDER_FLOW
+            from irl.config import CLASSIFICATION_CHANNEL_FLOW, FEEDER_FLOW, MACHINE_SETUP
 
+            meta["machine_setup"] = MACHINE_SETUP
             meta["feeder_mode"] = FEEDER_FLOW
             meta["classification_mode"] = CLASSIFICATION_CHANNEL_FLOW
         except Exception:

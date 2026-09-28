@@ -204,26 +204,6 @@ def test_fresh_install_downloads_the_default_and_assigns_it_to_every_slot(
     ]
 
 
-def test_every_slot_of_a_carousel_setup_is_filled(
-    models_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from toml_config import _update_toml
-
-    _update_toml(lambda cfg: cfg.update({"machine_setup": {"type": "standard_carousel"}}))
-    monkeypatch.setattr(
-        hive_models, "HiveClient", FakeHive({"rknn": _default_item("m1", "rknn", "r5.rknn")})
-    )
-
-    default_model.DefaultModelInstaller(RecordingLogger()).run_once()
-
-    algorithm_id = "hive:hive-m1-rknn"
-    assert _assigned("classification") == algorithm_id
-    assert _assigned(*C2) == algorithm_id
-    assert _assigned(*C3) == algorithm_id
-    assert _assigned("feeder", "carousel") == algorithm_id
-    assert _assigned("carousel") == algorithm_id
-
-
 def test_only_slots_without_a_resolvable_model_are_filled(
     models_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

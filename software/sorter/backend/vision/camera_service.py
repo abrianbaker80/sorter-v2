@@ -87,15 +87,10 @@ class CameraService:
             if irl.c_channel_3_camera is not None:
                 self._add_device_feed("c_channel_3", irl.c_channel_3_camera)
             if irl.carousel_camera is not None:
-                uses_c4 = bool(
-                    getattr(getattr(irl, "machine_setup", None), "uses_classification_channel", False)
-                )
-                aux_role = "classification_channel" if uses_c4 else "carousel"
-                self._add_device_feed(aux_role, irl.carousel_camera)
-                if uses_c4:
-                    device = self._devices[aux_role]
-                    self._devices["carousel"] = device
-                    self._feeds["carousel"] = CameraFeed("carousel", device)
+                self._add_device_feed("classification_channel", irl.carousel_camera)
+                device = self._devices["classification_channel"]
+                self._devices["carousel"] = device
+                self._feeds["carousel"] = CameraFeed("carousel", device)
             # feeder alias → c_channel_2 device (fallback for code that expects "feeder")
             c2 = self._devices.get("c_channel_2")
             if c2 is not None:

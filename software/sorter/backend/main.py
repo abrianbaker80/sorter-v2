@@ -45,7 +45,6 @@ from irl.config import (
     mkIRLConfig,
     mkIRLInterface,
 )
-from subsystems.feeder.calibration import calibrateFeederChannels
 from vision import VisionManager
 from process_guard import acquire_backend_process_guard, ProcessGuardError
 from hardware.waveshare_bus_service import close_all_waveshare_bus_services
@@ -65,7 +64,6 @@ def _mkIRLInterfaceStandby(config, gc):
     irl = IRLInterface()
     irl.servos = []
     irl.distribution_layout = mkLayoutFromConfig(config.bin_layout_config)
-    irl.machine_profile = None
     return irl
 
 
@@ -631,33 +629,10 @@ def main() -> None:
         real_irl = mkIRLInterface(irl_config, gc)
         _replace_irl(real_irl)
         setHardwareRuntimeIRL(irl)
-        machine_setup = getattr(irl_config, "machine_setup", None)
-        manual_feed_mode = bool(
-            getattr(machine_setup, "manual_feed_mode", False)
-            if machine_setup is not None
-            else getattr(irl_config, "feeding_mode", "auto_channels") == "manual_carousel"
-        )
-
-        if machine_setup is not None:
-            gc.logger.info(
-                f"Machine setup selected: {machine_setup.key} "
-                f"(auto_feeder={machine_setup.automatic_feeder}, "
-                f"carousel_transport={machine_setup.uses_carousel_transport})"
-            )
         if _noPowerModeActive(gc):
             gc.logger.warning(
                 "NO_POWER_DEVELOPMENT_MODE=1: safe recovery will initialize runtime "
-                "without feeder calibration, spoke alignment, carousel homing, or chute homing."
-            )
-        if manual_feed_mode:
-            gc.logger.info(
-                "Manual carousel feed mode enabled: automatic C-channel feeding and feeder calibration are disabled."
-            )
-        elif machine_setup is not None and not machine_setup.runtime_supported:
-            gc.logger.warning(
-                "Machine setup %r is experimental. Homing rules are applied, but the "
-                "runtime is not implemented yet."
-                % machine_setup.key
+                "without spoke alignment or chute homing."
             )
 
         if gc.disable_servos:
@@ -687,67 +662,8 @@ def main() -> None:
                     gc.logger.warning(f"Failed to open servo: {e}. Continuing without initialization.")
             _checkServoBusHealth(gc, irl)
 
-        feeder_detection_ready = vision.initFeederDetection(manual_feed_mode=manual_feed_mode)
-        if manual_feed_mode:
-            if not feeder_detection_ready:
-                gc.logger.warning(
-                    "Manual carousel feed mode is enabled, but carousel trigger detection is not fully configured."
-                )
-        elif feeder_detection_ready and not _noPowerModeActive(gc) and bool(
-            getattr(machine_setup, "runs_reverse_pulse_calibration", True)
-        ):
-            # Reverse-pulse calibration seeds background-subtraction models
-            # (MOG2 / heatmap) with an empty-ring view. The feeder may have
-            # moved to Hive/Gemini and no longer need it, but the CAROUSEL
-            # heatmap still relies on this warm-up window unless it's also
-            # been switched to gemini_sam. Run the pulses whenever either
-            # subsystem still uses a baseline.
-            feeder_algorithms = (
-                vision.getFeederDetectionAlgorithms()
-                if hasattr(vision, "getFeederDetectionAlgorithms")
-                else {"feeder": vision.getFeederDetectionAlgorithm()}
-            )
-            feeder_mog2_roles = sorted(
-                role for role, algorithm in feeder_algorithms.items() if algorithm == "mog2"
-            )
-            feeder_needs_baseline = bool(feeder_mog2_roles)
-            carousel_needs_baseline = bool(
-                getattr(machine_setup, "uses_carousel_transport", True)
-            ) and vision.usesCarouselBaseline()
-            if feeder_needs_baseline or carousel_needs_baseline:
-                reason = []
-                if feeder_needs_baseline:
-                    reason.append(f"feeder(mog2)={','.join(feeder_mog2_roles)}")
-                if carousel_needs_baseline:
-                    reason.append("carousel=baseline")
-                shared_state.setHardwareStatus(homing_step="Calibrating feeder channels...")
-                gc.logger.info(
-                    f"Running feeder reverse-pulse calibration ({', '.join(reason)})"
-                )
-                calibrateFeederChannels(gc, irl, irl_config)
-            else:
-                gc.logger.info(
-                    f"Skipping feeder reverse-pulse calibration — "
-                    f"feeder_roles={feeder_algorithms!r}, carousel uses dynamic detection"
-                )
-        elif feeder_detection_ready:
-            gc.logger.info(
-                "Skipping feeder reverse-pulse calibration for machine setup %r."
-                % getattr(machine_setup, "key", "unknown")
-            )
-        else:
+        if not vision.initFeederDetection():
             gc.logger.warning("Feeder channel polygons not found — continuing without feeder detection")
-
-        if irl_config.camera_layout == "split_feeder":
-            has_classification = (
-                vision._classification_top_capture is not None
-                or vision._classification_bottom_capture is not None
-            )
-            if has_classification and vision.usesClassificationBaseline():
-                if not vision.loadClassificationBaseline():
-                    gc.logger.warning("Classification baseline not found — continuing without classification")
-        elif vision.usesClassificationBaseline() and not vision.loadClassificationBaseline():
-            gc.logger.warning("Classification baseline not found — continuing without classification")
 
         if not _noPowerModeActive(gc):
             from subsystems.classification_channel.simple_state_machine_rev01.spoke_home import (
@@ -757,25 +673,6 @@ def main() -> None:
             shared_state.setHardwareStatus(homing_step="Aligning classification channel...")
             if not maybeRunSpokeHome(gc, irl, irl_config, vision):
                 gc.logger.warning("Classification-channel rev01 spoke home did not complete")
-
-        if _noPowerModeActive(gc):
-            gc.logger.info("Skipping carousel homing in no-power development mode.")
-        elif bool(getattr(machine_setup, "homes_carousel", True)):
-            shared_state.setHardwareStatus(homing_step="Homing carousel...")
-            carousel_hw = getattr(irl, "carousel_hw", None)
-            if carousel_hw is not None:
-                gc.logger.info("Homing carousel...")
-                if carousel_hw.home():
-                    gc.logger.info("Carousel homed successfully.")
-                else:
-                    raise RuntimeError("Carousel homing failed.")
-            else:
-                raise RuntimeError("Carousel hardware not initialized.")
-        else:
-            gc.logger.info(
-                "Skipping carousel homing for machine setup %r."
-                % getattr(machine_setup, "key", "unknown")
-            )
 
         # Build the coordinator while it is still private. The controller is
         # not published and not started until all homing is finished, so a

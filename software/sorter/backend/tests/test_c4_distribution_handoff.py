@@ -202,24 +202,6 @@ def test_ready_goes_idle_when_positioned_piece_is_withdrawn() -> None:
     assert ready.step() == DistributionState.IDLE
 
 
-def test_ready_without_slot_handoff_still_treats_slot_change_as_drop() -> None:
-    # Transports that do not promote the positioned piece into a drop slot (the
-    # dynamic channel, the carousel) keep the old rule.
-    slots = SimpleNamespace(wait=KnownObject(), drop=None)
-    transport = SimpleNamespace(
-        getPieceForDistributionPositioning=lambda: slots.wait,
-        getPieceForDistributionDrop=lambda: slots.drop,
-    )
-    shared = _mkShared(transport)
-    shared.distribution_positioned_uuid = slots.wait.uuid
-    ready = Ready(SimpleNamespace(), _mkGc(), shared)  # type: ignore[arg-type]
-    assert ready.step() is None
-
-    slots.wait = KnownObject()
-
-    assert ready.step() == DistributionState.SENDING
-
-
 def test_sending_does_not_record_an_already_committed_piece_again() -> None:
     transport = ClassificationChannelTransport()
     previous = KnownObject()
