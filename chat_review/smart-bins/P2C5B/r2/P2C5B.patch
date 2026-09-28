@@ -1,0 +1,1321 @@
+diff --git a/software/sorter/backend/smart_bins_completion_recovery.py b/software/sorter/backend/smart_bins_completion_recovery.py
+index 9e055f51929c25fcb13563abe6d9006af76a0ae9..ae7bb5c51e10b73b8a2fe8b76fc343a7182afbd8 100644
+--- a/software/sorter/backend/smart_bins_completion_recovery.py
++++ b/software/sorter/backend/smart_bins_completion_recovery.py
+@@ -131,6 +131,9 @@ def _receipt(conn, key: str, payload_hash: str) -> dict[str, Any] | None:
+         "SELECT payload_hash,result_json FROM smart_bin_completion_receipts "
+         "WHERE request_key=?", (key,)).fetchone()
+     if row is None:
++        if conn.execute("SELECT 1 FROM smart_bin_audit_events WHERE request_key=?",
++                        (key,)).fetchone():
++            raise CompletionRecoveryError("follow-up idempotency conflict")
+         return None
+     if row["payload_hash"] != payload_hash:
+         raise CompletionRecoveryError("follow-up idempotency conflict")
+@@ -308,15 +311,23 @@ def transition(machine_id: str, followup_id: str, *, action: str,
+ 
+ 
+ def record_hold(machine_id: str, followup_id: str, *, kind: str, reason: str,
+-                expected_revision: int, request_key: str) -> dict[str, Any]:
++                expected_revision: int, request_key: str,
++                failure_phase: str | None = None) -> dict[str, Any]:
+     """Keep the first witnessed loss/failure; a closed row can gain a blocker."""
+     if kind not in ("OWNERSHIP_LOST", "SIDE_EFFECT_FAILED") or not all(
+         (machine_id, followup_id, reason, request_key)
+-    ) or type(expected_revision) is not int or expected_revision < 0:
++    ) or type(expected_revision) is not int or expected_revision < 0 or (
++        failure_phase is not None and (kind != "SIDE_EFFECT_FAILED" or failure_phase not in
++        ("PUBLICATION_CALLBACKS", "GATE_OPEN", "ADMISSION_RELEASE"))
++    ):
+         raise ValueError("invalid completion hold")
+-    payload_hash = _digest({"action": kind, "machine_id": machine_id,
+-                            "followup_id": followup_id, "reason": reason,
+-                            "expected_revision": expected_revision})
++    payload = {"action": kind, "machine_id": machine_id,
++               "followup_id": followup_id, "reason": reason,
++               "expected_revision": expected_revision}
++    # Preserve the exact payload hash of older, phase-unattributed receipts.
++    if failure_phase is not None:
++        payload["failure_phase"] = failure_phase
++    payload_hash = _digest(payload)
+     with critical_transaction() as conn:
+         _check_service_schema(conn)
+         check_schema(conn)
+@@ -346,8 +357,10 @@ def record_hold(machine_id: str, followup_id: str, *, kind: str, reason: str,
+                 "row_revision=row_revision+1,updated_at=? WHERE id=?",
+                 (kind, reason, time.time(), followup_id))
+         updated = _row(conn, machine_id, followup_id)
+-        return _finish(conn, updated, request_key, payload_hash, kind, reason,
+-                       {"stale_observation": stale_observation})
++        extra = {"stale_observation": stale_observation}
++        if failure_phase is not None:
++            extra["failure_phase"] = failure_phase
++        return _finish(conn, updated, request_key, payload_hash, kind, reason, extra)
+ 
+ 
+ def read_on_connection(conn, machine_id: str, followup_id: str) -> dict[str, Any]:
+@@ -406,6 +419,10 @@ def _assess_row(conn, row: dict[str, Any]) -> dict[str, Any]:
+                or (row["delivery_id"] is not None
+                    and source["reservation_state"] != "COMPLETED"))
+     row["missing_evidence"] = bool(missing)
++    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
++                    "name='smart_bin_followup_reconciliation_versions'").fetchone():
++        from smart_bins_followup_reconciliation import project_on_connection
++        project_on_connection(conn, row)
+     return row
+ 
+ 
+@@ -418,8 +435,18 @@ def inspect_on_connection(conn, machine_id: str) -> dict[str, Any]:
+     blockers = []
+     for row in rows:
+         _assess_row(conn, row)
+-        if (row["state"] != "CLOSED" or row["ownership_loss_reason"] is not None
+-            or row["failure_kind"] is not None or row["missing_evidence"]):
++        if "remaining_obligations" in row:
++            if row["remaining_obligations"]:
++                blockers.append({"followup_id": row["id"], "reservation_id": row["reservation_id"],
++                                 "state": row["state"], "missing_evidence": row["missing_evidence"],
++                                 "ownership_loss_reason": row["ownership_loss_reason"],
++                                 "failure_kind": row["failure_kind"],
++                                 "remaining_obligations": row["remaining_obligations"],
++                                 "resolved_obligations": row["resolved_obligations"],
++                                 "owner_requalification_required": row["owner_requalification_required"],
++                                 "physical_recovery_authorized": False})
++        elif (row["state"] != "CLOSED" or row["ownership_loss_reason"] is not None
++              or row["failure_kind"] is not None or row["missing_evidence"]):
+             blockers.append({"followup_id": row["id"], "reservation_id": row["reservation_id"],
+                              "state": row["state"], "missing_evidence": row["missing_evidence"],
+                              "ownership_loss_reason": row["ownership_loss_reason"],
+diff --git a/software/sorter/backend/smart_bins_followup_reconciliation.py b/software/sorter/backend/smart_bins_followup_reconciliation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9b15417ecbaf385a5910af028a312947fcf5264
+--- /dev/null
++++ b/software/sorter/backend/smart_bins_followup_reconciliation.py
+@@ -0,0 +1,624 @@
++"""Inactive evidence disposition for completed native delivery follow-ups.
++
++The physical owner supplies a fresh snapshot while holding the established outer
++locks. This module never calls a callback, gate, motor or external provider. An
++audited resolution describes evidence; it never adopts an old handoff or grants
++permission to resume admission.
++"""
++
++from __future__ import annotations
++
++import json
++import math
++import time
++import uuid
++from dataclasses import asdict, dataclass
++from typing import Any
++
++import smart_bins_completion_recovery as completion_recovery
++from smart_bins_delivery import _readonly
++from smart_bins_reconciliation import EvidenceReference
++from smart_bins_service import _check_service_schema, _digest
++from smart_bins_storage import critical_transaction
++
++
++SCHEMA_VERSION = 1
++EFFECTS = ("EVENT_ENQUEUED", "RUN_RECORDER_ADOPTED", "PROGRESS_RECORDED",
++           "PROGRESS_SYNC_NOTIFIED", "EVENT_CONSUMED")
++PRODUCER_EFFECTS = EFFECTS[:4]
++_DDL = (
++    "CREATE TABLE smart_bin_followup_reconciliation_versions ("
++    "singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1), "
++    "version INTEGER NOT NULL, initialized_at REAL NOT NULL)",
++    "CREATE TABLE smart_bin_followup_reconciliation_dispositions ("
++    "id TEXT NOT NULL PRIMARY KEY, machine_id TEXT NOT NULL, followup_id TEXT NOT NULL, "
++    "reservation_id TEXT NOT NULL, delivery_id TEXT NOT NULL, audit_id TEXT NOT NULL UNIQUE, "
++    "request_key TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL, owner_json TEXT NOT NULL, "
++    "preview_hash TEXT NOT NULL, created_at REAL NOT NULL, "
++    "FOREIGN KEY(machine_id) REFERENCES smart_bin_machines(machine_id), "
++    "FOREIGN KEY(followup_id) REFERENCES smart_bin_completion_followups(id), "
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id), "
++    "FOREIGN KEY(delivery_id) REFERENCES smart_bin_deliveries(id), "
++    "FOREIGN KEY(audit_id) REFERENCES smart_bin_audit_events(id))",
++    "CREATE TABLE smart_bin_followup_reconciliation_links ("
++    "obligation_id TEXT NOT NULL, followup_id TEXT NOT NULL, disposition_id TEXT NOT NULL, "
++    "evidence_ref TEXT NOT NULL, source_digest TEXT NOT NULL, "
++    "PRIMARY KEY(followup_id,obligation_id), "
++    "FOREIGN KEY(followup_id) REFERENCES smart_bin_completion_followups(id), "
++    "FOREIGN KEY(disposition_id) REFERENCES smart_bin_followup_reconciliation_dispositions(id))",
++    "CREATE TABLE smart_bin_followup_reconciliation_receipts ("
++    "request_key TEXT NOT NULL PRIMARY KEY, action TEXT NOT NULL "
++    "CHECK(action='RECONCILE_NATIVE_FOLLOWUP'), payload_hash TEXT NOT NULL, "
++    "disposition_id TEXT NOT NULL UNIQUE, result_json TEXT NOT NULL, created_at REAL NOT NULL, "
++    "FOREIGN KEY(disposition_id) REFERENCES smart_bin_followup_reconciliation_dispositions(id))",
++)
++for _table in ("dispositions", "links", "receipts"):
++    for _op in ("UPDATE", "DELETE"):
++        _DDL += (
++            f"CREATE TRIGGER smart_bin_followup_reconciliation_{_table}_{_op.lower()} "
++            f"BEFORE {_op} ON smart_bin_followup_reconciliation_{_table} "
++            "BEGIN SELECT RAISE(ABORT,'follow-up reconciliation evidence is immutable'); END",
++        )
++_REQUIRED = {statement.split()[2] for statement in _DDL}
++
++
++@dataclass(frozen=True)
++class OwnerSnapshot:
++    machine_id: str
++    followup_id: str
++    reservation_id: str
++    current_owner_incarnation: str
++    authority_revision: str
++    observed_at: float
++    expires_at: float
++    current_owner: bool
++    quiescent: bool
++    publication_attempt_inactive: bool
++    dispatch_invalidated: bool
++    gate_open: bool | None
++    evidence: EvidenceReference
++
++
++@dataclass(frozen=True)
++class EffectEvidence:
++    effect: str
++    status: str  # APPLIED, NOT_APPLIED, UNKNOWN, or proven NOT_REQUIRED.
++    evidence: EvidenceReference
++    proof_kind: str = "OWNER_OBSERVATION"
++    followup_id: str = ""
++    delivery_id: str = ""
++    original_attempt_id: str = ""
++
++
++@dataclass(frozen=True)
++class HoldEvidence:
++    hold_audit_id: str
++    cause: str  # CALLBACKS_APPLIED, OWNER_INVALIDATED, GATE_OPEN.
++    evidence: EvidenceReference
++
++
++@dataclass(frozen=True)
++class Resolution:
++    obligation_id: str
++    source_digest: str
++    evidence_ref: str
++
++
++@dataclass(frozen=True)
++class ReconciliationRequest:
++    machine_id: str
++    followup_id: str
++    reservation_id: str
++    delivery_id: str
++    request_key: str
++    expected_machine_revision: int
++    expected_followup_revision: int
++    actor: str
++    reason: str
++    original_attempt_id: str
++    original_marker_evidence_ref: str
++    original_completion_evidence_ref: str
++    effects: tuple[EffectEvidence, ...]
++    holds: tuple[HoldEvidence, ...] = ()
++    resolutions: tuple[Resolution, ...] = ()
++
++
++def _text(value: Any) -> bool:
++    return isinstance(value, str) and bool(value.strip())
++
++
++def _reference(value: EvidenceReference) -> bool:
++    return (isinstance(value, EvidenceReference) and _text(value.ref)
++            and _text(value.provenance) and value.provenance != "unknown")
++
++
++def _clock(value: Any) -> bool:
++    return type(value) in (int, float) and math.isfinite(value) and value > 0
++
++
++def check_schema(conn) -> None:
++    _check_service_schema(conn)
++    completion_recovery.check_schema(conn)
++    names = {row[0] for row in conn.execute(
++        "SELECT name FROM sqlite_master WHERE name LIKE 'smart_bin_followup_reconciliation_%'")}
++    if names != _REQUIRED:
++        raise RuntimeError("follow-up reconciliation extension is absent or incomplete")
++    rows = conn.execute("SELECT singleton,version FROM smart_bin_followup_reconciliation_versions")
++    versions = rows.fetchall()
++    if len(versions) != 1 or tuple(versions[0]) != (1, SCHEMA_VERSION):
++        raise RuntimeError("unsupported follow-up reconciliation extension; no automatic migration")
++
++
++def initialize_schema() -> int:
++    """Explicit additive install; never called by import or runtime startup."""
++    with critical_transaction() as conn:
++        _check_service_schema(conn)
++        completion_recovery.check_schema(conn)
++        present = conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE "
++                               "'smart_bin_followup_reconciliation_%' LIMIT 1").fetchone()
++        if present:
++            check_schema(conn)
++        else:
++            for statement in _DDL:
++                conn.execute(statement)
++            conn.execute("INSERT INTO smart_bin_followup_reconciliation_versions VALUES(1,?,?)",
++                         (SCHEMA_VERSION, time.time()))
++        conn.commit()
++    return SCHEMA_VERSION
++
++
++def _rows(conn, query, params=()):
++    return [dict(row) for row in conn.execute(query, params)]
++
++
++def _exists(conn, table):
++    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
++                        (table,)).fetchone() is not None
++
++
++def _history(conn, followup_id):
++    dispositions = _rows(conn, "SELECT * FROM smart_bin_followup_reconciliation_dispositions "
++                         "WHERE followup_id=? ORDER BY created_at,id", (followup_id,))
++    links = _rows(conn, "SELECT l.*,d.audit_id FROM smart_bin_followup_reconciliation_links l "
++                  "JOIN smart_bin_followup_reconciliation_dispositions d ON d.id=l.disposition_id "
++                  "WHERE l.followup_id=? ORDER BY l.obligation_id", (followup_id,))
++    return dispositions, links
++
++
++def _publication_receipts(conn, row):
++    prefix = row["completion_request_key"]
++    return _rows(conn, "SELECT * FROM smart_bin_completion_receipts WHERE request_key IN (?,?,?) "
++                 "ORDER BY request_key", (prefix + ":publication-attempt",
++                                          prefix + ":publication-succeeded", prefix + ":close"))
++
++
++def _holds(conn, row):
++    audits = _rows(conn, "SELECT a.*,c.result_json AS hold_result_json "
++                   "FROM smart_bin_audit_events a "
++                   "JOIN smart_bin_completion_receipts c ON c.request_key=a.request_key "
++                   "AND c.action=a.reason WHERE a.machine_id=? AND a.reservation_id=? "
++                   "AND a.reason IN ('OWNERSHIP_LOST','SIDE_EFFECT_FAILED') "
++                   "ORDER BY a.created_at,a.id", (row["machine_id"], row["reservation_id"]))
++    current = []
++    for audit in audits:
++        kind = audit["reason"]
++        raw = (row["ownership_loss_reason"] if kind == "OWNERSHIP_LOST"
++               else row["failure_reason"])
++        if raw is not None and raw == audit["evidence_ref"]:
++            try:
++                recorded = json.loads(audit["hold_result_json"])
++            except (TypeError, ValueError):
++                recorded = {}
++            phase = (recorded.get("failure_phase") if isinstance(recorded, dict)
++                     and recorded.get("code") == "OK"
++                     and recorded.get("followup_id") == row["id"] else None)
++            if kind != "SIDE_EFFECT_FAILED" or phase not in (
++                "PUBLICATION_CALLBACKS", "GATE_OPEN", "ADMISSION_RELEASE"
++            ):
++                phase = "UNKNOWN"
++            current.append({"id": "HOLD:" + audit["id"], "kind": kind,
++                            "source_digest": _digest(audit), "audit_id": audit["id"],
++                            "original_reason": raw, "failure_phase": phase})
++    return current
++
++
++def _closure_obligation(row, receipts):
++    """A delivery's normal close is separate from publication reconciliation."""
++    if row["delivery_id"] is None:
++        return None
++    for receipt in receipts:
++        if (row["state"] != "CLOSED" or receipt["action"] != "CLOSE"
++            or receipt["machine_id"] != row["machine_id"]
++            or receipt["request_key"] != row["completion_request_key"] + ":close"):
++            continue
++        try:
++            result = json.loads(receipt["result_json"])
++        except (TypeError, ValueError):
++            continue
++        if (isinstance(result, dict) and result.get("code") == "OK"
++            and result.get("state") == "CLOSED"
++            and result.get("followup_id") == row["id"]):
++            return None
++    return {"id": "CLOSURE_PENDING", "kind": "CLOSURE", "eligible": False}
++
++
++def _effects(conn, row, dispositions, receipts):
++    by_action = {item["action"]: item for item in receipts}
++    applied_receipt = by_action.get("PUBLICATION_SUCCEEDED")
++    attempted_receipt = by_action.get("PUBLICATION_ATTEMPT")
++    result = {}
++    for effect in EFFECTS:
++        if effect in PRODUCER_EFFECTS[:2] and applied_receipt is not None:
++            state, source = "APPLIED", "durable_publication_receipt"
++        elif effect in PRODUCER_EFFECTS[2:] and applied_receipt is not None:
++            # The old receipt proves the bounded function returned, but does
++            # not record whether its optional progress tracker was installed.
++            state, source = "UNKNOWN", "original_tracker_configuration_gap"
++        elif effect in PRODUCER_EFFECTS and row["state"] == "DELIVERY_PENDING_PUBLICATION" and attempted_receipt is None:
++            state, source = "NOT_APPLIED", "no_publication_attempt"
++        else:
++            state, source = "UNKNOWN", "legacy_per_effect_gap"
++        claims = []
++        for disposition in dispositions:
++            request = json.loads(disposition["request_json"])
++            claims.extend(item for item in request["effects"] if item["effect"] == effect)
++        known = {claim["status"] for claim in claims if claim["status"] != "UNKNOWN"}
++        if state != "UNKNOWN":
++            known.add(state)
++        if len(known) > 1:
++            state = "CONFLICTING"
++        elif known:
++            state = next(iter(known))
++            if source == "legacy_per_effect_gap":
++                source = "attributed_reconciliation_evidence"
++        result[effect] = {"status": state, "source": source,
++                          "references": [claim["evidence"]["ref"] for claim in claims]}
++    return result
++
++
++def project_on_connection(conn, row: dict[str, Any]) -> dict[str, Any]:
++    """Shared restart/current-owner assessment, without changing raw history."""
++    if not _exists(conn, "smart_bin_followup_reconciliation_versions"):
++        return row
++    check_schema(conn)
++    dispositions, links = _history(conn, row["id"])
++    receipts = _publication_receipts(conn, row)
++    effects = _effects(conn, row, dispositions, receipts)
++    held = _holds(conn, row)
++    resolved = {link["obligation_id"]: link for link in links}
++    publication_required = row["state"] in ("DELIVERY_PENDING_PUBLICATION", "PUBLICATION_ATTEMPTED")
++    if publication_required:
++        publication_source = _digest({"followup_id": row["id"],
++                                      "delivery_id": row["delivery_id"],
++                                      "effects": effects,
++                                      "attempt_receipt": next((r for r in receipts if r["action"] == "PUBLICATION_ATTEMPT"), None)})
++    else:
++        publication_source = None
++    obligations = []
++    if publication_required:
++        obligations.append({"id": "PUBLICATION", "kind": "PUBLICATION",
++                            "source_digest": publication_source,
++                            "eligible": all(effects[name]["status"] in ("APPLIED", "NOT_REQUIRED")
++                                            for name in PRODUCER_EFFECTS)})
++    closure = _closure_obligation(row, receipts)
++    if closure:
++        obligations.append(closure)
++    obligations += [{**item, "eligible": False} for item in held]
++    if row["ownership_loss_reason"] is not None and not any(
++        item["kind"] == "OWNERSHIP_LOST" for item in held
++    ):
++        obligations.append({"id": "UNATTRIBUTED_OWNERSHIP_HOLD", "kind": "OWNERSHIP_LOST",
++                            "eligible": False})
++    if row["failure_kind"] is not None and not any(
++        item["kind"] == "SIDE_EFFECT_FAILED" for item in held
++    ):
++        obligations.append({"id": "UNATTRIBUTED_FAILURE_HOLD", "kind": "SIDE_EFFECT_FAILED",
++                            "eligible": False})
++    if row["state"] not in ("DELIVERY_PENDING_PUBLICATION", "PUBLICATION_ATTEMPTED",
++                            "PUBLICATION_SUCCEEDED", "CLOSED"):
++        obligations.append({"id": "UNSUPPORTED_FOLLOWUP_STATE", "kind": row["state"],
++                            "eligible": False})
++    active_discrepancies = _rows(conn, "SELECT id,kind FROM smart_bin_discrepancies "
++                                 "WHERE machine_id=? AND reservation_id=? AND resolved_at IS NULL "
++                                 "ORDER BY id", (row["machine_id"], row["reservation_id"]))
++    remaining = [{**item, "resolution": resolved.get(item["id"])} for item in obligations
++                 if item["id"] not in resolved]
++    remaining += [{"id": "DISCREPANCY:" + item["id"], "kind": item["kind"]}
++                  for item in active_discrepancies]
++    if any(item["status"] == "CONFLICTING" for item in effects.values()):
++        remaining.append({"id": "CONFLICTING_EFFECT_EVIDENCE", "kind": "EVIDENCE_CONFLICT"})
++    if row["missing_evidence"]:
++        remaining.append({"id": "DELIVERY_OR_HISTORY_EVIDENCE_MISSING", "kind": "DELIVERY"})
++    if dispositions:
++        remaining.append({"id": "OWNER_REQUALIFICATION", "kind": "OWNER"})
++    row.update(effect_inventory=effects, original_obligations=obligations,
++               resolved_obligations=links, remaining_obligations=remaining,
++               reconciliation_history=[{"id": item["id"], "audit_id": item["audit_id"],
++                                        "request_key": item["request_key"]} for item in dispositions],
++               effect_coverage_gaps=[name for name, item in effects.items()
++                                     if item["status"] == "UNKNOWN"],
++               owner_requalification_required=bool(dispositions),
++               physical_recovery_authorized=False)
++    return row
++
++
++def _validate(req, owner):
++    if (not all(_text(value) for value in
++                (req.machine_id, req.followup_id, req.reservation_id, req.delivery_id,
++                 req.request_key, req.actor, req.reason, req.original_attempt_id,
++                 req.original_marker_evidence_ref, req.original_completion_evidence_ref))
++        or any(type(value) is not int or value < 0 for value in
++               (req.expected_machine_revision, req.expected_followup_revision))):
++        raise ValueError("follow-up reconciliation identity and expected revisions required")
++    _digest({"request": asdict(req), "owner": asdict(owner)})
++
++
++def _assess(conn, req, owner):
++    check_schema(conn)
++    blockers = []
++    row = conn.execute("SELECT * FROM smart_bin_completion_followups WHERE machine_id=? AND id=?",
++                       (req.machine_id, req.followup_id)).fetchone()
++    source: dict[str, Any] = {"followup": dict(row) if row else None}
++    proposal: dict[str, Any] = {"effects": {}, "resolvable": [], "resolve": [], "remaining": []}
++    if row is None:
++        blockers.append("FOLLOWUP_NOT_FOUND")
++    else:
++        machine = conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id=?",
++                               (req.machine_id,)).fetchone()
++        revision = machine[0] if machine else None
++        source["machine_revision"] = revision
++        if revision != req.expected_machine_revision or row["row_revision"] != req.expected_followup_revision:
++            blockers.append("STALE_REVISION")
++        now = time.time()
++        if (owner.machine_id != req.machine_id or owner.followup_id != req.followup_id
++            or owner.reservation_id != req.reservation_id or not _text(owner.current_owner_incarnation)
++            or not _text(owner.authority_revision) or owner.current_owner is not True
++            or owner.quiescent is not True or owner.publication_attempt_inactive is not True
++            or owner.dispatch_invalidated is not True or not _reference(owner.evidence)
++            or not _clock(owner.observed_at) or not _clock(owner.expires_at)
++            or not owner.observed_at <= now < owner.expires_at
++            or owner.expires_at - owner.observed_at > 5):
++            blockers.append("CURRENT_OWNER_QUIESCENCE_REQUIRED")
++        if (row["reservation_id"] != req.reservation_id
++            or row["delivery_id"] != req.delivery_id
++            or row["release_attempt_id"] != req.original_attempt_id
++            or row["marker_evidence_ref"] != req.original_marker_evidence_ref):
++            blockers.append("FOLLOWUP_IDENTITY_MISMATCH")
++        reservation = conn.execute("SELECT * FROM smart_bin_reservations WHERE machine_id=? AND id=?",
++                                   (req.machine_id, req.reservation_id)).fetchone()
++        delivery = conn.execute("SELECT * FROM smart_bin_deliveries WHERE id=?", (req.delivery_id,)).fetchone()
++        attempt = conn.execute("SELECT a.*,e.intent_json,e.exit_json,e.completion_json FROM "
++                               "smart_bin_release_attempts a JOIN smart_bin_release_evidence e "
++                               "ON e.attempt_id=a.id WHERE a.id=?", (req.original_attempt_id,)).fetchone()
++        history = conn.execute("SELECT * FROM piece_records WHERE uuid=?", (row["piece_uuid"],)).fetchone()
++        source.update(reservation=dict(reservation) if reservation else None,
++                      delivery=dict(delivery) if delivery else None,
++                      attempt=dict(attempt) if attempt else None,
++                      history=dict(history) if history else None)
++        assessed = completion_recovery._assess_row(conn, dict(row))
++        source["assessed"] = assessed
++        if (reservation is None or reservation["state"] != "COMPLETED"
++            or delivery is None or delivery["machine_id"] != req.machine_id
++            or delivery["reservation_id"] != req.reservation_id
++            or delivery["piece_uuid"] != row["piece_uuid"]
++            or attempt is None or attempt["reservation_id"] != req.reservation_id
++            or history is None or assessed["missing_evidence"]):
++            blockers.append("COMPLETED_MATCHING_DELIVERY_HISTORY_REQUIRED")
++        try:
++            completion = json.loads(row["completion_json"]) if row["completion_json"] else {}
++            exit_evidence = json.loads(attempt["exit_json"]) if attempt and attempt["exit_json"] else {}
++            intent_evidence = json.loads(attempt["intent_json"]) if attempt and attempt["intent_json"] else {}
++        except (TypeError, ValueError):
++            completion, exit_evidence, intent_evidence = {}, {}, {}
++            blockers.append("ORIGINAL_EVIDENCE_MALFORMED")
++        if (completion.get("completion_evidence_ref") != req.original_completion_evidence_ref
++            or exit_evidence.get("marker_evidence_ref") != req.original_marker_evidence_ref
++            or attempt is None or attempt["completion_json"] != row["completion_json"]):
++            blockers.append("ORIGINAL_COMPLETION_EVIDENCE_MISMATCH")
++        external = _rows(conn, "SELECT * FROM smart_bin_external_operations WHERE reservation_id=?",
++                         (req.reservation_id,))
++        source["external_operations"] = external
++        if external or any(value for evidence in (completion, intent_evidence)
++                           for key, value in evidence.items()
++                           if key.startswith("harvest_") and key != "harvest_exception"):
++            blockers.append("HARVEST_OR_EXTERNAL_OPERATION_DEFERRED")
++        original_receipts = _publication_receipts(conn, row)
++        source["publication_receipts"] = original_receipts
++        holds = _holds(conn, row)
++        source["holds"] = holds
++        dispositions, links = _history(conn, row["id"])
++        source["dispositions"] = dispositions
++        source["links"] = links
++        source["discrepancies"] = _rows(conn, "SELECT * FROM smart_bin_discrepancies "
++                                        "WHERE machine_id=? AND reservation_id=? ORDER BY id",
++                                        (req.machine_id, req.reservation_id))
++        if len({e.effect for e in req.effects}) != len(req.effects) or any(e.effect not in EFFECTS for e in req.effects):
++            blockers.append("DUPLICATE_OR_UNKNOWN_EFFECT")
++        for item in req.effects:
++            if (item.status not in ("APPLIED", "NOT_APPLIED", "UNKNOWN", "NOT_REQUIRED")
++                or not _reference(item.evidence)
++                or item.followup_id != req.followup_id
++                or item.delivery_id != req.delivery_id
++                or item.original_attempt_id != req.original_attempt_id
++                or item.proof_kind not in ("OWNER_OBSERVATION", "ORIGINAL_TRACKER_ABSENT")
++                or (item.proof_kind == "ORIGINAL_TRACKER_ABSENT"
++                    and item.status != "NOT_REQUIRED")
++                or (item.status == "NOT_REQUIRED" and
++                    (item.effect not in ("PROGRESS_RECORDED", "PROGRESS_SYNC_NOTIFIED")
++                     or item.proof_kind != "ORIGINAL_TRACKER_ABSENT"))):
++                blockers.append("UNSUPPORTED_EFFECT_EVIDENCE")
++        not_required = [e for e in req.effects if e.status == "NOT_REQUIRED"]
++        if not_required and (len(not_required) != 2 or
++                             {e.effect for e in not_required} != set(PRODUCER_EFFECTS[2:]) or
++                             len({e.evidence.ref for e in not_required}) != 1):
++            blockers.append("ORIGINAL_TRACKER_ABSENCE_NOT_PROVEN")
++        current_effects = assessed["effect_inventory"]
++        effects = {key: dict(value) for key, value in current_effects.items()}
++        for item in req.effects:
++            known = effects[item.effect]["status"]
++            if known not in ("UNKNOWN", item.status) and item.status != "UNKNOWN":
++                effects[item.effect]["status"] = "CONFLICTING"
++            elif item.status != "UNKNOWN":
++                effects[item.effect]["status"] = item.status
++                effects[item.effect]["source"] = "proposed_attributed_evidence"
++            effects[item.effect]["references"] = effects[item.effect]["references"] + [item.evidence.ref]
++        if any(v["status"] == "CONFLICTING" for v in effects.values()):
++            blockers.append("CONFLICTING_EFFECT_EVIDENCE")
++        producer_applied = all(effects[name]["status"] in ("APPLIED", "NOT_REQUIRED")
++                               for name in PRODUCER_EFFECTS)
++        existing = {link["obligation_id"] for link in links}
++        obligations = []
++        if row["state"] in ("DELIVERY_PENDING_PUBLICATION", "PUBLICATION_ATTEMPTED"):
++            obligations.append({"id": "PUBLICATION", "kind": "PUBLICATION",
++                                "source_digest": _digest({"followup_id": row["id"],
++                                    "delivery_id": row["delivery_id"], "effects": effects,
++                                    "attempt_receipt": next((r for r in original_receipts
++                                                             if r["action"] == "PUBLICATION_ATTEMPT"), None)}),
++                                "eligible": producer_applied})
++        closure = _closure_obligation(row, original_receipts)
++        if closure:
++            obligations.append(closure)
++        hold_evidence = {item.hold_audit_id: item for item in req.holds}
++        if len(hold_evidence) != len(req.holds):
++            blockers.append("DUPLICATE_HOLD_EVIDENCE")
++        for hold in holds:
++            witness = hold_evidence.get(hold["audit_id"])
++            eligible = False
++            if witness and _reference(witness.evidence):
++                # Receipt metadata records the original failed operation. The
++                # caller's proposed cause cannot substitute for that record.
++                gate_failure_possible = (row["state"] == "CLOSED" and
++                                         {"PUBLICATION_SUCCEEDED", "CLOSE"}.issubset(
++                                             {r["action"] for r in original_receipts}))
++                eligible = ((hold["kind"] == "OWNERSHIP_LOST" and
++                             witness.cause == "OWNER_INVALIDATED" and owner.dispatch_invalidated)
++                            or (hold["kind"] == "SIDE_EFFECT_FAILED" and
++                                ((hold["failure_phase"] == "PUBLICATION_CALLBACKS"
++                                  and witness.cause == "CALLBACKS_APPLIED" and producer_applied)
++                                 or (hold["failure_phase"] == "GATE_OPEN"
++                                     and witness.cause == "GATE_OPEN" and gate_failure_possible
++                                     and owner.gate_open is True))))
++            obligations.append({**hold, "eligible": eligible})
++        if set(hold_evidence) - {item["audit_id"] for item in holds}:
++            blockers.append("UNSUPPORTED_HOLD_EVIDENCE")
++        requested = {item.obligation_id: item for item in req.resolutions}
++        if len(requested) != len(req.resolutions):
++            blockers.append("DUPLICATE_RESOLUTION")
++        available_refs = {item.evidence.ref for item in req.effects}
++        available_refs.update(item.evidence.ref for item in req.holds)
++        available_refs.add(owner.evidence.ref)
++        available_refs.update(r["request_key"] for r in original_receipts)
++        named = {item["id"]: item for item in obligations}
++        for item in req.resolutions:
++            target = named.get(item.obligation_id)
++            if (target is None or target["id"] in existing or not target["eligible"]
++                or item.source_digest != target["source_digest"]
++                or item.evidence_ref not in available_refs):
++                blockers.append("UNSUPPORTED_OR_STALE_RESOLUTION")
++        proposal = {"effects": effects, "resolvable": [item for item in obligations
++                    if item["eligible"] and item["id"] not in existing],
++                    "resolve": [item.obligation_id for item in req.resolutions],
++                    "remaining": [item for item in obligations if item["id"] not in existing
++                                  and item["id"] not in requested],
++                    "quantity_effect": 0,
++                    "coverage_gaps": [name for name, item in effects.items()
++                                      if item["status"] == "UNKNOWN"],
++                    "owner_requalification_required": True,
++                    "physical_recovery_authorized": False}
++        if source["discrepancies"]:
++            proposal["remaining"] += [{"id": "DISCREPANCY:" + d["id"], "kind": d["kind"]}
++                                       for d in source["discrepancies"] if d["resolved_at"] is None]
++        if any(item["status"] == "CONFLICTING" for item in effects.values()):
++            proposal["remaining"].append({"id": "CONFLICTING_EFFECT_EVIDENCE",
++                                          "kind": "EVIDENCE_CONFLICT"})
++        proposal["remaining"].append({"id": "OWNER_REQUALIFICATION", "kind": "OWNER"})
++    result = {"code": "REFUSED" if blockers else "READY", "blockers": sorted(set(blockers)),
++              "followup_id": req.followup_id, "reservation_id": req.reservation_id,
++              "delivery_id": req.delivery_id, "origin": "native_followup_reconciliation",
++              **proposal, "snapshot_hash": _digest(source)}
++    result["preview_hash"] = _digest({"request": asdict(req), "owner": asdict(owner),
++                                     "assessment": result})
++    return result
++
++
++def preview(request: ReconciliationRequest, owner: OwnerSnapshot) -> dict[str, Any]:
++    _validate(request, owner)
++    with _readonly() as conn:
++        return _assess(conn, request, owner)
++
++
++def _receipt(conn, key, payload_hash):
++    row = conn.execute("SELECT payload_hash,result_json FROM smart_bin_followup_reconciliation_receipts "
++                       "WHERE request_key=?", (key,)).fetchone()
++    if row:
++        return json.loads(row[1]) if row[0] == payload_hash else {"code": "IDEMPOTENCY_CONFLICT"}
++    if conn.execute("SELECT 1 FROM smart_bin_audit_events WHERE request_key=?", (key,)).fetchone():
++        return {"code": "IDEMPOTENCY_CONFLICT"}
++    return None
++
++
++def apply(request: ReconciliationRequest, owner: OwnerSnapshot, *,
++          expected_preview_hash: str) -> dict[str, Any]:
++    _validate(request, owner)
++    if not _text(expected_preview_hash):
++        raise ValueError("reviewed preview hash required")
++    payload_hash = _digest({"action": "RECONCILE_NATIVE_FOLLOWUP", "request": asdict(request),
++                            "owner": asdict(owner), "preview_hash": expected_preview_hash})
++    with critical_transaction() as conn:
++        check_schema(conn)
++        replay = _receipt(conn, request.request_key, payload_hash)
++        if replay is not None:
++            conn.commit()
++            return replay
++        plan = _assess(conn, request, owner)
++        if plan["blockers"] or plan["preview_hash"] != expected_preview_hash:
++            conn.rollback()
++            return {**plan, "code": "REFUSED", "blockers": sorted(set(plan["blockers"] +
++                    (["STALE_PREVIEW"] if plan["preview_hash"] != expected_preview_hash else [])))}
++        now, audit_id, disposition_id = time.time(), str(uuid.uuid4()), str(uuid.uuid4())
++        conn.execute("INSERT INTO smart_bin_audit_events "
++                     "(id,machine_id,reservation_id,request_key,payload_hash,before_revision,"
++                     "after_revision,actor,reason,evidence_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
++                     (audit_id, request.machine_id, request.reservation_id, request.request_key,
++                      payload_hash, request.expected_machine_revision,
++                      request.expected_machine_revision + 1, request.actor, request.reason,
++                      owner.evidence.ref, now))
++        conn.execute("INSERT INTO smart_bin_followup_reconciliation_dispositions VALUES(?,?,?,?,?,?,?,?,?,?,?)",
++                     (disposition_id, request.machine_id, request.followup_id, request.reservation_id,
++                      request.delivery_id, audit_id, request.request_key,
++                      json.dumps(asdict(request), sort_keys=True, allow_nan=False),
++                      json.dumps(asdict(owner), sort_keys=True, allow_nan=False),
++                      expected_preview_hash, now))
++        for item in request.resolutions:
++            conn.execute("INSERT INTO smart_bin_followup_reconciliation_links VALUES(?,?,?,?,?)",
++                         (item.obligation_id, request.followup_id, disposition_id,
++                          item.evidence_ref, item.source_digest))
++        cursor = conn.execute("UPDATE smart_bin_completion_followups SET row_revision=row_revision+1,"
++                              "updated_at=? WHERE machine_id=? AND id=? AND row_revision=?",
++                              (now, request.machine_id, request.followup_id,
++                               request.expected_followup_revision))
++        if cursor.rowcount != 1:
++            raise RuntimeError("follow-up changed during reconciliation")
++        conn.execute("UPDATE smart_bin_machines SET state_revision=state_revision+1 WHERE machine_id=?",
++                     (request.machine_id,))
++        result = {**plan, "code": "OK", "action": "RECONCILE_NATIVE_FOLLOWUP",
++                  "audit_id": audit_id, "disposition_id": disposition_id,
++                  "followup_revision": request.expected_followup_revision + 1,
++                  "state_revision": request.expected_machine_revision + 1,
++                  "quantity_effect": 0, "owner_requalification_required": True,
++                  "physical_recovery_authorized": False}
++        conn.execute("INSERT INTO smart_bin_followup_reconciliation_receipts VALUES(?,?,?,?,?,?)",
++                     (request.request_key, "RECONCILE_NATIVE_FOLLOWUP", payload_hash,
++                      disposition_id, json.dumps(result, sort_keys=True, allow_nan=False), now))
++        conn.commit()
++        return result
++
++
++def lookup_request(request_key: str) -> dict[str, Any] | None:
++    with _readonly() as conn:
++        check_schema(conn)
++        row = conn.execute("SELECT action,payload_hash,result_json FROM "
++                           "smart_bin_followup_reconciliation_receipts WHERE request_key=?",
++                           (request_key,)).fetchone()
++        return ({"action": row[0], "payload_hash": row[1], "result": json.loads(row[2])}
++                if row else None)
+diff --git a/software/sorter/backend/smart_bins_native_completion.py b/software/sorter/backend/smart_bins_native_completion.py
+index 475173bc32725637d74cbcec1c5569450278e1ec..60800097ade766fbbb54aa3510b0322df4aa5458 100644
+--- a/software/sorter/backend/smart_bins_native_completion.py
++++ b/software/sorter/backend/smart_bins_native_completion.py
+@@ -100,6 +100,7 @@ class NativeHandoff:
+     publication_durable: bool = False
+     closure_durable: bool = False
+     side_effect_reason: str | None = None
++    side_effect_phase: str | None = None
+     side_effect_observed_revision: int | None = None
+     side_effect_persisted: bool = False
+ 
+@@ -283,18 +284,20 @@ class NativeCompletionAdapter:
+         handoff.followup_revision = result["row_revision"]
+         handoff.ownership_loss_persisted = True
+ 
+-    def persist_side_effect_failure(self, reason: str) -> None:
++    def persist_side_effect_failure(self, reason: str, *, failure_phase: str | None = None) -> None:
+         handoff = self._handoff
+         if handoff is None or handoff.side_effect_persisted:
+             return
+         if handoff.side_effect_reason is None:
+             handoff.side_effect_reason = reason
++            handoff.side_effect_phase = failure_phase
+             handoff.side_effect_observed_revision = handoff.followup_revision
+         result = completion_recovery.record_hold(
+             handoff.machine_id, handoff.followup_id, kind="SIDE_EFFECT_FAILED",
+             reason=handoff.side_effect_reason,
+             expected_revision=handoff.side_effect_observed_revision,
+-            request_key=f"{handoff.request_key}:side-effect-failed")
++            request_key=f"{handoff.request_key}:side-effect-failed",
++            failure_phase=handoff.side_effect_phase)
+         handoff.followup_revision = result["row_revision"]
+         handoff.side_effect_persisted = True
+ 
+diff --git a/software/sorter/backend/subsystems/distribution/sending.py b/software/sorter/backend/subsystems/distribution/sending.py
+index 25f7f4daf7af1159bd92581ccdf7642f5558e666..cb5a7ccd2addf9a3e3df7fd7c3f8e59f2d8cc8da 100644
+--- a/software/sorter/backend/subsystems/distribution/sending.py
++++ b/software/sorter/backend/subsystems/distribution/sending.py
+@@ -256,12 +256,15 @@ class Sending(BaseState):
+             # remains retryable with its original key and revision.
+             self._holdNative(f"native closure held: {exc}")
+             return None
++        failure_phase = "GATE_OPEN"
+         try:
+             self.shared.set_distribution_gate(True, reason=None)
++            failure_phase = "ADMISSION_RELEASE"
+             adapter.release_admission(piece)
+         except Exception as exc:
+             self._holdNative(f"native gate release held: {exc}",
+-                             persist_failure=not isinstance(exc, CurrentFollowupHeld))
++                             persist_failure=not isinstance(exc, CurrentFollowupHeld),
++                             failure_phase=failure_phase)
+             return None
+         return DistributionState.IDLE
+ 
+@@ -323,7 +326,8 @@ class Sending(BaseState):
+             return False
+         return True
+ 
+-    def _holdNative(self, detail: str, *, persist_failure: bool = False) -> None:
++    def _holdNative(self, detail: str, *, persist_failure: bool = False,
++                    failure_phase: str | None = None) -> None:
+         if self.native_completion is not None:
+             self.native_completion.hold_admission(self.piece)
+         self.shared.set_distribution_gate(False, reason="native completion held")
+@@ -355,7 +359,9 @@ class Sending(BaseState):
+                     handoff.publication_state == "failed" or persist_failure
+                 ):
+                     self.native_completion.persist_side_effect_failure(
+-                        handoff.publication_error or detail)
++                        handoff.publication_error or detail,
++                        failure_phase=("PUBLICATION_CALLBACKS" if handoff.publication_state == "failed"
++                                       else failure_phase))
+             except Exception:
+                 self.logger.exception("Sending: native follow-up hold could not be persisted")
+ 
+diff --git a/software/sorter/backend/tests/test_smart_bins_followup_reconciliation.py b/software/sorter/backend/tests/test_smart_bins_followup_reconciliation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..07eb07c1b3d7eada9efc9837cacfa3d0040cac9e
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_followup_reconciliation.py
+@@ -0,0 +1,520 @@
++"""Synthetic, inactive qualification of completed native follow-up dispositions."""
++
++from __future__ import annotations
++
++# The imported fixture isolates local-state paths before importing backend modules.
++from test_smart_bins_completion_recovery import (
++    context, followup, fresh_owner_blocker, late_hold, second_native_piece,
++    settle_time,
++)
++from test_smart_bins_delivery import connect, prepared
++from test_smart_bins_sending import _Progress
++
++import json
++import time
++from dataclasses import replace
++
++import pytest
++
++import smart_bins_completion_recovery as recovery
++import smart_bins_delivery as delivery
++import smart_bins_followup_reconciliation as recon
++from smart_bins_reconciliation import EvidenceReference
++
++
++@pytest.fixture
++def completed(context):
++    ctx = context
++    recon.initialize_schema()
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    ctx.adapter.complete(
++        ctx.piece, runtime_run_id=ctx.gc.run_recorder.run_id,
++        completed_at=time.time() + 5)
++    assert followup(ctx)["state"] == "DELIVERY_PENDING_PUBLICATION"
++    return ctx, handoff
++
++
++def reference(name):
++    return EvidenceReference(f"synthetic:{name}", "qualified_synthetic_owner_witness")
++
++
++def request_for(ctx, handoff, *, effects=(), holds=(), resolutions=(), key="reconcile-one",
++                actor="synthetic_owner_reviewer"):
++    row = followup(ctx)
++    with connect(ctx.path) as conn:
++        machine_revision = conn.execute(
++            "SELECT state_revision FROM smart_bin_machines WHERE machine_id='m'").fetchone()[0]
++    request = recon.ReconciliationRequest(
++        machine_id="m", followup_id=row["id"], reservation_id=row["reservation_id"],
++        delivery_id=row["delivery_id"], request_key=key,
++        expected_machine_revision=machine_revision,
++        expected_followup_revision=row["row_revision"], actor=actor,
++        reason="synthetic evidence disposition", original_attempt_id=row["release_attempt_id"],
++        original_marker_evidence_ref=row["marker_evidence_ref"],
++        original_completion_evidence_ref=json.loads(row["completion_json"])["completion_evidence_ref"],
++        effects=effects, holds=holds, resolutions=resolutions)
++    now = time.time()
++    owner = recon.OwnerSnapshot(
++        machine_id="m", followup_id=row["id"], reservation_id=row["reservation_id"],
++        current_owner_incarnation="current-owner-separate-from-original",
++        authority_revision="synthetic-current-owner-revision", observed_at=now,
++        expires_at=now + 4, current_owner=True, quiescent=True,
++        publication_attempt_inactive=True, dispatch_invalidated=True,
++        gate_open=False, evidence=reference("fresh-owner-quiescence"))
++    return request, owner
++
++
++def claim(req, effect, status="APPLIED", *, ref=None, proof_kind="OWNER_OBSERVATION"):
++    return recon.EffectEvidence(
++        effect=effect, status=status, evidence=reference(ref or effect),
++        proof_kind=proof_kind, followup_id=req.followup_id,
++        delivery_id=req.delivery_id, original_attempt_id=req.original_attempt_id)
++
++
++def propose_resolution(req, owner, obligation_id):
++    first = recon.preview(req, owner)
++    target = next(item for item in first["resolvable"] if item["id"] == obligation_id)
++    return replace(req, resolutions=(recon.Resolution(
++        obligation_id=obligation_id, source_digest=target["source_digest"],
++        evidence_ref=req.effects[0].evidence.ref if req.effects else owner.evidence.ref),))
++
++
++def apply_reviewed(req, owner):
++    preview = recon.preview(req, owner)
++    assert preview["code"] == "READY", preview
++    return recon.apply(req, owner, expected_preview_hash=preview["preview_hash"])
++
++
++def inventory(conn, reservation_id):
++    return tuple(tuple(row) for row in conn.execute(
++        "SELECT id,state,quantity,intended_kind,intended_slot_id,intended_cycle_id "
++        "FROM smart_bin_reservations WHERE id=?", (reservation_id,)))
++
++
++def preserved(conn, req):
++    return {
++        "reservation": inventory(conn, req.reservation_id),
++        "delivery": tuple(tuple(row) for row in conn.execute(
++            "SELECT * FROM smart_bin_deliveries WHERE id=?", (req.delivery_id,))),
++        "history": tuple(tuple(row) for row in conn.execute(
++            "SELECT * FROM piece_records WHERE uuid=(SELECT piece_uuid FROM "
++            "smart_bin_completion_followups WHERE id=?)", (req.followup_id,))),
++        "attempt": tuple(tuple(row) for row in conn.execute(
++            "SELECT * FROM smart_bin_release_evidence WHERE attempt_id=?",
++            (req.original_attempt_id,))),
++        "old_receipts": tuple(tuple(row) for row in conn.execute(
++            "SELECT * FROM smart_bin_completion_receipts ORDER BY request_key")),
++    }
++
++
++def test_ambiguous_attempt_resolves_only_with_attributed_producer_evidence(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    assert recon.preview(req, owner)["effects"]["EVENT_ENQUEUED"]["status"] == "UNKNOWN"
++    req = replace(req, effects=tuple(claim(req, effect) for effect in recon.PRODUCER_EFFECTS))
++    req = propose_resolution(req, owner, "PUBLICATION")
++    preview = recon.preview(req, owner)
++    assert [item["id"] for item in preview["remaining"]] == [
++        "CLOSURE_PENDING", "OWNER_REQUALIFICATION"]
++    with connect(ctx.path) as conn:
++        before = preserved(conn, req)
++    result = apply_reviewed(req, owner)
++    assert result["code"] == "OK" and result["quantity_effect"] == 0
++    assert [item["id"] for item in result["remaining"]] == [
++        "CLOSURE_PENDING", "OWNER_REQUALIFICATION"]
++    assert [item["obligation_id"] for item in delivery.inspect_recovery("m")["followups"][0]
++            ["resolved_obligations"]] == ["PUBLICATION"]
++    live = delivery.inspect_recovery("m")["followups"][0]
++    with delivery._readonly() as conn:
++        current = recovery.assess_on_connection(conn, "m", handoff.followup_id)
++    assert current["resolved_obligations"] == live["resolved_obligations"]
++    assert current["remaining_obligations"] == live["remaining_obligations"]
++    assert live["state"] == "PUBLICATION_ATTEMPTED"
++    assert [item["id"] for item in live["remaining_obligations"]] == [
++        "CLOSURE_PENDING", "OWNER_REQUALIFICATION"]
++    assert live["effect_inventory"]["EVENT_CONSUMED"]["status"] == "UNKNOWN"
++    assert fresh_owner_blocker() == "unresolved native completion follow-up"
++    assert ctx.adapter.blocks_admission()
++    assert ctx.events.empty() and not handoff.admission_released
++    with connect(ctx.path) as conn:
++        assert preserved(conn, req) == before
++    assert recon.lookup_request(req.request_key)["result"] == result
++
++
++def test_partial_not_applied_and_unknown_effects_keep_publication_blocked(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    req = replace(req, effects=(claim(req, "EVENT_ENQUEUED"),
++                                claim(req, "RUN_RECORDER_ADOPTED", "NOT_APPLIED"),
++                                claim(req, "PROGRESS_RECORDED", "UNKNOWN")))
++    view = recon.preview(req, owner)
++    assert view["code"] == "READY"
++    assert view["resolvable"] == []
++    assert view["effects"]["RUN_RECORDER_ADOPTED"]["status"] == "NOT_APPLIED"
++    assert "PUBLICATION" in [item["id"] for item in view["remaining"]]
++    assert apply_reviewed(req, owner)["code"] == "OK"
++    restarted = delivery.inspect_recovery("m")
++    assert "PUBLICATION" in [item["id"] for item in restarted["followup_blockers"][0]
++                             ["remaining_obligations"]]
++    assert restarted["followups"][0]["effect_inventory"]["RUN_RECORDER_ADOPTED"]["status"] == "NOT_APPLIED"
++
++
++def test_tracker_absence_requires_one_attributed_pair(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    mandatory = tuple(claim(req, name) for name in recon.PRODUCER_EFFECTS[:2])
++    one_optional = claim(req, "PROGRESS_RECORDED", "NOT_REQUIRED",
++                         ref="tracker-absent-at-original-attempt",
++                         proof_kind="ORIGINAL_TRACKER_ABSENT")
++    req = replace(req, effects=mandatory + (one_optional,))
++    assert "ORIGINAL_TRACKER_ABSENCE_NOT_PROVEN" in recon.preview(req, owner)["blockers"]
++    second_optional = claim(req, "PROGRESS_SYNC_NOTIFIED", "NOT_REQUIRED",
++                            ref="tracker-absent-at-original-attempt",
++                            proof_kind="ORIGINAL_TRACKER_ABSENT")
++    req = replace(req, effects=mandatory + (one_optional, second_optional))
++    assert [item["id"] for item in recon.preview(req, owner)["resolvable"]] == ["PUBLICATION"]
++    req = propose_resolution(req, owner, "PUBLICATION")
++    assert apply_reviewed(req, owner)["code"] == "OK"
++    live = delivery.inspect_recovery("m")["followups"][0]
++    assert live["effect_inventory"]["PROGRESS_RECORDED"]["status"] == "NOT_REQUIRED"
++    assert live["effect_inventory"]["EVENT_CONSUMED"]["status"] == "UNKNOWN"
++
++
++def test_publication_succeeded_still_requires_normal_closure(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    recovery.transition("m", handoff.followup_id, action="PUBLICATION_SUCCEEDED",
++                        expected_revision=followup(ctx)["row_revision"],
++                        request_key=f"{handoff.request_key}:publication-succeeded",
++                        delivery_id=handoff.receipt["delivery_id"])
++    req, owner = request_for(ctx, handoff)
++    view = recon.preview(req, owner)
++    assert "CLOSURE_PENDING" in [item["id"] for item in view["remaining"]]
++    assert all(item["id"] != "CLOSURE_PENDING" for item in view["resolvable"])
++    restarted = delivery.inspect_recovery("m")["followup_blockers"][0]
++    assert "CLOSURE_PENDING" in [item["id"] for item in restarted["remaining_obligations"]]
++
++
++def test_owner_or_gate_evidence_cannot_replace_callback_evidence(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    late_hold(ctx, handoff, kind="SIDE_EFFECT_FAILED")
++    req, owner = request_for(ctx, handoff)
++    with connect(ctx.path) as conn:
++        hold = conn.execute("SELECT id FROM smart_bin_audit_events WHERE request_key='late-hold'").fetchone()[0]
++    req = replace(req, holds=(recon.HoldEvidence(hold, "GATE_OPEN", reference("gate-open")),))
++    owner = replace(owner, gate_open=True)
++    view = recon.preview(req, owner)
++    assert view["resolvable"] == []
++    assert "PUBLICATION" in [item["id"] for item in view["remaining"]]
++    assert "HOLD:" + hold in [item["id"] for item in view["remaining"]]
++    assert apply_reviewed(req, owner)["code"] == "OK"
++    live = delivery.inspect_recovery("m")["followups"][0]
++    assert not live["resolved_obligations"]
++    assert "PUBLICATION" in [item["id"] for item in live["remaining_obligations"]]
++
++
++def test_real_gate_failure_rejects_successful_callback_claim(completed, monkeypatch):
++    ctx, handoff = completed
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    actual_gate = ctx.shared.set_distribution_gate
++    gate_attempts = []
++
++    def fail_gate_open(ready, *, reason):
++        if ready:
++            gate_attempts.append(reason)
++            raise OSError("synthetic gate opening failure")
++        return actual_gate(ready, reason=reason)
++
++    monkeypatch.setattr(ctx.shared, "set_distribution_gate", fail_gate_open)
++    settle_time(ctx)
++    assert ctx.sending.step() is None
++    row = followup(ctx)
++    assert row["state"] == "CLOSED" and row["failure_kind"] == "SIDE_EFFECT_FAILED"
++    assert len(gate_attempts) == ctx.events.qsize() == progress.calls == 1
++    assert not ctx.shared.distribution_ready and not handoff.admission_released
++    with connect(ctx.path) as conn:
++        hold_id = conn.execute(
++            "SELECT id FROM smart_bin_audit_events WHERE request_key=?",
++            (f"{handoff.request_key}:side-effect-failed",)).fetchone()[0]
++    req, owner = request_for(ctx, handoff)
++    req = replace(req, effects=tuple(claim(req, effect) for effect in recon.PRODUCER_EFFECTS),
++                  holds=(recon.HoldEvidence(
++                      hold_id, "CALLBACKS_APPLIED", reference("callbacks-returned")),))
++    view = recon.preview(req, owner)
++    assert "HOLD:" + hold_id not in [item["id"] for item in view["resolvable"]]
++    assert "HOLD:" + hold_id in [item["id"] for item in view["remaining"]]
++
++
++def test_named_closed_gate_hold_resolves_but_new_owner_hold_survives(completed, monkeypatch):
++    ctx, handoff = completed
++    actual_gate = ctx.shared.set_distribution_gate
++
++    def fail_gate_open(ready, *, reason):
++        if ready:
++            raise OSError("synthetic gate opening failure")
++        return actual_gate(ready, reason=reason)
++
++    monkeypatch.setattr(ctx.shared, "set_distribution_gate", fail_gate_open)
++    settle_time(ctx)
++    assert ctx.sending.step() is None
++    raw = followup(ctx)
++    assert raw["state"] == "CLOSED" and raw["failure_kind"] == "SIDE_EFFECT_FAILED"
++    req, owner = request_for(ctx, handoff)
++    with connect(ctx.path) as conn:
++        gate_id = conn.execute("SELECT id FROM smart_bin_audit_events WHERE request_key=?",
++                               (f"{handoff.request_key}:side-effect-failed",)).fetchone()[0]
++        recorded = json.loads(conn.execute(
++            "SELECT result_json FROM smart_bin_completion_receipts WHERE request_key=?",
++            (f"{handoff.request_key}:side-effect-failed",)).fetchone()[0])
++    assert recorded["failure_phase"] == "GATE_OPEN"
++    req = replace(req, holds=(recon.HoldEvidence(gate_id, "GATE_OPEN", reference("gate")),))
++    owner = replace(owner, gate_open=True)
++    req = propose_resolution(req, owner, "HOLD:" + gate_id)
++    result = apply_reviewed(req, owner)
++    live = delivery.inspect_recovery("m")["followups"][0]
++    assert "synthetic gate opening failure" in live["failure_reason"]
++    assert live["effect_inventory"]["PROGRESS_RECORDED"]["status"] == "UNKNOWN"
++    assert [item["id"] for item in live["remaining_obligations"]] == ["OWNER_REQUALIFICATION"]
++    assert live["resolved_obligations"][0]["obligation_id"] == "HOLD:" + gate_id
++    recovery.record_hold("m", handoff.followup_id, kind="OWNERSHIP_LOST",
++                         reason="later contradictory owner evidence",
++                         expected_revision=raw["row_revision"], request_key="later-owner-hold")
++    restarted = delivery.inspect_recovery("m")["followups"][0]
++    assert any(item["kind"] == "OWNERSHIP_LOST" for item in restarted["remaining_obligations"])
++    assert recon.apply(req, owner, expected_preview_hash=result["preview_hash"]) == result
++    assert any(item["kind"] == "OWNERSHIP_LOST" for item in
++               delivery.inspect_recovery("m")["followup_blockers"][0]["remaining_obligations"])
++    assert ctx.adapter.blocks_admission()
++    assert not ctx.adapter.releases_admission(handoff.reservation_id, handoff.attempt_id)
++
++
++def test_unattributed_old_failure_phase_refuses_both_cause_labels(completed):
++    ctx, handoff = completed
++    settle_time(ctx)
++    ctx.sending.step()
++    assert followup(ctx)["state"] == "CLOSED"
++    recovery.record_hold("m", handoff.followup_id, kind="SIDE_EFFECT_FAILED",
++                         reason="old ambiguous side-effect failure",
++                         expected_revision=followup(ctx)["row_revision"],
++                         request_key="old-ambiguous-hold")
++    with connect(ctx.path) as conn:
++        hold_id = conn.execute("SELECT id FROM smart_bin_audit_events "
++                               "WHERE request_key='old-ambiguous-hold'").fetchone()[0]
++    req, owner = request_for(ctx, handoff)
++    owner = replace(owner, gate_open=True)
++    effects = tuple(claim(req, effect) for effect in recon.PRODUCER_EFFECTS)
++    for cause in ("GATE_OPEN", "CALLBACKS_APPLIED"):
++        candidate = replace(req, effects=effects,
++                            holds=(recon.HoldEvidence(hold_id, cause, reference(cause)),))
++        view = recon.preview(candidate, owner)
++        assert view["code"] == "READY"
++        assert "HOLD:" + hold_id not in [item["id"] for item in view["resolvable"]]
++        assert any(item["id"] == "HOLD:" + hold_id and
++                   item["failure_phase"] == "UNKNOWN" for item in view["remaining"])
++
++
++def test_callback_phase_rejects_gate_evidence_and_accepts_callback_proof(completed,
++                                                                          monkeypatch):
++    ctx, handoff = completed
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    import server.set_progress_sync as sync
++
++    class NotifyThenLoseAck:
++        calls = 0
++
++        def notify(self):
++            self.calls += 1
++            raise OSError("synthetic notification acknowledgement lost")
++
++    worker = NotifyThenLoseAck()
++    monkeypatch.setattr(sync, "getSetProgressSyncWorker", lambda: worker)
++    settle_time(ctx)
++    assert ctx.sending.step() is None
++    assert progress.calls == worker.calls == ctx.events.qsize() == 1
++    row = followup(ctx)
++    assert row["state"] == "PUBLICATION_ATTEMPTED"
++    assert row["failure_kind"] == "SIDE_EFFECT_FAILED"
++    with connect(ctx.path) as conn:
++        hold_id = conn.execute("SELECT id FROM smart_bin_audit_events WHERE request_key=?",
++                               (f"{handoff.request_key}:side-effect-failed",)).fetchone()[0]
++    req, owner = request_for(ctx, handoff)
++    owner = replace(owner, gate_open=True)
++    effects = tuple(claim(req, effect) for effect in recon.PRODUCER_EFFECTS)
++    gate = replace(req, effects=effects,
++                   holds=(recon.HoldEvidence(hold_id, "GATE_OPEN", reference("gate")),))
++    gate_view = recon.preview(gate, owner)
++    assert "HOLD:" + hold_id not in [item["id"] for item in gate_view["resolvable"]]
++    callbacks = replace(req, effects=effects, holds=(recon.HoldEvidence(
++        hold_id, "CALLBACKS_APPLIED", reference("callbacks")),))
++    callback_view = recon.preview(callbacks, owner)
++    assert "HOLD:" + hold_id in [item["id"] for item in callback_view["resolvable"]]
++    assert "CLOSURE_PENDING" in [item["id"] for item in callback_view["remaining"]]
++
++
++def test_wrong_identity_stale_preview_and_untrusted_actor_refuse(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    assert "FOLLOWUP_NOT_FOUND" in recon.preview(replace(req, machine_id="wrong"), owner)["blockers"]
++    assert "FOLLOWUP_IDENTITY_MISMATCH" in recon.preview(
++        replace(req, delivery_id="wrong"), owner)["blockers"]
++    assert "FOLLOWUP_IDENTITY_MISMATCH" in recon.preview(
++        replace(req, original_marker_evidence_ref="wrong"), owner)["blockers"]
++    with pytest.raises(ValueError):
++        recon.preview(replace(req, actor=""), owner)
++    assert "CURRENT_OWNER_QUIESCENCE_REQUIRED" in recon.preview(
++        req, replace(owner, evidence=EvidenceReference("x", "unknown")))["blockers"]
++    view = recon.preview(req, owner)
++    assert recon.apply(req, owner, expected_preview_hash="stale")["code"] == "REFUSED"
++    assert recon.apply(replace(req, expected_followup_revision=999), owner,
++                       expected_preview_hash=view["preview_hash"])["code"] == "REFUSED"
++
++
++def test_missing_history_defers(completed):
++    ctx, handoff = completed
++    req, owner = request_for(ctx, handoff)
++    with connect(ctx.path) as conn:
++        conn.execute("DELETE FROM piece_records WHERE uuid=?", (ctx.piece.uuid,))
++    assert "COMPLETED_MATCHING_DELIVERY_HISTORY_REQUIRED" in recon.preview(req, owner)["blockers"]
++    with connect(ctx.path) as conn:
++        # The history test is isolated; the external case uses a fresh fixture below.
++        assert conn.execute("SELECT count(*) FROM piece_records WHERE uuid=?",
++                            (ctx.piece.uuid,)).fetchone()[0] == 0
++
++
++def test_pending_delivery_defers(context):
++    ctx = context
++    recon.initialize_schema()
++    ctx.discharge()
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    # RETAINED has no delivery, so a manufactured request still defers.
++    row = followup(ctx)
++    with connect(ctx.path) as conn:
++        rev = conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id='m'").fetchone()[0]
++    req = recon.ReconciliationRequest("m", row["id"], row["reservation_id"],
++                                      "missing-delivery", "pending", rev, row["row_revision"],
++                                      "actor", "reason", row["release_attempt_id"],
++                                      row["marker_evidence_ref"], "missing-completion", ())
++    now = time.time()
++    owner = recon.OwnerSnapshot("m", row["id"], row["reservation_id"], "fresh-owner", "r1",
++                                now, now + 4, True, True, True, True, False, reference("owner"))
++    assert "COMPLETED_MATCHING_DELIVERY_HISTORY_REQUIRED" in recon.preview(req, owner)["blockers"]
++
++
++def test_external_workflow_defers(completed):
++    ctx, handoff = completed
++    req, owner = request_for(ctx, handoff)
++    with connect(ctx.path) as conn:
++        conn.execute("INSERT INTO smart_bin_external_operations VALUES("
++                     "'external','m',?,'harvest','quota','external-key','hash',NULL,"
++                     "'pending',NULL,1,1)", (req.reservation_id,))
++    assert "HARVEST_OR_EXTERNAL_OPERATION_DEFERRED" in recon.preview(req, owner)["blockers"]
++
++
++def test_exact_replay_changed_payload_and_stale_competitor(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    result = apply_reviewed(req, owner)
++    assert recon.apply(req, owner, expected_preview_hash=result["preview_hash"]) == result
++    assert recon.apply(replace(req, reason="changed"), owner,
++                       expected_preview_hash=result["preview_hash"])["code"] == "IDEMPOTENCY_CONFLICT"
++    competing = replace(req, request_key="competing")
++    view = recon.preview(competing, owner)
++    assert "STALE_REVISION" in view["blockers"]
++
++
++def test_new_discrepancy_invalidates_preview_without_revision_change(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    view = recon.preview(req, owner)
++    with connect(ctx.path) as conn:
++        conn.execute("INSERT INTO smart_bin_discrepancies "
++                     "(id,machine_id,reservation_id,kind,status,details_json,created_at) "
++                     "VALUES('new-discrepancy','m',?,'OWNER_CONFLICT','open','{}',1)",
++                     (req.reservation_id,))
++    result = recon.apply(req, owner, expected_preview_hash=view["preview_hash"])
++    assert result["code"] == "REFUSED" and "STALE_PREVIEW" in result["blockers"]
++    assert "DISCREPANCY:new-discrepancy" in [item["id"] for item in result["remaining"]]
++
++
++def test_predecessor_hold_remains_after_successor_disposition(completed):
++    ctx, first_handoff = completed
++    settle_time(ctx)
++    ctx.sending.step()
++    _, first_handoff = second_native_piece(ctx)
++    second_handoff = ctx.adapter.require_handoff(ctx.piece)
++    ctx.adapter.complete(ctx.piece, runtime_run_id=ctx.gc.run_recorder.run_id,
++                         completed_at=time.time() + 5)
++    late_hold(ctx, first_handoff, kind="OWNERSHIP_LOST", key="older-owner-hold")
++    req, owner = request_for(ctx, second_handoff, key="successor-disposition")
++    assert apply_reviewed(req, owner)["code"] == "OK"
++    report = delivery.inspect_recovery("m")
++    assert len(report["followup_blockers"]) == 2
++    older = next(item for item in report["followup_blockers"]
++                 if item["followup_id"] == first_handoff.followup_id)
++    assert any(item["kind"] == "OWNERSHIP_LOST" for item in older["remaining_obligations"])
++    assert ctx.adapter.blocks_admission()
++
++
++def test_conflicting_later_effect_claim_does_not_erase_original(completed):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    req = replace(req, effects=(claim(req, "EVENT_ENQUEUED", "NOT_APPLIED"),))
++    assert apply_reviewed(req, owner)["code"] == "OK"
++    later, fresh_owner = request_for(ctx, handoff, key="later-contradiction")
++    later = replace(later, effects=(claim(later, "EVENT_ENQUEUED", "APPLIED"),))
++    view = recon.preview(later, fresh_owner)
++    assert "CONFLICTING_EFFECT_EVIDENCE" in view["blockers"]
++    assert recon.apply(later, fresh_owner, expected_preview_hash=view["preview_hash"])["code"] == "REFUSED"
++    report = delivery.inspect_recovery("m")["followups"][0]
++    assert report["effect_inventory"]["EVENT_ENQUEUED"]["status"] == "NOT_APPLIED"
++    assert any(item["id"] == "PUBLICATION" for item in report["remaining_obligations"])
++
++
++def test_transaction_failure_rolls_back_every_record(completed, monkeypatch):
++    ctx, handoff = completed
++    ctx.adapter.begin_publication(handoff)
++    req, owner = request_for(ctx, handoff)
++    req = replace(req, effects=tuple(claim(req, effect) for effect in recon.PRODUCER_EFFECTS))
++    req = propose_resolution(req, owner, "PUBLICATION")
++    view = recon.preview(req, owner)
++    with connect(ctx.path) as conn:
++        before = preserved(conn, req)
++        revs = tuple(conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id='m'").fetchone())
++    # Force failure at the final receipt insert, after audit, disposition and revisions.
++    import smart_bins_storage
++    original = smart_bins_storage.critical_transaction
++    class FailingConnection:
++        def __init__(self, conn): self.conn = conn
++        def __getattr__(self, key): return getattr(self.conn, key)
++        def execute(self, sql, params=()):
++            if sql.startswith("INSERT INTO smart_bin_followup_reconciliation_receipts"):
++                raise OSError("synthetic receipt write failure")
++            return self.conn.execute(sql, params)
++    from contextlib import contextmanager
++    @contextmanager
++    def failed_transaction():
++        with original() as conn:
++            yield FailingConnection(conn)
++    monkeypatch.setattr(recon, "critical_transaction", failed_transaction)
++    with pytest.raises(OSError, match="synthetic receipt"):
++        recon.apply(req, owner, expected_preview_hash=view["preview_hash"])
++    with connect(ctx.path) as conn:
++        assert preserved(conn, req) == before
++        assert tuple(conn.execute("SELECT state_revision FROM smart_bin_machines WHERE machine_id='m'").fetchone()) == revs
++        for table in ("smart_bin_followup_reconciliation_dispositions",
++                      "smart_bin_followup_reconciliation_links",
++                      "smart_bin_followup_reconciliation_receipts"):
++            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
++        assert conn.execute("SELECT count(*) FROM smart_bin_audit_events WHERE request_key=?",
++                            (req.request_key,)).fetchone()[0] == 0
