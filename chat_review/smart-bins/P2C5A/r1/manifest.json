@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2C5A r1",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true,
+    "uncommitted": true,
+    "python": "3.12.12"
+  },
+  "accepted_predecessor": {
+    "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+    "package": "chat_review/smart-bins/P2C4/r3",
+    "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187"
+  },
+  "predecessor_chain": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2",
+      "patch": "P2B.patch"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2",
+      "patch": "P2C1.patch"
+    },
+    {
+      "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+      "package": "chat_review/smart-bins/P2C2/r2",
+      "patch": "P2C2.patch"
+    },
+    {
+      "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+      "package": "chat_review/smart-bins/P2C3/r3",
+      "patch": "P2C3.patch"
+    },
+    {
+      "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+      "package": "chat_review/smart-bins/P2C4/r3",
+      "patch": "P2C4.patch"
+    }
+  ],
+  "patch": {
+    "file": "P2C5A.patch",
+    "scope": "slice only",
+    "base_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187",
+    "result_tree": "06db1f4e13695b4b45a5fbb295584e82b3f2f2d3",
+    "paths": [
+      "software/sorter/backend/smart_bins_completion_recovery.py",
+      "software/sorter/backend/smart_bins_migration.py",
+      "software/sorter/backend/smart_bins_reconciliation.py",
+      "software/sorter/backend/smart_bins_service.py",
+      "software/sorter/backend/tests/test_smart_bins_reconciliation.py"
+    ]
+  },
+  "reconstruction": {
+    "start_commit": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "ordered_predecessors": [
+      {
+        "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+        "package": "chat_review/smart-bins/P1/r2",
+        "patch": "P1.patch"
+      },
+      {
+        "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+        "package": "chat_review/smart-bins/P2A1/r2",
+        "patch": "P2A1.patch"
+      },
+      {
+        "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+        "package": "chat_review/smart-bins/P2A2/r3",
+        "patch": "P2A2.patch"
+      },
+      {
+        "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+        "package": "chat_review/smart-bins/P2B/r2",
+        "patch": "P2B.patch"
+      },
+      {
+        "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+        "package": "chat_review/smart-bins/P2C1/r2",
+        "patch": "P2C1.patch"
+      },
+      {
+        "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+        "package": "chat_review/smart-bins/P2C2/r2",
+        "patch": "P2C2.patch"
+      },
+      {
+        "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+        "package": "chat_review/smart-bins/P2C3/r3",
+        "patch": "P2C3.patch"
+      },
+      {
+        "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+        "package": "chat_review/smart-bins/P2C4/r3",
+        "patch": "P2C4.patch"
+      }
+    ],
+    "then_patch": "chat_review/smart-bins/P2C5A/r1/P2C5A.patch",
+    "accepted_tree_verified": true,
+    "result_tree_verified": true,
+    "all_source_blobs_verified": true
+  },
+  "source_test_files": {
+    "software/sorter/backend/smart_bins_reconciliation.py": {
+      "sha256": "326c4f3014cf7b20b37ed1433e576e3b4fff413e2bf126c06a7640327027f53b",
+      "before_sha256": null,
+      "blob_oid": "87c1f8d2b9da1c0dbf88408a1a356e2fefb7a965",
+      "change": "new_untracked"
+    },
+    "software/sorter/backend/smart_bins_migration.py": {
+      "sha256": "3f746cc59cee04e1c2d82f0c6b903a7dbc9db5f7822635ad4a11c282840516b9",
+      "before_sha256": "ba7087a9ea507980afb837d9704366d16e3bc8ce7313adb860a1be54991e5ee5",
+      "blob_oid": "841cea048d769523077679625f0079cd5b935049",
+      "change": "modified"
+    },
+    "software/sorter/backend/smart_bins_service.py": {
+      "sha256": "86e38f4b71e8cfc9385100db87c67873499c7dbdf897457f442af0df2bf3f045",
+      "before_sha256": "2018ef6d4256750cad93f2c1173959faf498156184fddd7262c975eaf0fa0a5f",
+      "blob_oid": "b8a55681b54eb1a03554a5ca863a3093081e9fda",
+      "change": "modified"
+    },
+    "software/sorter/backend/smart_bins_completion_recovery.py": {
+      "sha256": "c73e5009603d8610ad8d3af93cad73a309cc32016420014683d6d409a4d6d541",
+      "before_sha256": "97936d499557063acf319101376901e751fa12a7277c8612d2e572fa24621363",
+      "blob_oid": "9e055f51929c25fcb13563abe6d9006af76a0ae9",
+      "change": "modified"
+    },
+    "software/sorter/backend/tests/test_smart_bins_reconciliation.py": {
+      "sha256": "aa943ed705d4b1e013d061d24c90a52b140fc7cf59d25cbf57bbaecc5af1f670",
+      "before_sha256": null,
+      "blob_oid": "814c38002c61f54a19b9fb2d4185d463d7bc50ee",
+      "change": "new_untracked"
+    }
+  },
+  "tests": [
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_reconciliation.py -q",
+      "result": "74 passed in 12.75s"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_reconciliation.py tests/test_smart_bins_delivery.py tests/test_smart_bins_reservations.py tests/test_smart_bins_storage.py tests/test_smart_bins_migration.py tests/test_smart_bins_completion_recovery.py -q",
+      "result": "232 passed in 33.24s"
+    }
+  ],
+  "verification": {
+    "independent_review": "pending; no subagents requested",
+    "protected_existing_files": 27,
+    "protected_files_unchanged": true,
+    "three_blocked_indexes_unchanged": true,
+    "remote_readback": "required after artifact publication",
+    "source_diff_check": "passed",
+    "report_manifest_whitespace_check": "passed",
+    "patch_artifact_whitespace_check": "four single-space blank context lines are required unified-diff syntax; source diff and reconstruction pass"
+  },
+  "publication": {
+    "branch": "chat-review",
+    "parent": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+    "allowlist": [
+      "chat_review/smart-bins/P2C5A/r1/REVIEW.md",
+      "chat_review/smart-bins/P2C5A/r1/P2C5A.patch",
+      "chat_review/smart-bins/P2C5A/r1/manifest.json"
+    ],
+    "github_workflows": 0,
+    "github_webhooks": 0
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2C5A/r1/REVIEW.md": "4af9d77d9715efe2771b9f32bd46ece7ed6de79e744f10edad26bfcaf43f7b77",
+    "chat_review/smart-bins/P2C5A/r1/P2C5A.patch": "f50ed2a8b35c970c619a2d83625c7bfb6307c477fbc5094e086fd2788a349b68"
+  }
+}
