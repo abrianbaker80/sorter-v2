@@ -632,40 +632,6 @@ def set_sample_capture(payload: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-@router.post("/api/system/force-teacher-capture")
-def force_teacher_capture(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Queue a Gemini-labeled teacher capture for a given role on demand.
-
-    Bypasses the YOLO-driven classic trigger so we can still collect
-    Gemini-labeled samples from a channel whose live detector is missing
-    real pieces (typical for C4 carousel until a carousel-trained model
-    exists). Accepts C4 aliases plus C2/C3.
-    """
-    role = str(payload.get("role") or "").strip()
-    role = {
-        "c4": "carousel",
-        "c_channel_4": "carousel",
-        "classification_channel": "carousel",
-    }.get(role, role)
-    if role not in {"carousel", "c_channel_2", "c_channel_3"}:
-        return {
-            "ok": False,
-            "reason": "invalid_role",
-            "valid": [
-                "carousel",
-                "classification_channel",
-                "c4",
-                "c_channel_2",
-                "c_channel_3",
-            ],
-        }
-    vm = shared_state.vision_manager
-    if vm is None or not hasattr(vm, "forceQueueAuxiliaryTeacherCapture"):
-        return {"ok": False, "reason": "vision_not_initialized"}
-    queued = bool(vm.forceQueueAuxiliaryTeacherCapture(role))
-    return {"ok": True, "role": role, "queued": queued}
-
-
 class ClientErrorPayload(BaseModel):
     message: Optional[str] = None
     source: Optional[str] = None

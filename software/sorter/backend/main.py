@@ -430,7 +430,7 @@ def main() -> None:
 
         camera_service.set_health_event_callback(_on_camera_health_change)
     with gc.profiler.timer("startup.vision_init_ms"):
-        vision = VisionManager(irl_config, gc, irl, camera_service)
+        vision = VisionManager(gc, camera_service)
         setVisionManager(vision)
     # Controller is deferred until hardware is started
     controller = None
@@ -513,11 +513,6 @@ def main() -> None:
 
     with gc.profiler.timer("startup.camera_service_start_ms"):
         camera_service.start()
-    # Rev04: build the perception service BEFORE vision.start() so the
-    # VisionManager's start path can see gc.perception_service and skip
-    # legacy detection startup in the new mode pair. The build() helper
-    # waits briefly for camera frames so the channel masks can be sized
-    # against the real camera resolution.
     with gc.profiler.timer("startup.perception_start_ms"):
         _startPerception(gc, irl_config, camera_service)
     # Mode-agnostic: the sample collector runs in every config, gated only by
@@ -662,11 +657,8 @@ def main() -> None:
                     gc.logger.warning(f"Failed to open servo: {e}. Continuing without initialization.")
             _checkServoBusHealth(gc, irl)
 
-        if not vision.initFeederDetection():
-            gc.logger.warning("Feeder channel polygons not found — continuing without feeder detection")
-
         if not _noPowerModeActive(gc):
-            from subsystems.classification_channel.simple_state_machine_rev01.spoke_home import (
+            from subsystems.classification_channel.two_piece.spoke_home import (
                 maybeRunSpokeHome,
             )
 

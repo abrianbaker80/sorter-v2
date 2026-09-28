@@ -179,11 +179,6 @@
 	let nameError = $state<string | null>(null);
 	let nameStatus = $state('');
 
-	let selectedLayout = $state<'default' | 'split_feeder'>('split_feeder');
-	let savingLayout = $state(false);
-	let layoutStatus = $state('');
-	let layoutError = $state<string | null>(null);
-
 	let usbCameras = $state<UsbCamera[]>([]);
 	let networkCameras = $state<NetworkCamera[]>([]);
 	let loadingCameras = $state(false);
@@ -418,10 +413,7 @@
 			case 'discovery':
 				return Boolean(wizard?.readiness.boards_detected);
 			case 'cameras':
-				return (
-					Boolean(wizard?.readiness.camera_layout_selected) &&
-					Boolean(wizard?.readiness.cameras_assigned)
-				);
+				return Boolean(wizard?.readiness.cameras_assigned);
 			case 'motion':
 				return Boolean(stepConfirmations.motion);
 			case 'calibration':
@@ -526,7 +518,6 @@
 			return null;
 		},
 		cameras: () => {
-			if (!wizard?.readiness.camera_layout_selected) return 'Select a camera layout to continue';
 			if (!wizard?.readiness.cameras_assigned) return 'Assign cameras to all required areas';
 			return null;
 		},
@@ -595,14 +586,6 @@
 			const savedNickname = payload.machine.nickname ?? '';
 			if (nicknameDraft === loadedNickname) nicknameDraft = savedNickname;
 			loadedNickname = savedNickname;
-			const configuredLayout = payload.config.camera_assignments.layout;
-			selectedLayout =
-				configuredLayout === 'split_feeder'
-					? 'split_feeder'
-					: configuredLayout === 'default'
-						? 'default'
-						: payload.discovery.recommended_camera_layout;
-
 			const nextSelections: Record<string, string> = {};
 			for (const role of Object.keys(payload.config.camera_assignments)) {
 				if (role === 'layout') continue;
@@ -766,7 +749,7 @@
 					sourceKey(wizard?.config.camera_assignments[role] ?? null) !==
 					(roleSelections[role] ?? '__none__')
 			);
-			const payload: Record<string, number | string | null> = { layout: selectedLayout };
+			const payload: Record<string, number | string | null> = {};
 			for (const role of CAMERA_ROLES) {
 				payload[role] = parseCameraSource(roleSelections[role] ?? '__none__');
 			}
@@ -1030,7 +1013,6 @@
 							cameraChoices={cameraChoices()}
 							{selectedCameraLabel}
 							{savingAssignments}
-							{savingLayout}
 							{cameraError}
 							{cameraStatus}
 							onSelect={handleRoleSelection}

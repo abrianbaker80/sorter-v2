@@ -9,14 +9,14 @@ from defs.known_object import (
     RecognitionImage,
 )
 
-from . import crop_quality
-from .simple_state_machine_rev01.base import Rev01BaseState
-from .simple_state_machine_rev01.channel_clear import (
+from .. import crop_quality
+from .base import Rev01BaseState
+from .channel_clear import (
     ChannelClearResult,
     clearChannelByAdvancing,
 )
-from .simple_state_machine_rev01.constants import C4_TRAVEL_SIGN
-from .simple_state_machine_rev01.context import SimpleStateMachineRev01Context
+from .constants import C4_TRAVEL_SIGN
+from .context import SimpleStateMachineRev01Context
 
 LOG_TAG = "[C4-2PIECE]"
 
@@ -265,7 +265,6 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             self.gc,
             self.irl,
             self.irl_config,
-            vision=self.cv._vision,
             max_output_deg=max_output_deg,
             label=LOG_TAG,
         )
@@ -735,7 +734,7 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         frame_ts = float(perc_frame.timestamp)
         if frame_ts <= ctx.last_capture_frame_ts:
             return
-        crop = self.cv.cropBbox(perc_frame.bgr, bbox, ctx.config.crop_padding_px)
+        crop = self.cropBbox(perc_frame.bgr, bbox, ctx.config.crop_padding_px)
         if crop is None:
             return
         sharp = self.sharpness(crop)

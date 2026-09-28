@@ -10,8 +10,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 import stepper_telemetry
-from machine_toml import machine_toml_path
-from toml_config import loadTomlFile
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -43,7 +41,6 @@ MAX_STEPPER_PULSE_DURATION_S = 120.0
 
 class StateResponse(BaseModel):
     state: str
-    camera_layout: str = "default"
 
 
 class CommandResponse(BaseModel):
@@ -120,17 +117,6 @@ class TmcSettingsRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _getCameraLayout() -> str:
-    if shared_state.vision_manager is not None:
-        return getattr(shared_state.vision_manager, "_camera_layout", "default")
-    # Fallback: read directly from TOML
-    params_path = machine_toml_path()
-    if params_path.exists():
-        raw = loadTomlFile(params_path)
-        return raw.get("cameras", {}).get("layout", "default")
-    return "default"
 
 
 def _stepper_mapping() -> Dict[str, Any]:
@@ -544,10 +530,9 @@ def _persist_stepper_current(api_name: str, irun: int, ihold: int) -> None:
 
 @router.get("/state", response_model=StateResponse)
 def getState() -> StateResponse:
-    layout = _getCameraLayout()
     if shared_state.controller_ref is None:
-        return StateResponse(state=SorterLifecycle.INITIALIZING.value, camera_layout=layout)
-    return StateResponse(state=shared_state.controller_ref.state.value, camera_layout=layout)
+        return StateResponse(state=SorterLifecycle.INITIALIZING.value)
+    return StateResponse(state=shared_state.controller_ref.state.value)
 
 
 @router.post("/pause", response_model=CommandResponse)

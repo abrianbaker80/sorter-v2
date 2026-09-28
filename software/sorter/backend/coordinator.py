@@ -51,7 +51,6 @@ class Coordinator:
             self.sorting_profile,
             self.distribution_layout,
             event_queue,
-            vision=vision,
             post_distribute_cooldown_s=float(
                 getattr(irl_config.classification_channel_config, "post_distribute_cooldown_s", 0.0)
                 or 0.0
@@ -122,9 +121,6 @@ class Coordinator:
         prof = self.gc.profiler
         prof.hit("coordinator.step.calls")
         prof.mark("coordinator.step.interval_ms")
-        # Thread-attribution: name the thread the coordinator is running on so
-        # we can prove it never does inference work itself. Cross-reference
-        # with inference.by_thread.* counters in vision_manager._runHiveDetection.
         import threading as _th
         _t = _th.current_thread().name
         _safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in _t) or "unknown"

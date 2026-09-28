@@ -45,11 +45,6 @@
 	import CalibrationPanel, { hasTileDetails } from './picture/CalibrationPanel.svelte';
 	import CaptureModePanel from './picture/CaptureModePanel.svelte';
 	import DriftDetection from './picture/DriftDetection.svelte';
-	import ColorProfilePanel, {
-		hasCalibrationData,
-		normalizeCameraColorProfile,
-		type CameraColorProfile
-	} from './picture/ColorProfilePanel.svelte';
 	import DeviceControlsPanel from './picture/DeviceControlsPanel.svelte';
 	import OrientationPanel from './picture/OrientationPanel.svelte';
 	import LLMCalibrationTrace from '$lib/components/calibration/LLMCalibrationTrace.svelte';
@@ -123,7 +118,6 @@
 	let calibrationNeedsSave = $state(false);
 	const CALIBRATION_METHOD_STORAGE_KEY = 'camera-calibration-method';
 	const CALIBRATION_OPENROUTER_MODEL_STORAGE_KEY = 'camera-calibration-openrouter-model';
-	const CALIBRATION_APPLY_COLOR_PROFILE_STORAGE_KEY = 'camera-calibration-apply-color-profile';
 	const DEFAULT_CALIBRATION_OPENROUTER_MODEL = 'anthropic/claude-sonnet-4.6';
 
 	function loadStoredCalibrationMethod(): CameraCalibrationMethod {
@@ -148,26 +142,8 @@
 		return DEFAULT_CALIBRATION_OPENROUTER_MODEL;
 	}
 
-	function loadStoredCalibrationApplyColorProfile(): boolean {
-		if (typeof window === 'undefined') return true;
-		try {
-			const raw = window.localStorage.getItem(CALIBRATION_APPLY_COLOR_PROFILE_STORAGE_KEY);
-			if (raw === 'false') return false;
-			if (raw === 'true') return true;
-		} catch {
-			// ignore — storage may be disabled
-		}
-		return true;
-	}
-
 	let calibrationMethod = $state<CameraCalibrationMethod>(loadStoredCalibrationMethod());
 	let calibrationOpenrouterModel = $state(loadStoredCalibrationOpenrouterModel());
-	let calibrationApplyColorProfile = $state(loadStoredCalibrationApplyColorProfile());
-	let colorProfile = $state<CameraColorProfile | null>(null);
-	let colorCorrectionGloballyEnabled = $state(true);
-	let colorProfileLoading = $state(false);
-	let colorProfileRemoving = $state(false);
-	let colorProfileToggling = $state(false);
 	let calibrationTraceEnlarged = $state(false);
 	let calibrationTaskId = $state<string | null>(null);
 	let calibrationAdvisorTrace = $state<CameraCalibrationAdvisorIteration[]>([]);
@@ -231,18 +207,6 @@
 			window.localStorage.setItem(
 				CALIBRATION_OPENROUTER_MODEL_STORAGE_KEY,
 				calibrationOpenrouterModel
-			);
-		} catch {
-			// ignore — storage may be disabled
-		}
-	});
-
-	$effect(() => {
-		if (typeof window === 'undefined') return;
-		try {
-			window.localStorage.setItem(
-				CALIBRATION_APPLY_COLOR_PROFILE_STORAGE_KEY,
-				calibrationApplyColorProfile ? 'true' : 'false'
 			);
 		} catch {
 			// ignore — storage may be disabled
@@ -427,65 +391,6 @@
 		applyDeviceResponse(data);
 	}
 
-	async function loadColorProfile() {
-		colorProfileLoading = true;
-		try {
-			const res = await fetch(`${getBackendHttpBase()}/api/cameras/color-profile/${role}`, {
-				cache: 'no-store'
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			colorProfile = normalizeCameraColorProfile(data.profile);
-			colorCorrectionGloballyEnabled = data.globally_enabled !== false;
-		} catch {
-			colorProfile = null;
-		} finally {
-			colorProfileLoading = false;
-		}
-	}
-
-	async function removeColorProfile() {
-		if (colorProfileRemoving) return;
-		colorProfileRemoving = true;
-		error = null;
-		try {
-			const res = await fetch(`${getBackendHttpBase()}/api/cameras/color-profile/${role}`, {
-				method: 'DELETE'
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			colorProfile = normalizeCameraColorProfile(data.profile);
-			status = data.message ?? 'Color correction removed.';
-		} catch (e: any) {
-			error = e.message ?? 'Failed to remove color correction';
-		} finally {
-			colorProfileRemoving = false;
-		}
-	}
-
-	async function toggleColorProfileEnabled(enabled: boolean) {
-		if (colorProfileToggling) return;
-		colorProfileToggling = true;
-		error = null;
-		try {
-			const res = await fetch(
-				`${getBackendHttpBase()}/api/cameras/color-profile/${role}/enabled`,
-				{
-					method: 'PATCH',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ enabled })
-				}
-			);
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			colorProfile = normalizeCameraColorProfile(data.profile);
-		} catch (e: any) {
-			error = e.message ?? 'Failed to update color correction';
-		} finally {
-			colorProfileToggling = false;
-		}
-	}
-
 	async function loadSettings() {
 		invalidateDevicePreview();
 		loading = true;
@@ -501,7 +406,7 @@
 		calibrationGalleryEntries = [];
 		emitCalibrationHighlight(null);
 		try {
-			await Promise.all([loadLocalSettings(), loadDeviceSettings(), loadColorProfile()]);
+			await Promise.all([loadLocalSettings(), loadDeviceSettings()]);
 			emitPreview(role, savedSettings, savedSettings);
 		} catch (e: any) {
 			error = e.message ?? 'Failed to load picture settings';
@@ -748,7 +653,6 @@
 					? {
 							method: calibrationMethod,
 							openrouter_model: calibrationOpenrouterModel,
-							apply_color_profile: calibrationApplyColorProfile
 						}
 					: {
 							method: calibrationMethod
@@ -810,7 +714,7 @@
 
 				if (task.status === 'completed') {
 					taskDone = true;
-					await Promise.all([loadDeviceSettings(), loadColorProfile()]);
+					await Promise.all([loadDeviceSettings()]);
 					calibrationNeedsSave = true;
 					status =
 						task.result?.message ??
@@ -990,21 +894,8 @@
 			<div class="flex flex-col gap-3">
 				<div class="flex flex-col gap-3">
 					{#if deviceSupported}
-						<ColorProfilePanel
-							profile={colorProfile}
-							loading={colorProfileLoading}
-							removing={colorProfileRemoving}
-							toggling={colorProfileToggling}
-							globallyEnabled={colorCorrectionGloballyEnabled}
-							onReset={removeColorProfile}
-							onToggleEnabled={toggleColorProfileEnabled}
-						/>
-
-						{#if colorProfile?.enabled || hasCalibrationData(colorProfile)}
 							<CalibrationPanel
 								bind:calibrationMethod
-								bind:calibrationApplyColorProfile
-								colorCorrectionGloballyEnabled={colorCorrectionGloballyEnabled}
 								{calibrating}
 								{saving}
 								{hasCamera}
@@ -1030,7 +921,6 @@
 									onEnlarge={() => (calibrationTraceEnlarged = true)}
 								/>
 							{/if}
-						{/if}
 					{/if}
 
 					<CaptureModePanel {role} />

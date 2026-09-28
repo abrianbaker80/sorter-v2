@@ -20,7 +20,6 @@
 		cameraChoices,
 		selectedCameraLabel,
 		savingAssignments,
-		savingLayout,
 		cameraError,
 		cameraStatus,
 		onSelect,
@@ -37,7 +36,6 @@
 		cameraChoices: CameraChoice[];
 		selectedCameraLabel: (key: string | undefined) => string;
 		savingAssignments: boolean;
-		savingLayout: boolean;
 		cameraError: string | null;
 		cameraStatus: string;
 		onSelect: (role: string, key: string) => void;
@@ -72,7 +70,7 @@
 	<div class="flex flex-wrap items-center gap-3">
 		<button
 			onclick={onSave}
-			disabled={savingAssignments || savingLayout}
+			disabled={savingAssignments}
 			class="setup-button-primary inline-flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60"
 		>
 			<CheckCircle2 size={14} />

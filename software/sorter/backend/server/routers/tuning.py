@@ -20,7 +20,7 @@ from toml_config import (
     setLinkMatchingConfig,
 )
 from classification.providers import COLOR_PROVIDER_SPECS, MOLD_PROVIDER_SPECS
-from subsystems.classification_channel.simple_state_machine_rev01.rev01_config import FIELD_META
+from subsystems.classification_channel.two_piece.rev01_config import FIELD_META
 from subsystems.feeder.pulse_perception.config import FIELD_META as PULSE_PERCEPTION_FIELD_META
 from perception.tracker_config import TRACKER_SPECS
 

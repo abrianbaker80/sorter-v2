@@ -70,7 +70,6 @@ def _status_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "running",
         "blocked_reason",
         "mode",
-        "camera_layout",
     )
     return {key: payload.get(key) for key in keys if key in payload}
 
@@ -146,7 +145,6 @@ def run_probe(args: argparse.Namespace) -> int:
         base_url,
         "POST",
         "/api/classification-channel/sector-occupancy",
-        params={"force_detection": "true" if args.force_detection else "false"},
         timeout=timeout,
     )
     _print_section("c4_sector_occupancy", occupancy)
@@ -185,7 +183,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--to-sector", type=int, default=1)
     parser.add_argument("--direction", choices=("shortest", "cw", "ccw"), default="shortest")
     parser.add_argument("--auto-plan", action="store_true")
-    parser.add_argument("--force-detection", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-execute", default="")
     return parser.parse_args(argv)

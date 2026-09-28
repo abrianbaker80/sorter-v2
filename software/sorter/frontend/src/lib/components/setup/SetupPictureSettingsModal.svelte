@@ -184,7 +184,6 @@
 			annotated: '0',
 			layer: 'raw',
 			dashboard: '0',
-			color_correct: '1',
 			show_regions: '0'
 		});
 		return `${backendBaseUrl}/api/cameras/feed/${encodeURIComponent(role)}?${params.toString()}`;

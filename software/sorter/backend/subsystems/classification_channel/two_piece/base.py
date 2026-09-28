@@ -33,7 +33,6 @@ from utils.event import knownObjectToEvent
 
 from .constants import HOSTED_COLOR_JOIN_BUDGET_S, LOG_TAG
 from .context import SimpleStateMachineRev01Context
-from .vision import Rev01Vision
 
 # Ceiling on link-match crops kept per piece. The model's picks are normally a
 # handful; this only bounds a pathological frame where it matches half the
@@ -79,7 +78,6 @@ class Rev01BaseState(BaseState):
         self.event_queue = event_queue
         self.ctx = context
         self.cc_config = irl_config.classification_channel_config
-        self.cv = Rev01Vision(vision, gc)
 
     def setClassificationReady(self, ready: bool, reason: str) -> None:
         setter = getattr(self.shared, "set_classification_gate", None)
@@ -225,73 +223,24 @@ class Rev01BaseState(BaseState):
             return crop_quality.selectBurstIndices(qualities, n)
         return sorted(list(reversed(range(total)))[:n])
 
-    def anyBboxInExitZone(
-        self, bboxes: list[tuple[int, int, int, int]]
-    ) -> tuple[bool, list[float]]:
-        center = self.cv.channelCenter()
-        if center is None:
-            return False, []
-        angles = [self.cv.bboxAngleDeg(b, center) for b in bboxes]
-        hit = any(
-            self.cv.bboxInExitZone(
-                b, center, self.cc_config.drop_angle_deg, self.cc_config.drop_tolerance_deg
-            )
-            for b in bboxes
-        )
-        return hit, angles
-
-    def computeDischargeOutputDeg(
-        self, bbox: tuple[int, int, int, int]
-    ) -> Optional[float]:
-        center = self.cv.channelCenter()
-        if center is None:
+    @staticmethod
+    def cropBbox(
+        frame: np.ndarray,
+        bbox: tuple[int, int, int, int],
+        padding: int = 0,
+    ) -> Optional[np.ndarray]:
+        frame_h, frame_w = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        crop_x1 = max(0, min(frame_w, int(x1) - padding))
+        crop_y1 = max(0, min(frame_h, int(y1) - padding))
+        crop_x2 = max(0, min(frame_w, int(x2) + padding))
+        crop_y2 = max(0, min(frame_h, int(y2) + padding))
+        if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
             return None
-        piece_angle = self.cv.bboxAngleDeg(bbox, center)
-        target_angle = (
-            float(self.cc_config.drop_angle_deg)
-            + float(self.cc_config.drop_tolerance_deg)
-        ) % 360.0
-        delta = (target_angle - piece_angle) % 360.0
-        return max(2.0, min(delta, 270.0))
-
-    def bboxesOutsideExitZone(
-        self, bboxes: list[tuple[int, int, int, int]]
-    ) -> list[tuple[int, int, int, int]]:
-        center = self.cv.channelCenter()
-        if center is None:
-            return list(bboxes)
-        return [
-            b
-            for b in bboxes
-            if not self.cv.bboxInExitZone(
-                b,
-                center,
-                self.cc_config.drop_angle_deg,
-                self.cc_config.drop_tolerance_deg,
-            )
-        ]
-
-    # ---- Brickognize classification helpers ----
-    # Shared by CAPTURING (which spawns the request) and AWAITING_DISTRIBUTION
-    # (which applies the result) — the spawn/apply split spans two states, and
-    # all handoff flows through ``self.ctx``.
-
-    def selectRecognitionCrops(self, crops: list[np.ndarray]) -> list[np.ndarray]:
-        # Hard-cap at the Brickognize per-request image limit regardless of the
-        # configured max_captures — over the limit the API errors the whole call.
-        n = min(self.ctx.config.max_captures, MAX_QUERY_IMAGES)
-        if n <= 0 or not crops:
-            return []
-        if len(crops) <= n:
-            return list(crops)
-        last_index = len(crops) - 1
-        chosen_indices: list[int] = []
-        for slot_idx in range(n):
-            capture_idx = round((slot_idx * last_index) / max(1, n - 1))
-            if chosen_indices and capture_idx <= chosen_indices[-1]:
-                capture_idx = min(last_index, chosen_indices[-1] + 1)
-            chosen_indices.append(capture_idx)
-        return [crops[idx] for idx in chosen_indices]
+        crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        if crop.size == 0:
+            return None
+        return crop.copy()
 
     def spawnClassifyThread(self, all_captures: list[np.ndarray]) -> None:
         # Runs entirely off the state-machine thread: the Brickognize fan-out is

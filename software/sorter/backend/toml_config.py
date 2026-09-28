@@ -107,7 +107,7 @@ def _read_polygons_json() -> dict[str, Any]:
 
 
 def getClassificationChannelRev01Config() -> dict[str, Any]:
-    from subsystems.classification_channel.simple_state_machine_rev01.rev01_config import (
+    from subsystems.classification_channel.two_piece.rev01_config import (
         Rev01Config, configToDict,
     )
     config = _read_toml()
@@ -120,7 +120,7 @@ def getClassificationChannelRev01Config() -> dict[str, Any]:
 
 
 def setClassificationChannelRev01Config(updates: dict[str, Any]) -> dict[str, Any]:
-    from subsystems.classification_channel.simple_state_machine_rev01.rev01_config import (
+    from subsystems.classification_channel.two_piece.rev01_config import (
         Rev01Config, configToDict, configFromDict,
     )
     defaults = configToDict(Rev01Config())
@@ -720,7 +720,7 @@ def setChuteCalibration(calibration: dict[str, float]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Camera setup (for default layout compatibility)
+# Camera setup
 # ---------------------------------------------------------------------------
 
 
@@ -732,8 +732,7 @@ def getCameraSetup() -> dict[str, Any] | None:
         return None
     # Return the roles that have device indices assigned
     result: dict[str, Any] = {}
-    for role in ("feeder", "classification_top", "classification_bottom",
-                 "c_channel_2", "c_channel_3", "carousel"):
+    for role in ("c_channel_2", "c_channel_3", "carousel", "classification_channel"):
         val = cameras.get(role)
         if val is not None:
             result[role] = val
@@ -745,8 +744,9 @@ def setCameraSetup(setup: dict[str, Any]) -> None:
     def updater(config: dict[str, Any]) -> None:
         if "cameras" not in config:
             config["cameras"] = {}
-        for role, val in setup.items():
-            config["cameras"][role] = val
+        for role in ("c_channel_2", "c_channel_3", "carousel", "classification_channel"):
+            if role in setup:
+                config["cameras"][role] = setup[role]
 
     _update_toml(updater)
 

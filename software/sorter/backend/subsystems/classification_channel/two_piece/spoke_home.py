@@ -442,7 +442,6 @@ def clearPiecesFromChannel(
     gc: Any,
     irl: Any,
     irl_config: Any,
-    vision: Any,
 ) -> None:
     # Closed-loop pre-home purge: advance the carousel forward (same travel
     # direction as the normal classification flow) until the channel reads clear,
@@ -451,7 +450,7 @@ def clearPiecesFromChannel(
     from .channel_clear import clearChannelByAdvancing
 
     clearChannelByAdvancing(
-        gc, irl, irl_config, vision=vision, label="C4 rev01 spoke home pre-purge"
+        gc, irl, irl_config, label="C4 rev01 spoke home pre-purge"
     )
 
 
@@ -461,7 +460,7 @@ def maybeRunSpokeHome(
     irl_config: Any,
     vision: Any,
 ) -> bool:
-    clearPiecesFromChannel(gc, irl, irl_config, vision)
+    clearPiecesFromChannel(gc, irl, irl_config)
 
     capture = None
     if hasattr(vision, "getCaptureThreadForRole"):

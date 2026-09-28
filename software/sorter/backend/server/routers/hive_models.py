@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/hive", tags=["hive-models"])
 # ``group`` — coarse logical grouping (``c_channels`` | ``chamber`` |
 # ``carousel``) the UI can collapse into a single line when every slot in the
 # group runs the same model.
-# NOTE: ``toml_section`` here is what the *live VisionManager* reads, not
+# NOTE: ``toml_section`` here is what the perception service reads, not
 # whatever the operator-facing label suggests. The C4 station in the
 # ``classification_channel`` setup is wired pipeline-side as the carousel
 # detection — so its persisted algorithm lives in ``[detection.carousel]``,
@@ -46,42 +46,12 @@ _ACTIVE_ASSIGNMENT_SLOTS: tuple[tuple[str, str | None, str, str, str], ...] = (
 )
 
 
-def _push_to_live_vision_manager(
-    scope: str, role: str | None, algorithm_id: str
-) -> None:
-    """Update the running VisionManager so the next frame uses the new model.
-
-    Without this, ``/activate`` only writes to ``machine_params.toml`` and the
-    live pipeline keeps running with whatever was loaded at process start —
-    which silently falls back to MOG2/heatmap_diff if the persisted algorithm
-    couldn't be resolved at startup time.
-    """
+def _reconcilePerception() -> None:
     from server import shared_state
 
-    vision_manager = getattr(shared_state, "vision_manager", None)
-    if vision_manager is None:
-        return
-    try:
-        if scope == "feeder":
-            setter = getattr(vision_manager, "setFeederDetectionAlgorithm", None)
-            if setter is not None:
-                if role is not None:
-                    setter(algorithm_id, role)
-                else:
-                    setter(algorithm_id)
-        elif scope == "carousel":
-            setter = getattr(vision_manager, "setCarouselDetectionAlgorithm", None)
-            if setter is not None:
-                setter(algorithm_id)
-        elif scope == "classification":
-            setter = getattr(vision_manager, "setClassificationDetectionAlgorithm", None)
-            if setter is not None:
-                setter(algorithm_id)
-    except Exception:  # pragma: no cover - defensive: TOML still got written
-        import logging
-        logging.getLogger(__name__).exception(
-            "Failed to push %s/%s → %s to live VisionManager", scope, role, algorithm_id
-        )
+    perception = getattr(shared_state.gc_ref, "perception_service", None)
+    if perception is not None:
+        perception.request_reconcile()
 
 
 def _collect_active_assignments() -> list[dict[str, str | None]]:
@@ -125,7 +95,6 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
     applied: list[str] = []
     skipped: list[str] = []
     by_scope_changes: dict[str, dict[str, dict]] = {}
-    live_pushes: list[tuple[str, str | None, str]] = []
 
     for scope, role, label, registry_scope, _group in _ACTIVE_ASSIGNMENT_SLOTS:
         if registry_scope not in registry_scopes:
@@ -137,7 +106,6 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
         else:
             roles_map = scope_changes["set"].setdefault("algorithm_by_role", {})
             roles_map[role] = algorithm_id
-        live_pushes.append((scope, role, algorithm_id))
         applied.append(label)
 
     for scope, changes in by_scope_changes.items():
@@ -155,10 +123,7 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
                 merged[key] = value
         setDetectionConfig(scope, merged)
 
-    # Push to the live VisionManager *after* persistence so a crash here
-    # still leaves the next process restart with the right config.
-    for scope, role, algo in live_pushes:
-        _push_to_live_vision_manager(scope, role, algo)
+    _reconcilePerception()
 
     return {"applied": applied, "skipped": skipped}
 
@@ -288,8 +253,8 @@ def _apply_active_assignment_to_slot(
     """Write ``algorithm_id`` to exactly ONE subsystem slot. 1:1 with the TOML,
     no fan-out and NO scope gate — a model may be assigned to a slot whose
     training scope it doesn't claim (perception loads any model by id; the UI
-    surfaces a 'not designed for this' note). Pushes the live VisionManager and
-    pokes perception to reconcile so the change applies without a restart."""
+    surfaces a 'not designed for this' note). Reconciles perception so the
+    change applies without a restart."""
     from toml_config import getDetectionConfig, setDetectionConfig
 
     slot = None
@@ -314,15 +279,7 @@ def _apply_active_assignment_to_slot(
         )
         merged["algorithm_by_role"] = {**current, role: algorithm_id}
     setDetectionConfig(scope, merged)
-    _push_to_live_vision_manager(scope, role, algorithm_id)
-    try:
-        from server import shared_state
-
-        ps = getattr(getattr(shared_state, "gc_ref", None), "perception_service", None)
-        if ps is not None and hasattr(ps, "request_reconcile"):
-            ps.request_reconcile()
-    except Exception:
-        pass
+    _reconcilePerception()
     return {"applied": [label], "skipped": []}
 
 

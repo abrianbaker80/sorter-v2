@@ -4,7 +4,6 @@ import sys
 import argparse
 import uuid
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 from logger import Logger
@@ -15,10 +14,6 @@ if TYPE_CHECKING:
     from run_recorder import RunRecorder
     from runtime_stats import RuntimeStatsCollector
     from lifetime_stats import LifetimeStatsTracker
-
-
-class RegionProviderType(Enum):
-    HANDDRAWN = "handdrawn"
 
 
 class Timeouts:
@@ -57,10 +52,8 @@ class GlobalConfig:
     disable_c_channels: set[int]  # {1, 2, 3, 4} — c-channel rotor steppers to suppress
     disable_carousel: bool         # carousel stepper (same physical motor as c_channel_4)
     no_power_development_mode: bool
-    region_provider: RegionProviderType
     profiler: Profiler
     rotary_channel_steppers_can_operate_in_parallel: bool
-    disable_video_streams: list[str]  # "feeder", "classification_bottom", "classification_top"
     run_recorder: "RunRecorder"
     runtime_stats: "RuntimeStatsCollector"
     lifetime_stats: "LifetimeStatsTracker"
@@ -101,7 +94,6 @@ class GlobalConfig:
         self.disable_carousel = False
         self.no_power_development_mode = False
         self.rotary_channel_steppers_can_operate_in_parallel = False
-        self.disable_video_streams = ["classification_bottom"]
         self.runtime_stats = RuntimeStatsCollector()
         # Rev04: perception service for the GO_TO_ANGLE_REV01 +
         # SIMPLE_STATE_MACHINE_REV01 mode pair. None when the mode pair is
@@ -171,7 +163,6 @@ def mkGlobalConfig() -> GlobalConfig:
     if gc.no_power_development_mode:
         gc.disable_chute = True
         gc.disable_servos = True
-    gc.region_provider = RegionProviderType.HANDDRAWN
 
     log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
     os.makedirs(log_dir, exist_ok=True)

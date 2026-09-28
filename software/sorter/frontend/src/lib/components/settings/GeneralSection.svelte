@@ -1,21 +1,8 @@
 <script lang="ts">
-	import {
-		getBackendWsBase,
-		machineHttpBaseUrlFromWsUrl,
-		requestBackendRestart,
-		waitForBackend
-	} from '$lib/backend';
+	import { getBackendWsBase, machineHttpBaseUrlFromWsUrl } from '$lib/backend';
 	import { getMachinesContext } from '$lib/machines/context';
 	import type { MachineState } from '$lib/machines/types';
 	import { settings } from '$lib/stores/settings';
-
-	// Which cameras the machine has: one over the feeder, or one per C-channel
-	// plus the classification channel. The Dashboard's camera panels follow it.
-	type CameraLayout = 'default' | 'split_feeder';
-	const CAMERA_LAYOUTS: { key: CameraLayout; label: string }[] = [
-		{ key: 'split_feeder', label: 'Split Feeder' },
-		{ key: 'default', label: 'Single Feeder' }
-	];
 
 	const manager = getMachinesContext();
 
@@ -25,14 +12,6 @@
 	let nameSaving = $state(false);
 	let nameError = $state<string | null>(null);
 	let nameStatus = $state('');
-
-	let cameraLayout = $state<CameraLayout | null>(null);
-	let savingCameraLayout = $state(false);
-	let cameraLayoutError = $state<string | null>(null);
-	let cameraLayoutStatus = $state('');
-	const inStandby = $derived(
-		(manager.selectedMachine?.systemStatus?.hardware_state ?? 'standby') === 'standby'
-	);
 
 	function handleConnect() {
 		manager.connect(url);
@@ -84,56 +63,6 @@
 		}
 	}
 
-	async function loadCameraLayout() {
-		const httpBase = machineHttpBase(manager.selectedMachine);
-		if (!httpBase) return;
-		try {
-			const res = await fetch(`${httpBase}/api/cameras/config`);
-			if (res.ok) {
-				const d = await res.json();
-				cameraLayout = d.layout === 'split_feeder' ? 'split_feeder' : 'default';
-			}
-		} catch {}
-	}
-
-	async function saveCameraLayout(layout: CameraLayout) {
-		const machine = manager.selectedMachine;
-		const wsUrl = machine?.url;
-		const httpBase = machineHttpBase(machine);
-		if (!wsUrl || !httpBase || layout === cameraLayout) return;
-		savingCameraLayout = true;
-		cameraLayoutError = null;
-		cameraLayoutStatus = '';
-		try {
-			const res = await fetch(`${httpBase}/api/cameras/layout`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ layout })
-			});
-			if (!res.ok) throw new Error(await res.text());
-			cameraLayout = layout;
-			// The backend reads the layout when it starts, so restart it to apply.
-			cameraLayoutStatus = 'Saved. Restarting the backend to apply it...';
-			const restart = await requestBackendRestart(httpBase);
-			if (!restart.ok) {
-				throw new Error('Saved, but the backend did not restart. Restart it from the power menu.');
-			}
-			// Give the old process time to exit first, or it answers the wait.
-			const back = await waitForBackend(httpBase, { initialDelayMs: 5000, maxAttempts: 60 });
-			manager.connect(wsUrl, { force: true });
-			manager.refreshSelectedCameraFeeds();
-			cameraLayoutStatus = !back
-				? 'Saved. The backend is still restarting; reload the page in a minute.'
-				: layout === 'split_feeder'
-					? 'Split Feeder is on. Assign each channel a camera with Change Camera on its page under Hardware.'
-					: 'Single Feeder is on.';
-		} catch (e: any) {
-			cameraLayoutError = e.message ?? 'Failed to save camera layout';
-		} finally {
-			savingCameraLayout = false;
-		}
-	}
-
 	$effect(() => {
 		const machineId = manager.selectedMachineId ?? '';
 		if (machineId !== loadedMachineId) {
@@ -142,9 +71,6 @@
 			nameSaving = false;
 			nameError = null;
 			nameStatus = '';
-			if (machineId) {
-				void loadCameraLayout();
-			}
 		}
 	});
 </script>
@@ -250,40 +176,6 @@
 			</div>
 		{:else}
 			<div class="text-sm text-text-muted">Connect to a machine to give it a friendly name.</div>
-		{/if}
-	</div>
-
-	<div>
-		<h3 class="mb-2 text-sm font-medium text-text">Camera Layout</h3>
-		{#if manager.selectedMachine}
-			<div class="flex flex-wrap gap-2">
-				{#each CAMERA_LAYOUTS as option (option.key)}
-					<button
-						onclick={() => saveCameraLayout(option.key)}
-						disabled={savingCameraLayout || !inStandby}
-						class={`flex items-center gap-1.5 border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-							cameraLayout === option.key
-								? 'border-primary bg-primary/10 text-text'
-								: 'border-border bg-bg text-text hover:bg-surface'
-						}`}
-					>
-						{option.label}
-					</button>
-				{/each}
-			</div>
-			{#if cameraLayoutError}
-				<div class="mt-1 text-xs text-danger">{cameraLayoutError}</div>
-			{:else if cameraLayoutStatus}
-				<div class="mt-1 text-xs text-text-muted">{cameraLayoutStatus}</div>
-			{:else}
-				<div class="mt-1 text-xs text-text-muted">
-					Split Feeder: a camera for C-Channel 2, C-Channel 3 and the classification channel,
-					each on the Dashboard. Single Feeder: one camera over the feeder. Changing it restarts
-					the backend{inStandby ? '.' : ', so reset the machine to standby first.'}
-				</div>
-			{/if}
-		{:else}
-			<div class="text-sm text-text-muted">Connect to a machine to change its camera layout.</div>
 		{/if}
 	</div>
 

@@ -49,7 +49,7 @@ builds skip the download entirely.
 
 ## What is NOT in the image
 
-- `uv sync` — deferred to the firstboot daemon (~5 GB PyTorch wheels).
+- `uv sync` — deferred to the firstboot daemon.
 - `pnpm install` — deferred to the firstboot daemon.
 - Repo clone of `sorter-v2` — deferred to the firstboot daemon.
 

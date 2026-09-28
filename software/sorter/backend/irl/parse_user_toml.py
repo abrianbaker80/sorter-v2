@@ -41,8 +41,6 @@ DEFAULT_CHUTE_NUM_SECTIONS = 6
 DEFAULT_CHUTE_SECTION_WIDTH_DEG = 51.75
 DEFAULT_CHUTE_FIRST_SECTION_OFFSET_DEG = 8.25
 DEFAULT_CHUTE_OPERATING_SPEED_MICROSTEPS_PER_SEC = 3000
-# Matches the long-running carousel homing wiring used by the stable
-# pre-setup-wizard backend path.
 # Matches the SKR Pico distribution E0-STOP wiring used by the setup wizard.
 DEFAULT_CHUTE_HOME_PIN_CHANNEL = 3
 # For boards whose profile does not name a polarity (see BoardProfile).

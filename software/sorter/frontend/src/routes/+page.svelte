@@ -47,7 +47,6 @@
 		sidebar_width = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, sidebar_width - delta));
 	}
 
-	const camera_layout = $derived(machine.machine?.sorterState?.camera_layout ?? 'split_feeder');
 	const hardwareState = $derived(machine.machine?.systemStatus?.hardware_state ?? 'standby');
 	const hardwareError = $derived(
 		startSystemError ?? machine.machine?.systemStatus?.hardware_error ?? null
@@ -538,60 +537,49 @@
 	<div class="p-6">
 		{#if machine.machine}
 			<div class="flex h-[calc(100vh-7rem)] min-h-0 gap-3">
-				{#if camera_layout === 'split_feeder'}
-					<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-						<div class="flex min-h-0 flex-1 gap-3">
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera="c_channel_2"
-									label={cameraLabel('c_channel_2')}
-									crop={cropFor('c_channel_2')}
-									controls={['annotations', 'zones', 'crop', 'fullscreen']}
-								>
-									{#snippet headerActions()}
-										<CameraChannelControls stepperKey="c_channel_2" />
-									{/snippet}
-								</CameraFeed>
-							</div>
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera="c_channel_3"
-									label={cameraLabel('c_channel_3')}
-									crop={cropFor('c_channel_3')}
-									controls={['annotations', 'zones', 'crop', 'fullscreen']}
-								>
-									{#snippet headerActions()}
-										<CameraChannelControls stepperKey="c_channel_3" />
-									{/snippet}
-								</CameraFeed>
-							</div>
+				<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+					<div class="flex min-h-0 flex-1 gap-3">
+						<div class="min-w-0 flex-1">
+							<CameraFeed
+								camera="c_channel_2"
+								label={cameraLabel('c_channel_2')}
+								crop={cropFor('c_channel_2')}
+								controls={['annotations', 'zones', 'crop', 'fullscreen']}
+							>
+								{#snippet headerActions()}
+									<CameraChannelControls stepperKey="c_channel_2" />
+								{/snippet}
+							</CameraFeed>
 						</div>
-						<div class="flex min-h-0 flex-1 gap-3">
-							<div class="min-w-0 flex-1">
-								<CameraFeed
-									camera="classification_channel"
-									label={cameraLabel('classification_channel')}
-									crop={cropFor('classification_channel')}
-									controls={['annotations', 'zones', 'crop', 'fullscreen']}
-								>
-									{#snippet headerActions()}
-										<CameraChannelControls stepperKey="c_channel_4" />
-									{/snippet}
-								</CameraFeed>
-							</div>
+						<div class="min-w-0 flex-1">
+							<CameraFeed
+								camera="c_channel_3"
+								label={cameraLabel('c_channel_3')}
+								crop={cropFor('c_channel_3')}
+								controls={['annotations', 'zones', 'crop', 'fullscreen']}
+							>
+								{#snippet headerActions()}
+									<CameraChannelControls stepperKey="c_channel_3" />
+								{/snippet}
+							</CameraFeed>
+						</div>
+					</div>
+					<div class="flex min-h-0 flex-1 gap-3">
+						<div class="min-w-0 flex-1">
+							<CameraFeed
+								camera="classification_channel"
+								label={cameraLabel('classification_channel')}
+								crop={cropFor('classification_channel')}
+								controls={['annotations', 'zones', 'crop', 'fullscreen']}
+							>
+								{#snippet headerActions()}
+									<CameraChannelControls stepperKey="c_channel_4" />
+								{/snippet}
+							</CameraFeed>
+						</div>
 
-						</div>
 					</div>
-				{:else}
-					<div class="min-h-0 min-w-0 flex-1">
-						<CameraFeed
-							camera="feeder"
-							label={cameraLabel('feeder')}
-							crop={cropFor('feeder')}
-							controls={['annotations', 'zones', 'crop', 'fullscreen']}
-						/>
-					</div>
-				{/if}
+				</div>
 
 				<ResizeHandle orientation="vertical" onresize={onSidebarResize} />
 

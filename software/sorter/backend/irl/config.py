@@ -3,32 +3,11 @@ import time
 from dataclasses import dataclass
 
 
-# Master kill switch for the per-camera color correction pipeline (CCM +
-# response LUT + gamma). Deliberately a hardcoded constant — not an env var and
-# not a machine.toml key — so no deployed machine can silently be running the
-# correction. Suspected cause of the wildly off-color images some machines
-# report; flip to True in the source and redeploy to re-enable it everywhere.
-#
-# Disabling only gates *application* of the profile. Calibrated profiles stay
-# persisted in [camera_color_profiles] untouched, so turning this back on
-# restores every machine's existing calibration as-is.
-COLOR_CORRECTION_ENABLED = False
-
-
 # The one feeder flow and the one classification-channel flow every machine
 # runs, under the names Hive's control data and telemetry record them by.
 FEEDER_FLOW = "pulse_perception_rev01"
 CLASSIFICATION_CHANNEL_FLOW = "two_piece_state_machine_rev01"
 MACHINE_SETUP = "classification_channel"
-# The camera layout when machine.toml names none: a camera per C-channel plus
-# the carousel. "default" is the single feeder camera, run only when named.
-DEFAULT_CAMERA_LAYOUT = "split_feeder"
-
-
-def cameraLayout(cameras: object) -> str:
-    """The layout a machine.toml [cameras] table runs."""
-    layout = cameras.get("layout") if isinstance(cameras, dict) else None
-    return layout if layout in ("default", "split_feeder") else DEFAULT_CAMERA_LAYOUT
 
 from global_config import GlobalConfig
 from hardware.bus import MCUBus, MCUBusError
@@ -38,7 +17,7 @@ from machine_platform import (
     build_servo_controller,
     discover_control_boards,
 )
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from machine_platform.control_board import ControlBoard
@@ -158,7 +137,6 @@ class CameraConfig:
     capture_mode_saved: bool
     picture_settings: "CameraPictureSettings"
     device_settings: dict[str, int | float | bool]
-    color_profile: "CameraColorProfile"
 
     def __init__(self):
         self.url = None
@@ -180,44 +158,6 @@ class CameraPictureSettings:
         self.rotation = rotation
         self.flip_horizontal = flip_horizontal
         self.flip_vertical = flip_vertical
-
-
-class CameraColorProfile:
-    enabled: bool
-    matrix: list[list[float]]
-    bias: list[float]
-    response_lut_r: list[float] | None
-    response_lut_g: list[float] | None
-    response_lut_b: list[float] | None
-    gamma_a: list[float] | None
-    gamma_exp: list[float] | None
-    gamma_b: list[float] | None
-
-    def __init__(
-        self,
-        enabled: bool = False,
-        matrix: list[list[float]] | None = None,
-        bias: list[float] | None = None,
-        response_lut_r: list[float] | None = None,
-        response_lut_g: list[float] | None = None,
-        response_lut_b: list[float] | None = None,
-        gamma_a: list[float] | None = None,
-        gamma_exp: list[float] | None = None,
-        gamma_b: list[float] | None = None,
-    ):
-        self.enabled = enabled
-        self.matrix = matrix or [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-        self.bias = bias or [0.0, 0.0, 0.0]
-        self.response_lut_r = response_lut_r
-        self.response_lut_g = response_lut_g
-        self.response_lut_b = response_lut_b
-        self.gamma_a = gamma_a
-        self.gamma_exp = gamma_exp
-        self.gamma_b = gamma_b
 
 
 # Matches the firmware's Stepper constructor default (`_accel(10000)` in
@@ -560,13 +500,6 @@ class FeederConfig:
 
 
 class IRLConfig:
-    # camera_layout: "default" = single feeder + classification cameras
-    #                "split_feeder" = per-channel + carousel cameras (no classification)
-    camera_layout: str
-    feeder_camera: CameraConfig
-    classification_camera_bottom: CameraConfig
-    classification_camera_top: CameraConfig
-    # split_feeder cameras (only set when camera_layout == "split_feeder")
     c_channel_2_camera: CameraConfig | None
     c_channel_3_camera: CameraConfig | None
     carousel_camera: CameraConfig | None
@@ -581,7 +514,6 @@ class IRLConfig:
     classification_channel_config: ClassificationChannelConfig
 
     def __init__(self):
-        self.camera_layout = DEFAULT_CAMERA_LAYOUT
         self.c_channel_2_camera = None
         self.c_channel_3_camera = None
         self.carousel_camera = None
@@ -678,7 +610,6 @@ def mkCameraConfig(
     fourcc: str | None = None,
     picture_settings: CameraPictureSettings | None = None,
     device_settings: dict[str, int | float | bool] | None = None,
-    color_profile: CameraColorProfile | None = None,
 ) -> CameraConfig:
     camera_config = CameraConfig()
     camera_config.device_index = device_index
@@ -689,7 +620,6 @@ def mkCameraConfig(
     camera_config.fourcc = fourcc.strip() if (isinstance(fourcc, str) and fourcc.strip()) else "MJPG"
     camera_config.picture_settings = picture_settings or mkCameraPictureSettings()
     camera_config.device_settings = parseCameraDeviceSettings(device_settings)
-    camera_config.color_profile = color_profile or mkCameraColorProfile()
     return camera_config
 
 
@@ -741,122 +671,6 @@ def cameraPictureSettingsToDict(settings: CameraPictureSettings) -> dict[str, in
         "flip_horizontal": clamped.flip_horizontal,
         "flip_vertical": clamped.flip_vertical,
     }
-
-
-def mkCameraColorProfile(
-    enabled: bool = False,
-    matrix: list[list[float]] | None = None,
-    bias: list[float] | None = None,
-    response_lut_r: list[float] | None = None,
-    response_lut_g: list[float] | None = None,
-    response_lut_b: list[float] | None = None,
-    gamma_a: list[float] | None = None,
-    gamma_exp: list[float] | None = None,
-    gamma_b: list[float] | None = None,
-) -> CameraColorProfile:
-    return CameraColorProfile(
-        enabled=enabled,
-        matrix=matrix,
-        bias=bias,
-        response_lut_r=response_lut_r,
-        response_lut_g=response_lut_g,
-        response_lut_b=response_lut_b,
-        gamma_a=gamma_a,
-        gamma_exp=gamma_exp,
-        gamma_b=gamma_b,
-    )
-
-
-def clampCameraColorProfile(profile: CameraColorProfile) -> CameraColorProfile:
-    def _number(value: object, default: float) -> float:
-        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else default
-
-    raw_matrix = getattr(profile, "matrix", None)
-    matrix_rows: list[list[float]] = []
-    if isinstance(raw_matrix, list):
-        for row_index, raw_row in enumerate(raw_matrix[:3]):
-            if isinstance(raw_row, list):
-                row = [
-                    _number(raw_row[col_index] if col_index < len(raw_row) else 1.0 if row_index == col_index else 0.0,
-                            1.0 if row_index == col_index else 0.0)
-                    for col_index in range(3)
-                ]
-            else:
-                row = [1.0 if row_index == col_index else 0.0 for col_index in range(3)]
-            matrix_rows.append(row)
-    while len(matrix_rows) < 3:
-        row_index = len(matrix_rows)
-        matrix_rows.append([1.0 if row_index == col_index else 0.0 for col_index in range(3)])
-
-    raw_bias = getattr(profile, "bias", None)
-    bias_values: list[float] = []
-    if isinstance(raw_bias, list):
-        bias_values = [
-            _number(raw_bias[index] if index < len(raw_bias) else 0.0, 0.0)
-            for index in range(3)
-        ]
-    while len(bias_values) < 3:
-        bias_values.append(0.0)
-
-    def _parse_float_list(attr_name: str, length: int) -> list[float] | None:
-        raw = getattr(profile, attr_name, None)
-        if not isinstance(raw, list) or len(raw) < length:
-            return None
-        values = [_number(v, 0.0) for v in raw[:length]]
-        return values
-
-    return mkCameraColorProfile(
-        enabled=bool(getattr(profile, "enabled", False)),
-        matrix=matrix_rows,
-        bias=bias_values,
-        response_lut_r=_parse_float_list("response_lut_r", 256),
-        response_lut_g=_parse_float_list("response_lut_g", 256),
-        response_lut_b=_parse_float_list("response_lut_b", 256),
-        gamma_a=_parse_float_list("gamma_a", 3),
-        gamma_exp=_parse_float_list("gamma_exp", 3),
-        gamma_b=_parse_float_list("gamma_b", 3),
-    )
-
-
-def parseCameraColorProfile(raw: object) -> CameraColorProfile:
-    if not isinstance(raw, dict):
-        return mkCameraColorProfile()
-
-    return clampCameraColorProfile(
-        mkCameraColorProfile(
-            enabled=bool(raw.get("enabled", False)),
-            matrix=raw.get("matrix") if isinstance(raw.get("matrix"), list) else None,
-            bias=raw.get("bias") if isinstance(raw.get("bias"), list) else None,
-            response_lut_r=raw.get("response_lut_r") if isinstance(raw.get("response_lut_r"), list) else None,
-            response_lut_g=raw.get("response_lut_g") if isinstance(raw.get("response_lut_g"), list) else None,
-            response_lut_b=raw.get("response_lut_b") if isinstance(raw.get("response_lut_b"), list) else None,
-            gamma_a=raw.get("gamma_a") if isinstance(raw.get("gamma_a"), list) else None,
-            gamma_exp=raw.get("gamma_exp") if isinstance(raw.get("gamma_exp"), list) else None,
-            gamma_b=raw.get("gamma_b") if isinstance(raw.get("gamma_b"), list) else None,
-        )
-    )
-
-
-def cameraColorProfileToDict(profile: CameraColorProfile) -> dict[str, object]:
-    clamped = clampCameraColorProfile(profile)
-    result: dict[str, object] = {
-        "enabled": clamped.enabled,
-        "matrix": [[float(value) for value in row] for row in clamped.matrix],
-        "bias": [float(value) for value in clamped.bias],
-    }
-    if clamped.response_lut_r is not None:
-        result["response_lut_r"] = [float(v) for v in clamped.response_lut_r]
-    if clamped.response_lut_g is not None:
-        result["response_lut_g"] = [float(v) for v in clamped.response_lut_g]
-    if clamped.response_lut_b is not None:
-        result["response_lut_b"] = [float(v) for v in clamped.response_lut_b]
-    if clamped.gamma_a is not None:
-        result["gamma_a"] = [float(v) for v in clamped.gamma_a]
-    if clamped.gamma_exp is not None:
-        result["gamma_exp"] = [float(v) for v in clamped.gamma_exp]
-    if clamped.gamma_b is not None:
-        result["gamma_b"] = [float(v) for v in clamped.gamma_b]
-    return result
 
 
 def parseCameraDeviceSettings(raw: object) -> dict[str, int | float | bool]:
@@ -927,19 +741,41 @@ def mkStepperConfig(
     return StepperConfig(default_steps_per_second, microsteps)
 
 
+def cameraSourceForRole(cameras: object, role: str) -> int | str | None:
+    if not isinstance(cameras, dict):
+        return None
+    roles = ("classification_channel", "carousel") if role in {"classification_channel", "carousel"} else (role,)
+    for key in roles:
+        value = cameras.get(key)
+        if type(value) is int and value >= 0:
+            return value
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value.lower() not in {"none", "null", "-1"}:
+                return value
+    return None
+
+
+def cameraSettingsForRole(settings: object, role: str) -> dict:
+    if not isinstance(settings, dict):
+        return {}
+    roles = ("classification_channel", "carousel") if role in {"classification_channel", "carousel"} else (role,)
+    for key in roles:
+        entry = settings.get(key)
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
 def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     irl_config = IRLConfig()
 
-    # Check for TOML camera layout override
     from machine_toml import machine_toml_path
     from toml_config import loadTomlFile
-    from .toml_migrations import applyTomlMigrations
     raw_toml: dict[str, object] = {}
     params_path = machine_toml_path()
     if params_path.exists():
         raw_toml = loadTomlFile(params_path)
-        applyTomlMigrations(raw_toml)
-    camera_layout_type = cameraLayout(raw_toml.get("cameras"))
 
     picture_settings_section = {}
     if isinstance(raw_toml, dict):
@@ -947,19 +783,12 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     device_settings_section = {}
     if isinstance(raw_toml, dict):
         device_settings_section = raw_toml.get("camera_device_settings", {})
-    color_profiles_section = {}
-    if isinstance(raw_toml, dict):
-        color_profiles_section = raw_toml.get("camera_color_profiles", {})
     capture_modes_section = {}
     if isinstance(raw_toml, dict):
         capture_modes_section = raw_toml.get("camera_capture_modes", {})
 
     def _capture_mode(role: str) -> dict[str, int | str]:
-        if not isinstance(capture_modes_section, dict):
-            return {}
-        entry = capture_modes_section.get(role)
-        if not isinstance(entry, dict):
-            return {}
+        entry = cameraSettingsForRole(capture_modes_section, role)
         out: dict[str, int | str] = {}
         for key in ("width", "height", "fps"):
             value = entry.get(key)
@@ -971,19 +800,11 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
         return out
 
     def _picture_settings(role: str) -> CameraPictureSettings:
-        if not isinstance(picture_settings_section, dict):
-            return mkCameraPictureSettings()
-        return parseCameraPictureSettings(picture_settings_section.get(role))
+        return parseCameraPictureSettings(cameraSettingsForRole(picture_settings_section, role))
 
     def _device_settings(role: str) -> dict[str, int | float | bool]:
-        if not isinstance(device_settings_section, dict):
-            return {}
-        return parseCameraDeviceSettings(device_settings_section.get(role))
+        return parseCameraDeviceSettings(cameraSettingsForRole(device_settings_section, role))
 
-    def _color_profile(role: str) -> CameraColorProfile:
-        if not isinstance(color_profiles_section, dict):
-            return mkCameraColorProfile()
-        return parseCameraColorProfile(color_profiles_section.get(role))
 
     def _mkCameraConfigForRole(role: str, **kwargs) -> CameraConfig:
         mode = _capture_mode(role)
@@ -995,181 +816,55 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
         config.capture_mode_saved = bool(mode)
         return config
 
-    irl_config.camera_layout = camera_layout_type
+    cameras_section = raw_toml.get("cameras", {})
+    c_ch2_idx = cameraSourceForRole(cameras_section, "c_channel_2")
+    c_ch3_idx = cameraSourceForRole(cameras_section, "c_channel_3")
+    carousel_source = cameraSourceForRole(cameras_section, "classification_channel")
+    aux_camera_role = "classification_channel"
 
-    if camera_layout_type == "split_feeder":
-        # split_feeder: per-channel cameras from TOML, no single feeder or classification
-        cameras_section = cast(dict[str, object], raw_toml.get("cameras", {})) if isinstance(raw_toml, dict) else {}
-
-        c_ch2_idx = cameras_section.get("c_channel_2")
-        c_ch3_idx = cameras_section.get("c_channel_3")
-        classification_channel_source = cameras_section.get("classification_channel")
-        carousel_source = (
-            classification_channel_source
-            if classification_channel_source is not None
-            else cameras_section.get("carousel")
+    if isinstance(c_ch2_idx, int):
+        irl_config.c_channel_2_camera = _mkCameraConfigForRole(
+            "c_channel_2",
+            device_index=c_ch2_idx,
+            picture_settings=_picture_settings("c_channel_2"),
+            device_settings=_device_settings("c_channel_2"),
         )
-        aux_camera_role = "classification_channel"
-
-        if isinstance(c_ch2_idx, int):
-            irl_config.c_channel_2_camera = _mkCameraConfigForRole(
-                "c_channel_2",
-                device_index=c_ch2_idx,
-                picture_settings=_picture_settings("c_channel_2"),
-                device_settings=_device_settings("c_channel_2"),
-                color_profile=_color_profile("c_channel_2"),
-            )
-        elif isinstance(c_ch2_idx, str):
-            irl_config.c_channel_2_camera = _mkCameraConfigForRole(
-                "c_channel_2",
-                url=c_ch2_idx,
-                picture_settings=_picture_settings("c_channel_2"),
-                device_settings=_device_settings("c_channel_2"),
-                color_profile=_color_profile("c_channel_2"),
-            )
-        if isinstance(c_ch3_idx, int):
-            irl_config.c_channel_3_camera = _mkCameraConfigForRole(
-                "c_channel_3",
-                device_index=c_ch3_idx,
-                picture_settings=_picture_settings("c_channel_3"),
-                device_settings=_device_settings("c_channel_3"),
-                color_profile=_color_profile("c_channel_3"),
-            )
-        elif isinstance(c_ch3_idx, str):
-            irl_config.c_channel_3_camera = _mkCameraConfigForRole(
-                "c_channel_3",
-                url=c_ch3_idx,
-                picture_settings=_picture_settings("c_channel_3"),
-                device_settings=_device_settings("c_channel_3"),
-                color_profile=_color_profile("c_channel_3"),
-            )
-        if isinstance(carousel_source, str):
-            irl_config.carousel_camera = _mkCameraConfigForRole(
-                aux_camera_role,
-                url=carousel_source,
-                picture_settings=_picture_settings(aux_camera_role),
-                device_settings=_device_settings(aux_camera_role),
-                color_profile=_color_profile(aux_camera_role),
-            )
-        elif isinstance(carousel_source, int):
-            irl_config.carousel_camera = _mkCameraConfigForRole(
-                aux_camera_role,
-                device_index=carousel_source,
-                picture_settings=_picture_settings(aux_camera_role),
-                device_settings=_device_settings(aux_camera_role),
-                color_profile=_color_profile(aux_camera_role),
-            )
-
-        # Classification cameras (optional in split_feeder mode) — int or URL string
-        cls_top = cameras_section.get("classification_top")
-        cls_bottom = cameras_section.get("classification_bottom")
-
-        if isinstance(cls_top, str):
-            irl_config.classification_camera_top = _mkCameraConfigForRole(
-                "classification_top",
-                url=cls_top,
-                picture_settings=_picture_settings("classification_top"),
-                device_settings=_device_settings("classification_top"),
-                color_profile=_color_profile("classification_top"),
-            )
-        elif isinstance(cls_top, int):
-            irl_config.classification_camera_top = _mkCameraConfigForRole(
-                "classification_top",
-                device_index=cls_top,
-                width=9999,
-                height=9999,
-                picture_settings=_picture_settings("classification_top"),
-                device_settings=_device_settings("classification_top"),
-                color_profile=_color_profile("classification_top"),
-            )
-        else:
-            irl_config.classification_camera_top = _mkCameraConfigForRole(
-                "classification_top",
-                device_index=-1,
-                picture_settings=_picture_settings("classification_top"),
-                device_settings=_device_settings("classification_top"),
-                color_profile=_color_profile("classification_top"),
-            )
-
-        if isinstance(cls_bottom, str):
-            irl_config.classification_camera_bottom = _mkCameraConfigForRole(
-                "classification_bottom",
-                url=cls_bottom,
-                picture_settings=_picture_settings("classification_bottom"),
-                device_settings=_device_settings("classification_bottom"),
-                color_profile=_color_profile("classification_bottom"),
-            )
-        elif isinstance(cls_bottom, int):
-            irl_config.classification_camera_bottom = _mkCameraConfigForRole(
-                "classification_bottom",
-                device_index=cls_bottom,
-                width=9999,
-                height=9999,
-                picture_settings=_picture_settings("classification_bottom"),
-                device_settings=_device_settings("classification_bottom"),
-                color_profile=_color_profile("classification_bottom"),
-            )
-        else:
-            irl_config.classification_camera_bottom = _mkCameraConfigForRole(
-                "classification_bottom",
-                device_index=-1,
-                picture_settings=_picture_settings("classification_bottom"),
-                device_settings=_device_settings("classification_bottom"),
-                color_profile=_color_profile("classification_bottom"),
-            )
-
-        # Dummy feeder camera so nothing crashes on attr access
-        irl_config.feeder_camera = _mkCameraConfigForRole(
-            "feeder",
-            device_index=-1,
-            picture_settings=_picture_settings("feeder"),
-            device_settings=_device_settings("feeder"),
-            color_profile=_color_profile("feeder"),
+    elif isinstance(c_ch2_idx, str):
+        irl_config.c_channel_2_camera = _mkCameraConfigForRole(
+            "c_channel_2",
+            url=c_ch2_idx,
+            picture_settings=_picture_settings("c_channel_2"),
+            device_settings=_device_settings("c_channel_2"),
         )
-    else:
-        # default: single feeder + classification cameras from TOML [cameras]
-        cameras_section = cast(dict[str, object], raw_toml.get("cameras", {})) if isinstance(raw_toml, dict) else {}
-
-        feeder_camera_index = cameras_section.get("feeder")
-        classification_camera_bottom_index = cameras_section.get("classification_bottom")
-        classification_camera_top_index = cameras_section.get("classification_top")
-
-        # Missing cameras resolve to device_index -1 (absent) so the backend
-        # boots in standby with no [cameras] section — cameras get assigned
-        # later from the UI.
-        if not isinstance(feeder_camera_index, int):
-            feeder_camera_index = -1
-        if not isinstance(classification_camera_bottom_index, int):
-            classification_camera_bottom_index = -1
-        if not isinstance(classification_camera_top_index, int):
-            classification_camera_top_index = -1
-
-        irl_config.feeder_camera = _mkCameraConfigForRole(
-            "feeder",
-            device_index=feeder_camera_index,
-            picture_settings=_picture_settings("feeder"),
-            device_settings=_device_settings("feeder"),
-            color_profile=_color_profile("feeder"),
+    if isinstance(c_ch3_idx, int):
+        irl_config.c_channel_3_camera = _mkCameraConfigForRole(
+            "c_channel_3",
+            device_index=c_ch3_idx,
+            picture_settings=_picture_settings("c_channel_3"),
+            device_settings=_device_settings("c_channel_3"),
         )
-        irl_config.classification_camera_bottom = _mkCameraConfigForRole(
-            "classification_bottom",
-            device_index=classification_camera_bottom_index,
-            width=9999,
-            height=9999,
-            picture_settings=_picture_settings("classification_bottom"),
-            device_settings=_device_settings("classification_bottom"),
-            color_profile=_color_profile("classification_bottom"),
+    elif isinstance(c_ch3_idx, str):
+        irl_config.c_channel_3_camera = _mkCameraConfigForRole(
+            "c_channel_3",
+            url=c_ch3_idx,
+            picture_settings=_picture_settings("c_channel_3"),
+            device_settings=_device_settings("c_channel_3"),
         )
-        irl_config.classification_camera_top = _mkCameraConfigForRole(
-            "classification_top",
-            device_index=classification_camera_top_index,
-            width=9999,
-            height=9999,
-            picture_settings=_picture_settings("classification_top"),
-            device_settings=_device_settings("classification_top"),
-            color_profile=_color_profile("classification_top"),
+    if isinstance(carousel_source, str):
+        irl_config.carousel_camera = _mkCameraConfigForRole(
+            aux_camera_role,
+            url=carousel_source,
+            picture_settings=_picture_settings(aux_camera_role),
+            device_settings=_device_settings(aux_camera_role),
         )
-    
+    elif isinstance(carousel_source, int):
+        irl_config.carousel_camera = _mkCameraConfigForRole(
+            aux_camera_role,
+            device_index=carousel_source,
+            picture_settings=_picture_settings(aux_camera_role),
+            device_settings=_device_settings(aux_camera_role),
+        )
+
     irl_config.carousel_stepper = mkStepperConfig(default_steps_per_second=4000, microsteps=8)
     irl_config.c_channel_4_rotor_stepper = irl_config.carousel_stepper
     irl_config.chute_stepper = mkStepperConfig(default_steps_per_second=3000, microsteps=8)
@@ -1186,7 +881,7 @@ HARDWARE_DISCOVERY_RETRY_DELAY_S = 0.75
 
 
 def _requiredCanonicalStepperNames(stepper_binding_overrides: dict[str, str]) -> list[str]:
-    logical_required = ["chute", "c_channel_1", "c_channel_2", "c_channel_3"]
+    logical_required = ["chute", "c_channel_1", "c_channel_2", "c_channel_3", "carousel"]
     return [
         stepper_binding_overrides.get(logical, LOGICAL_STEPPER_BINDING_BASES[logical])
         for logical in logical_required

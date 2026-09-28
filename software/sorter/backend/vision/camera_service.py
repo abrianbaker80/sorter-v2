@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from defs.events import CameraName
 from irl.config import (
-    CameraColorProfile,
     CameraPictureSettings,
     CameraConfig,
     mkCameraConfig,
@@ -24,9 +23,6 @@ if TYPE_CHECKING:
 
 # Maps role → IRLConfig attribute name
 _ROLE_TO_CONFIG_ATTR: dict[str, str] = {
-    "feeder": "feeder_camera",
-    "classification_bottom": "classification_camera_bottom",
-    "classification_top": "classification_camera_top",
     "c_channel_2": "c_channel_2_camera",
     "c_channel_3": "c_channel_3_camera",
     "classification_channel": "carousel_camera",
@@ -59,8 +55,6 @@ class CameraService:
     def __init__(self, irl_config: IRLConfig, gc: GlobalConfig) -> None:
         self._irl_config = irl_config
         self._gc = gc
-        self._camera_layout: str = getattr(irl_config, "camera_layout", "default")
-        self._disabled_cameras: set[str] = set(gc.disable_video_streams)
 
         self._devices: dict[str, CameraDevice] = {}
         self._feeds: dict[str, CameraFeed] = {}
@@ -78,42 +72,15 @@ class CameraService:
     def _build_devices_and_feeds(self) -> None:
         irl = self._irl_config
 
-        def _is_real_camera(cfg) -> bool:
-            return cfg is not None and (cfg.url is not None or cfg.device_index >= 0)
-
-        if self._camera_layout == "split_feeder":
-            if irl.c_channel_2_camera is not None:
-                self._add_device_feed("c_channel_2", irl.c_channel_2_camera)
-            if irl.c_channel_3_camera is not None:
-                self._add_device_feed("c_channel_3", irl.c_channel_3_camera)
-            if irl.carousel_camera is not None:
-                self._add_device_feed("classification_channel", irl.carousel_camera)
-                device = self._devices["classification_channel"]
-                self._devices["carousel"] = device
-                self._feeds["carousel"] = CameraFeed("carousel", device)
-            # feeder alias → c_channel_2 device (fallback for code that expects "feeder")
-            c2 = self._devices.get("c_channel_2")
-            if c2 is not None:
-                self._feeds["feeder"] = CameraFeed("feeder", c2)
-            else:
-                self._add_device_feed("feeder", irl.feeder_camera)
-            # Classification cameras optional in split_feeder
-            if _is_real_camera(irl.classification_camera_top):
-                self._add_device_feed("classification_top", irl.classification_camera_top)
-            if _is_real_camera(irl.classification_camera_bottom):
-                self._add_device_feed("classification_bottom", irl.classification_camera_bottom)
-        else:
-            if "feeder" in self._disabled_cameras:
-                raise RuntimeError("Cannot disable feeder camera — it is required for operation")
-            self._add_device_feed("feeder", irl.feeder_camera)
-
-            if "classification_bottom" in self._disabled_cameras and "classification_top" in self._disabled_cameras:
-                raise RuntimeError("Cannot disable both classification cameras — at least one is required")
-
-            if "classification_bottom" not in self._disabled_cameras:
-                self._add_device_feed("classification_bottom", irl.classification_camera_bottom)
-            if "classification_top" not in self._disabled_cameras:
-                self._add_device_feed("classification_top", irl.classification_camera_top)
+        if irl.c_channel_2_camera is not None:
+            self._add_device_feed("c_channel_2", irl.c_channel_2_camera)
+        if irl.c_channel_3_camera is not None:
+            self._add_device_feed("c_channel_3", irl.c_channel_3_camera)
+        if irl.carousel_camera is not None:
+            self._add_device_feed("classification_channel", irl.carousel_camera)
+            device = self._devices["classification_channel"]
+            self._devices["carousel"] = device
+            self._feeds["carousel"] = CameraFeed("carousel", device)
 
     @staticmethod
     def _config_source_key(config: CameraConfig) -> tuple | None:
@@ -155,10 +122,6 @@ class CameraService:
     @property
     def feeds(self) -> dict[str, CameraFeed]:
         return self._feeds
-
-    @property
-    def camera_layout(self) -> str:
-        return self._camera_layout
 
     def get_feed(self, role: str) -> Optional[CameraFeed]:
         return self._feeds.get(role)
@@ -281,12 +244,10 @@ class CameraService:
                 )
             device.set_source(source)
 
-        # feeder alias in split_feeder mode
-        if self._camera_layout == "split_feeder" and role == "c_channel_2":
-            self._feeds["feeder"] = CameraFeed("feeder", device)
-        if self._camera_layout == "split_feeder" and role == "classification_channel":
-            self._devices["carousel"] = device
-            self._feeds["carousel"] = CameraFeed("carousel", device)
+        if role in {"classification_channel", "carousel"}:
+            for alias in ("classification_channel", "carousel"):
+                self._devices[alias] = device
+                self._feeds[alias] = CameraFeed(alias, device)
 
         return True
 
@@ -358,32 +319,12 @@ class CameraService:
             return None
         return device.get_capture_mode()
 
-    def set_color_profile_for_role(
-        self, role: str, profile: CameraColorProfile | None
-    ) -> bool:
-        device = self._device_for_role(role)
-        if device is None:
-            return False
-        config_attr = _ROLE_TO_CONFIG_ATTR.get(role)
-        if config_attr is not None:
-            config = getattr(self._irl_config, config_attr, None)
-            if config is not None:
-                config.color_profile = profile
-        device.set_color_profile(profile)
-        return True
 
     # ---- Health polling ----
 
     @property
     def active_cameras(self) -> List[CameraName]:
-        if self._camera_layout == "split_feeder":
-            cams: list[CameraName] = [CameraName.c_channel_2, CameraName.c_channel_3, CameraName.carousel]
-            if "classification_top" in self._devices:
-                cams.append(CameraName.classification_top)
-            if "classification_bottom" in self._devices:
-                cams.append(CameraName.classification_bottom)
-            return cams
-        return [CameraName.feeder, CameraName.classification_bottom, CameraName.classification_top]
+        return [CameraName.c_channel_2, CameraName.c_channel_3, CameraName.carousel]
 
     def _health_poll_loop(self) -> None:
         while not self._health_stop.is_set():

@@ -24,17 +24,13 @@ export type CameraRole =
 	| 'c_channel_2'
 	| 'c_channel_3'
 	| 'carousel'
-	| 'classification_channel'
-	| 'classification_top'
-	| 'classification_bottom';
+	| 'classification_channel';
 
 export type ZoneChannel =
 	| 'second'
 	| 'third'
 	| 'carousel'
-	| 'classification_channel'
-	| 'class_top'
-	| 'class_bottom';
+	| 'classification_channel';
 
 export type StepperKey =
 	| 'c_channel_1'

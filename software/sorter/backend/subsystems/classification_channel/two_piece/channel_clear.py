@@ -46,21 +46,12 @@ def _rev01RotateSpeed() -> int:
         return 5000
 
 
-def channelOccupied(gc: Any, vision: Any = None) -> Optional[bool]:
-    # The same n_pieces signal the discharge loop trusts. Vision bboxes are only
-    # a fallback for when perception is not running. Returns None when neither
-    # source can answer (caller then advances the full blind budget).
+def channelOccupied(gc: Any) -> Optional[bool]:
+    # Unknown occupancy keeps the pre-home purge within its blind rotation budget.
     perception_service = getattr(gc, "perception_service", None)
     if perception_service is not None:
         try:
             return int(perception_service.read_state(4).n_pieces) > 0
-        except Exception:
-            pass
-    if vision is not None:
-        try:
-            from .vision import Rev01Vision
-
-            return len(Rev01Vision(vision, gc).bboxesOnChannel()) > 0
         except Exception:
             pass
     return None
@@ -135,13 +126,12 @@ def clearChannelByAdvancing(
     irl: Any,
     irl_config: Any,
     *,
-    vision: Any = None,
     speed_usteps_per_s: Optional[int] = None,
     step_output_deg: float = _CLEAR_STEP_OUTPUT_DEG,
     max_output_deg: float = _CLEAR_MAX_OUTPUT_DEG,
     label: str = LOG_TAG,
 ) -> ChannelClearResult:
-    occupied = channelOccupied(gc, vision)
+    occupied = channelOccupied(gc)
     if occupied is False:
         gc.logger.info(f"{label} channel clear: already empty, nothing to advance")
         return ChannelClearResult(True, False, 0.0, "already_clear")
@@ -182,14 +172,14 @@ def clearChannelByAdvancing(
             gc.logger.warning(f"{label} channel clear: advance move not acknowledged — aborting")
             return ChannelClearResult(False, True, moved_output_deg, "move_failed")
         moved_output_deg += abs(step_output_deg)
-        occupied = channelOccupied(gc, vision)
+        occupied = channelOccupied(gc)
         if occupied is False:
             gc.logger.info(
                 f"{label} channel clear: channel empty after advancing {moved_output_deg:.0f}°"
             )
             return ChannelClearResult(True, True, moved_output_deg, "cleared")
 
-    cleared = channelOccupied(gc, vision) is False
+    cleared = channelOccupied(gc) is False
     gc.logger.info(
         f"{label} channel clear: advanced full budget {moved_output_deg:.0f}° (cleared={cleared})"
     )

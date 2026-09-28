@@ -765,19 +765,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             },
         }
     )
-    # Populate sorter_state snapshot on-demand if missing — broadcasts are only
-    # fired at FSM transitions, so a freshly-connected client would otherwise
-    # default to 'default' camera_layout even when the config says split_feeder.
     if shared_state.sorter_state_snapshot is None:
-        layout = None
-        if shared_state.vision_manager is not None:
-            layout = getattr(shared_state.vision_manager, "_camera_layout", None)
         fsm_state = "initializing"
         if shared_state.controller_ref is not None:
             fsm_state = getattr(shared_state.controller_ref.state, "value", "initializing")
         shared_state.sorter_state_snapshot = {
             "state": fsm_state,
-            "camera_layout": layout,
         }
     await websocket.send_json(
         {

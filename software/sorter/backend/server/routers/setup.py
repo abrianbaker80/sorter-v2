@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, Literal, cast
+from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -11,10 +11,7 @@ import serial.tools.list_ports
 from blob_manager import getMachineId, getMachineNickname
 from hardware.bus import MCUBus
 from hardware.firmware_flash import bootloaderPresent
-from irl.config import (
-    _requiredCanonicalStepperNames,
-    cameraLayout,
-)
+from irl.config import _requiredCanonicalStepperNames
 from irl.parse_user_toml import (
     LOGICAL_STEPPER_BINDING_BASES,
     loadStepperBindingOverrides,
@@ -25,6 +22,7 @@ from server.config_helpers import (
     read_machine_params_config as _read_machine_params_config,
     write_machine_params_config as _write_machine_params_config,
 )
+from server.routers.cameras import CAMERA_SETUP_ROLES, _camera_source_for_role
 from server.routers.hardware import _servo_settings_from_config
 
 router = APIRouter()
@@ -44,10 +42,6 @@ C4_BACKING_STEPPER = "carousel"
 
 class StepperDirectionPayload(BaseModel):
     inverted: bool
-
-
-class CameraLayoutPayload(BaseModel):
-    layout: Literal["default", "split_feeder"]
 
 
 def _board_summary(board: Any) -> dict[str, Any]:
@@ -80,35 +74,14 @@ def _close_discovered_boards(boards: list[Any]) -> None:
 
 
 def _camera_assignments_from_config(config: Dict[str, Any]) -> dict[str, Any]:
-    cameras = config.get("cameras", {})
-    if not isinstance(cameras, dict):
-        cameras = {}
-    layout = cameras.get("layout")
-    if layout not in {"default", "split_feeder"}:
-        layout = None
-    return {
-        "layout": layout,
-        "feeder": cameras.get("feeder"),
-        "c_channel_2": cameras.get("c_channel_2"),
-        "c_channel_3": cameras.get("c_channel_3"),
-        "classification_channel": cameras.get("classification_channel", cameras.get("carousel")),
-        "carousel": cameras.get("carousel"),
-        "classification_top": cameras.get("classification_top"),
-        "classification_bottom": cameras.get("classification_bottom"),
-    }
+    return {role: _camera_source_for_role(config, role) for role in CAMERA_SETUP_ROLES}
 
 
 def _camera_assignments_complete(camera_assignments: dict[str, Any]) -> bool:
-    layout = camera_assignments.get("layout")
-    if layout not in {"default", "split_feeder"}:
-        return False
-    if layout == "split_feeder":
-        return all(camera_assignments.get(role) is not None for role in ("c_channel_2", "c_channel_3")) and (
-            camera_assignments.get("classification_channel") is not None
-            or camera_assignments.get("carousel") is not None
-        )
-    required_roles = ("feeder",)
-    return all(camera_assignments.get(role) is not None for role in required_roles)
+    return all(
+        camera_assignments.get(role) is not None
+        for role in ("c_channel_2", "c_channel_3", "classification_channel")
+    )
 
 
 def _current_stepper_direction_payload() -> list[dict[str, Any]]:
@@ -526,7 +499,6 @@ def get_setup_wizard_needed() -> Dict[str, bool]:
     any_camera = any(
         value is not None and value != -1
         for role, value in assignments.items()
-        if role != "layout"
     )
     return {"needed": not getMachineNickname() and not any_camera}
 
@@ -540,8 +512,7 @@ def get_setup_wizard_summary() -> Dict[str, Any]:
 
     readiness = {
         "machine_named": bool(getMachineNickname()),
-        "boards_detected": len(discovery["boards"]) > 0,
-        "camera_layout_selected": camera_assignments["layout"] in {"default", "split_feeder"},
+        "boards_detected": bool(discovery["boards"]) and not discovery["missing_required_steppers"],
         "cameras_assigned": _camera_assignments_complete(camera_assignments),
         "servo_configured": (
             servo_settings["backend"] == "waveshare"
@@ -570,10 +541,7 @@ def get_setup_wizard_summary() -> Dict[str, Any]:
             },
             "stepper_directions": _current_stepper_direction_payload(),
         },
-        "discovery": {
-            **discovery,
-            "recommended_camera_layout": cameraLayout(config.get("cameras")),
-        },
+        "discovery": discovery,
         "readiness": readiness,
     }
 
@@ -622,25 +590,4 @@ def set_stepper_direction(stepper_name: str, payload: StepperDirectionPayload) -
         "inverted": bool(payload.inverted),
         "applied_live": applied_live,
         "steppers": _current_stepper_direction_payload(),
-    }
-
-
-@router.post("/api/setup-wizard/camera-layout")
-def set_setup_camera_layout(payload: CameraLayoutPayload) -> Dict[str, Any]:
-    params_path, config = _read_machine_params_config()
-    cameras = config.get("cameras", {})
-    if not isinstance(cameras, dict):
-        cameras = {}
-    cameras = {**cameras, "layout": payload.layout}
-    config["cameras"] = cameras
-
-    try:
-        _write_machine_params_config(params_path, config)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {exc}")
-
-    return {
-        "ok": True,
-        "layout": payload.layout,
-        "camera_assignments": _camera_assignments_from_config(config),
     }

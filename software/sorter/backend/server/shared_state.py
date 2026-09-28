@@ -166,8 +166,6 @@ def setCameraService(svc: Any) -> None:
 def setVisionManager(mgr: Any) -> None:
     global vision_manager
     vision_manager = mgr
-    from server.classification_training import getClassificationTrainingManager
-    getClassificationTrainingManager().setVisionManager(mgr)
 
 
 def approveDistributionNoBinPassthrough(piece_uuid: str | None) -> bool:
@@ -419,14 +417,13 @@ def setSampleCollectionSpeedsRpm(values: Dict[str, Any]) -> Dict[str, Optional[f
     return getSampleCollectionSpeedsRpmByRole()
 
 
-def publishSorterState(state: str, camera_layout: Optional[str] = None) -> None:
+def publishSorterState(state: str) -> None:
     """Broadcast the sorter-controller FSM state over WS."""
     broadcast_from_thread(
         {
             "tag": "sorter_state",
             "data": {
                 "state": state,
-                "camera_layout": camera_layout,
             },
         }
     )

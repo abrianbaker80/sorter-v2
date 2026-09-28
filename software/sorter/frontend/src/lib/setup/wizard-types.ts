@@ -74,7 +74,6 @@ export type WizardSummary = {
 		usb_devices: UsbDevice[];
 		bootloader_board: boolean;
 		issues: string[];
-		recommended_camera_layout: 'default' | 'split_feeder';
 	};
 	readiness: Record<string, boolean>;
 };

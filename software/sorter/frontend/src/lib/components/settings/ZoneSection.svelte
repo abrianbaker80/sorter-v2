@@ -3,7 +3,7 @@
 	import CameraSourcePreview from '$lib/components/CameraSourcePreview.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import ChannelLedSection from '$lib/components/settings/ChannelLedSection.svelte';
-	import ClassificationBaselineSection from '$lib/components/settings/ClassificationBaselineSection.svelte';
+	import DetectionSettingsSidebar from '$lib/components/settings/DetectionSettingsSidebar.svelte';
 	import PictureSettingsSidebar from '$lib/components/settings/PictureSettingsSidebar.svelte';
 	import StepperSidebar from '$lib/components/settings/StepperSidebar.svelte';
 	import ZoneEditingSidebar from '$lib/components/settings/ZoneEditingSidebar.svelte';
@@ -33,11 +33,9 @@
 		| 'second'
 		| 'third'
 		| 'carousel'
-		| 'classification_channel'
-		| 'class_top'
-		| 'class_bottom';
+		| 'classification_channel';
 	type ArcChannel = 'second' | 'third' | 'classification_channel';
-	type RectChannel = 'carousel' | 'class_top' | 'class_bottom';
+	type RectChannel = 'carousel';
 	type Point = [number, number];
 	// Secondary ("foreign") zone: a polygon this camera sees that belongs to
 	// ANOTHER channel (e.g. the classification camera can see C3's exit). Drawn
@@ -229,21 +227,19 @@
 		  };
 
 	const ARC_CHANNELS: ArcChannel[] = ['second', 'third', 'classification_channel'];
-	const RECT_CHANNELS: RectChannel[] = ['carousel', 'class_top', 'class_bottom'];
+	const RECT_CHANNELS: RectChannel[] = ['carousel'];
 	const TRANSPORT_CHANNELS: Channel[] = ['second', 'third', 'carousel', 'classification_channel'];
-	const CLASSIFICATION_CHANNELS: Channel[] = ['class_top', 'class_bottom'];
 	const DETECTION_CHANNELS: Channel[] = [
 		'second',
 		'third',
 		'carousel',
-		'classification_channel',
-		'class_top',
-		'class_bottom'
+		'classification_channel'
 	];
+
 	// The channels with a lighting hood of their own; their camera role doubles as
 	// the backend LED channel key.
 	const LED_CHANNELS: Channel[] = ['second', 'third', 'classification_channel'];
-	const ALL_CHANNELS: Channel[] = [...TRANSPORT_CHANNELS, ...CLASSIFICATION_CHANNELS];
+	const ALL_CHANNELS: Channel[] = [...TRANSPORT_CHANNELS];
 	const HANDLE_HIT_RADIUS = 22;
 	const HANDLE_DRAW_RADIUS = 9;
 	const VERTEX_HIT_RADIUS = 18;
@@ -258,18 +254,15 @@
 		'c_channel_2',
 		'c_channel_3',
 		'carousel',
-		'classification_channel',
-		'classification_top',
-		'classification_bottom'
+		'classification_channel'
 	];
+
 
 	const CHANNEL_LABELS: Record<Channel, string> = {
 		second: 'C-Channel 2',
 		third: 'C-Channel 3',
 		carousel: 'Carousel',
 		classification_channel: 'Classification C-Channel (C4)',
-		class_top: 'Class. Top',
-		class_bottom: 'Class. Bottom'
 	};
 
 	const CHANNEL_COLORS: Record<Channel, string> = {
@@ -277,8 +270,6 @@
 		third: '#00c8ff',
 		carousel: '#00ff80',
 		classification_channel: '#ff8a2a',
-		class_top: '#ff6090',
-		class_bottom: '#b060ff'
 	};
 
 	const CAMERA_FOR_CHANNEL: Record<Channel, CameraRole> = {
@@ -286,8 +277,6 @@
 		third: 'c_channel_3',
 		carousel: 'carousel',
 		classification_channel: 'classification_channel',
-		class_top: 'classification_top',
-		class_bottom: 'classification_bottom'
 	};
 
 	const ROLE_LABELS: Record<CameraRole, string> = {
@@ -295,8 +284,6 @@
 		c_channel_3: 'C Channel 3',
 		carousel: 'Carousel',
 		classification_channel: 'Classification C-Channel (C4)',
-		classification_top: 'Classification Top',
-		classification_bottom: 'Classification Bottom'
 	};
 
 	const ROLE_SUPPORTS_URL: Record<CameraRole, boolean> = {
@@ -304,8 +291,6 @@
 		c_channel_3: false,
 		carousel: true,
 		classification_channel: true,
-		classification_top: true,
-		classification_bottom: true
 	};
 
 	const LEGACY_ZONE_SECTION_RANGES: Record<
@@ -421,8 +406,6 @@
 		third: [],
 		carousel: [],
 		classification_channel: [],
-		class_top: [],
-		class_bottom: []
 	});
 	let arcParams = $state<Record<ArcChannel, ArcParams | null>>({
 		second: null,
@@ -436,8 +419,6 @@
 	});
 	let quadParams = $state<Record<RectChannel, QuadParams | null>>({
 		carousel: null,
-		class_top: null,
-		class_bottom: null
 	});
 	let saving = $state(false);
 	let statusMsg = $state('');
@@ -452,7 +433,6 @@
 	let activeSecondaryId = $state<string | null>(null);
 	let secondaryVertexDrag = $state<{ id: string; vertexIdx: number } | null>(null);
 	let activeSidebar = $state<SidePanel>(null);
-	let previewColorCorrect = $state(true);
 	let previewAnnotated = $state(true);
 	let previewCropped = $state(false);
 	let previewZones = $state(true);
@@ -469,8 +449,6 @@
 		c_channel_3: null,
 		carousel: null,
 		classification_channel: null,
-		classification_top: null,
-		classification_bottom: null
 	});
 	let picturePreviewByRole = $state<Partial<Record<CameraRole, PicturePreviewState>>>({});
 	let previewImageSizeByRole = $state<Partial<Record<CameraRole, PreviewImageSize>>>({});
@@ -581,10 +559,6 @@
 		return RECT_CHANNELS.includes(ch as RectChannel);
 	}
 
-	function isClassificationChannel(ch: Channel): ch is (typeof CLASSIFICATION_CHANNELS)[number] {
-		return CLASSIFICATION_CHANNELS.includes(ch as (typeof CLASSIFICATION_CHANNELS)[number]);
-	}
-
 	function supportsDetectionSidebar(ch: Channel): ch is (typeof DETECTION_CHANNELS)[number] {
 		return DETECTION_CHANNELS.includes(ch as (typeof DETECTION_CHANNELS)[number]);
 	}
@@ -593,26 +567,14 @@
 		return LED_CHANNELS.includes(ch as (typeof LED_CHANNELS)[number]);
 	}
 
-	function detectionScopeForChannel(channel: Channel): 'classification' | 'feeder' | 'carousel' {
-		if (channel === 'second' || channel === 'third' || channel === 'classification_channel') {
-			return 'feeder';
-		}
-		if (channel === 'carousel') return 'carousel';
-		return 'classification';
+	function detectionScopeForChannel(channel: Channel): 'feeder' | 'carousel' {
+		return channel === 'carousel' ? 'carousel' : 'feeder';
 	}
 
-	function detectionCameraForChannel(
-		channel: Channel
-	): 'top' | 'bottom' | 'c_channel_2' | 'c_channel_3' | 'carousel' | 'classification_channel' {
+	function detectionCameraForChannel(channel: Channel): 'c_channel_2' | 'c_channel_3' | 'carousel' {
 		if (channel === 'second') return 'c_channel_2';
 		if (channel === 'third') return 'c_channel_3';
-		// C4 in the classification_channel topology uses the "carousel" feeder
-		// detection role on the backend — the camera is labelled
-		// classification_channel in cameras/config but detection-config lives
-		// under role=carousel.
-		if (channel === 'classification_channel') return 'carousel';
-		if (channel === 'carousel') return 'carousel';
-		return channel === 'class_top' ? 'top' : 'bottom';
+		return 'carousel';
 	}
 
 	function normalizeAngle(angle: number): number {
@@ -809,8 +771,6 @@
 				third: [],
 				carousel: [],
 				classification_channel: [],
-				class_top: [],
-				class_bottom: []
 			},
 			arcParams: {
 				second: null,
@@ -824,8 +784,6 @@
 			},
 			quadParams: {
 				carousel: null,
-				class_top: null,
-				class_bottom: null
 			}
 		};
 	}
@@ -837,8 +795,6 @@
 				third: clonePointList(userPoints.third),
 				carousel: clonePointList(userPoints.carousel),
 				classification_channel: clonePointList(userPoints.classification_channel),
-				class_top: clonePointList(userPoints.class_top),
-				class_bottom: clonePointList(userPoints.class_bottom)
 			},
 			arcParams: {
 				second: arcParams.second ? copyArcParams(arcParams.second) : null,
@@ -854,8 +810,6 @@
 			},
 			quadParams: {
 				carousel: quadParams.carousel ? copyQuadParams(quadParams.carousel) : null,
-				class_top: quadParams.class_top ? copyQuadParams(quadParams.class_top) : null,
-				class_bottom: quadParams.class_bottom ? copyQuadParams(quadParams.class_bottom) : null
 			}
 		};
 	}
@@ -866,8 +820,6 @@
 			third: clonePointList(snapshot.userPoints.third),
 			carousel: clonePointList(snapshot.userPoints.carousel),
 			classification_channel: clonePointList(snapshot.userPoints.classification_channel),
-			class_top: clonePointList(snapshot.userPoints.class_top),
-			class_bottom: clonePointList(snapshot.userPoints.class_bottom)
 		};
 		arcParams = {
 			second: snapshot.arcParams.second ? copyArcParams(snapshot.arcParams.second) : null,
@@ -883,12 +835,6 @@
 		};
 		quadParams = {
 			carousel: snapshot.quadParams.carousel ? copyQuadParams(snapshot.quadParams.carousel) : null,
-			class_top: snapshot.quadParams.class_top
-				? copyQuadParams(snapshot.quadParams.class_top)
-				: null,
-			class_bottom: snapshot.quadParams.class_bottom
-				? copyQuadParams(snapshot.quadParams.class_bottom)
-				: null
 		};
 	}
 
@@ -1880,13 +1826,11 @@
 		// forces crop off so the editor canvas always maps to the full frame.
 		const annotated = previewAnnotated;
 		const dashboard = previewCropped;
-		const colorCorrect = previewColorCorrect;
 		const showRegions = previewCropped && previewZones;
 		const params = new URLSearchParams({
 			annotated: annotated ? '1' : '0',
 			layer: annotated ? 'annotated' : 'raw',
 			dashboard: dashboard ? '1' : '0',
-			color_correct: colorCorrect ? '1' : '0',
 			show_regions: showRegions ? '1' : '0'
 		});
 		return `${getBackendHttpBase()}/api/cameras/feed/${encodeURIComponent(role)}?${params.toString()}`;
@@ -1898,7 +1842,7 @@
 		// No `editingZone` term here — the `{#key}` block must not remount the
 		// feed `<img>` when zone editing toggles. Remounting tears down a working
 		// MJPEG connection; see streamSrc() for why that causes the black screen.
-		const mode = `${previewAnnotated ? 'annot' : 'raw'}-${previewColorCorrect ? 'cc' : 'nocc'}-${previewCropped ? 'crop' : 'full'}-${zonesMode}`;
+		const mode = `${previewAnnotated ? 'annot' : 'raw'}-${previewCropped ? 'crop' : 'full'}-${zonesMode}`;
 		return `${currentRole(channel)}::${assignment === null ? 'none' : String(assignment)}::${mode}::${feedRevision}`;
 	}
 
@@ -3616,13 +3560,8 @@
 			}
 			secondaryZones = nextSecondary;
 
-			// Load rect params for carousel, classification channels
+			// Load rect params for carousel
 			const channelQuadParams = channelData.quad_params ?? {};
-			const classificationData = data.classification ?? {};
-			const classUserPts = classificationData.user_pts ?? {};
-			const classPolygons = classificationData.polygons ?? {};
-			const classQuadParams = classificationData.quad_params ?? {};
-			const classificationSavedResolution = parseSavedResolution(classificationData.resolution);
 
 			function loadQuad(saved: any, fallbackPts: any): QuadParams | null {
 				if (saved && Array.isArray(saved.corners) && saved.corners.length === 4) {
@@ -3674,25 +3613,7 @@
 			if (carouselQuad) quadParams.carousel = carouselQuad;
 			rescaleRectChannel('carousel', channelQuadParams.carousel, channelSavedResolution);
 
-			// Classification top
-			const topQuad = loadQuad(
-				classQuadParams.class_top,
-				classUserPts.class_top ?? classPolygons.top
-			);
-			if (topQuad) quadParams.class_top = topQuad;
-			rescaleRectChannel('class_top', classQuadParams.class_top, classificationSavedResolution);
 
-			// Classification bottom
-			const bottomQuad = loadQuad(
-				classQuadParams.class_bottom,
-				classUserPts.class_bottom ?? classPolygons.bottom
-			);
-			if (bottomQuad) quadParams.class_bottom = bottomQuad;
-			rescaleRectChannel(
-				'class_bottom',
-				classQuadParams.class_bottom,
-				classificationSavedResolution
-			);
 		} catch {
 			// ignore
 		}
@@ -3720,7 +3641,6 @@
 			}
 
 			const existingChannel = existingPayload.channel ?? {};
-			const existingClassification = existingPayload.classification ?? {};
 
 			const polygons: Record<string, number[][]> = { ...(existingChannel.polygons ?? {}) };
 			const user_pts: Record<string, number[][]> = { ...(existingChannel.user_pts ?? {}) };
@@ -3793,42 +3713,9 @@
 				}
 			}
 
-			const class_polygons: Record<string, number[][]> = {
-				...(existingClassification.polygons ?? {})
-			};
-			const class_user_pts: Record<string, number[][]> = {
-				...(existingClassification.user_pts ?? {})
-			};
-			const quad_params_class: Record<string, Record<string, any>> = {
-				...(existingClassification.quad_params ?? {})
-			};
 			const channelGroupResolution = Array.isArray(existingChannel.resolution)
 				? existingChannel.resolution
 				: [CANVAS_W, CANVAS_H];
-			const classificationGroupResolution = Array.isArray(existingClassification.resolution)
-				? existingClassification.resolution
-				: [CANVAS_W, CANVAS_H];
-			if (isClassificationChannel(current)) {
-				const key = current === 'class_top' ? 'top' : 'bottom';
-				if (isRectChannel(current) && quadParams[current]) {
-					const q = quadParams[current]!;
-					const cornerPts = quadAsPolygon(q);
-					class_polygons[key] = cornerPts;
-					class_user_pts[current] = cornerPts;
-					quad_params_class[current] = serializeQuadParams(q, currentResolution);
-				} else {
-					const points = sortPolygon(userPoints[current]).map((pt) => [
-						Math.round(pt[0]),
-						Math.round(pt[1])
-					]);
-					class_polygons[key] = points;
-					class_user_pts[current] = userPoints[current].map((pt) => [
-						Math.round(pt[0]),
-						Math.round(pt[1])
-					]);
-					delete quad_params_class[current];
-				}
-			}
 
 			const res = await fetch(`${getBackendHttpBase()}/api/polygons`, {
 				method: 'POST',
@@ -3843,12 +3730,6 @@
 						section_zero_pts,
 						secondary_zones,
 						resolution: channelGroupResolution
-					},
-					classification: {
-						polygons: class_polygons,
-						user_pts: class_user_pts,
-						quad_params: quad_params_class,
-						resolution: classificationGroupResolution
 					}
 				})
 			});
@@ -3958,12 +3839,6 @@
 			{#if channels.length > 1}
 				{#each channels as channel}
 					{@const active = currentChannel === channel}
-					{@const isSep =
-						channel === 'class_top' &&
-						channels.some((item) => item === 'second' || item === 'third' || item === 'carousel')}
-					{#if isSep}
-						<div class="h-6 w-px bg-border"></div>
-					{/if}
 					<button
 						onclick={() => selectChannel(channel)}
 						class="border px-3 py-1.5 text-xs font-medium transition-colors"
@@ -4236,11 +4111,9 @@
 						{#if !editingZone && currentAssignment() !== null}
 							<StreamControlsOverlay
 								bind:annotated={previewAnnotated}
-								bind:colorCorrect={previewColorCorrect}
 								bind:cropped={previewCropped}
 								bind:zones={previewZones}
 								showAnnotations
-								showColor
 								showCrop
 								showZones
 							/>
@@ -4433,14 +4306,10 @@
 
 			{#if activeSidebar === 'classification' && supportsDetectionSidebar(currentChannel)}
 				{#key `${currentChannel}::${currentAssignment() === null ? 'none' : String(currentAssignment())}`}
-					<ClassificationBaselineSection
+					<DetectionSettingsSidebar
 						scope={detectionScopeForChannel(currentChannel)}
 						camera={detectionCameraForChannel(currentChannel)}
 						label={CHANNEL_LABELS[currentChannel]}
-						hasCamera={currentAssignment() !== null}
-						onDetectionHighlightChange={(bboxes) => {
-							setDetectionHighlights(currentRole(), bboxes);
-						}}
 						onClose={() => {
 							setDetectionHighlights(currentRole(), null);
 							activeSidebar = null;

@@ -55,7 +55,7 @@ class ClassificationChannelStateMachine(BaseSubsystem):
         from subsystems.classification_channel.two_piece import (
             TwoPieceClassificationChannel,
         )
-        from subsystems.classification_channel.simple_state_machine_rev01.context import (
+        from subsystems.classification_channel.two_piece.context import (
             SimpleStateMachineRev01Context,
         )
 
