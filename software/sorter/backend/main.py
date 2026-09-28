@@ -42,8 +42,6 @@ from defs.consts import BACKEND_PORT
 from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand
 from defs.events import RuntimeStatsEvent, RuntimeStatsData
 from irl.config import (
-    ClassificationChannelMode,
-    FeederMode,
     mkIRLConfig,
     mkIRLInterface,
 )
@@ -122,39 +120,7 @@ def _noPowerModeActive(gc: GlobalConfig) -> bool:
     return bool(getattr(gc, "no_power_development_mode", False))
 
 
-def _perceptionModeActive(irl_config) -> bool:
-    """Rev04 perception stack: a perception-native feeder mode
-    (GO_TO_ANGLE_REV01, PULSE_PERCEPTION_REV01 or CONSTANT_MOVEMENT_REV01)
-    paired with the SIMPLE_STATE_MACHINE_REV01 classification channel. The
-    perception package owns detection for these pairs only; every other mode
-    pair keeps using the legacy VisionManager paths."""
-    feeder_mode = getattr(getattr(irl_config, "feeder_config", None), "mode", None)
-    cc_mode = getattr(
-        getattr(irl_config, "classification_channel_config", None), "mode", None
-    )
-    return (
-        feeder_mode
-        in (
-            FeederMode.GO_TO_ANGLE_REV01,
-            FeederMode.PULSE_PERCEPTION_REV01,
-            FeederMode.CONSTANT_MOVEMENT_REV01,
-        )
-        and cc_mode
-        in (
-            ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01,
-            ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
-        )
-    )
-
-
-def _maybeStartPerception(gc: GlobalConfig, irl_config, camera_service) -> None:
-    if not _perceptionModeActive(irl_config):
-        gc.logger.info(
-            "Perception (rev04) inactive: mode pair is not "
-            "(GO_TO_ANGLE_REV01, SIMPLE_STATE_MACHINE_REV01). Legacy vision owns detection."
-        )
-        return
-
+def _startPerception(gc: GlobalConfig, irl_config, camera_service) -> None:
     from perception import service as perception_service_mod
     from vision.detection_registry import detection_algorithm_definition
 
@@ -555,7 +521,7 @@ def main() -> None:
     # waits briefly for camera frames so the channel masks can be sized
     # against the real camera resolution.
     with gc.profiler.timer("startup.perception_start_ms"):
-        _maybeStartPerception(gc, irl_config, camera_service)
+        _startPerception(gc, irl_config, camera_service)
     # Mode-agnostic: the sample collector runs in every config, gated only by
     # its own enable toggle (persisted). Started after cameras so feeds exist.
     from sample_collector import SampleCollector
@@ -783,19 +749,7 @@ def main() -> None:
         elif vision.usesClassificationBaseline() and not vision.loadClassificationBaseline():
             gc.logger.warning("Classification baseline not found — continuing without classification")
 
-        classification_mode = getattr(
-            getattr(irl_config, "classification_channel_config", None),
-            "mode",
-            None,
-        )
-        if (
-            classification_mode
-            in (
-                ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01,
-                ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
-            )
-            and not _noPowerModeActive(gc)
-        ):
+        if not _noPowerModeActive(gc):
             from subsystems.classification_channel.simple_state_machine_rev01.spoke_home import (
                 maybeRunSpokeHome,
             )

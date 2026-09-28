@@ -1156,7 +1156,7 @@ def _suggested_sgthrs(sg_min: int) -> int:
 SWEEP_PROFILES = ("constant", "chute_random", "pulsed")
 
 # Defaults for the unstick jitter folded into the pulsed profile, matching the
-# feeder's real fall-recovery values (go_to_angle config).
+# feeder's fall-recovery values.
 _PULSED_JITTER_AMPLITUDE_DEG = 6.0
 _PULSED_JITTER_CYCLES = 8
 _PULSED_JITTER_SPEED = 6500

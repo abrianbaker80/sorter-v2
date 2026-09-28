@@ -15,8 +15,6 @@ from irl.config import (
     IRLInterface,
     CameraColorProfile,
     CameraPictureSettings,
-    ClassificationChannelMode,
-    FeederMode,
     mkCameraConfig,
 )
 from defs.events import CameraName, FrameEvent, FrameData, FrameResultData
@@ -99,8 +97,6 @@ class FeederDynamicOverlayPath(enum.Enum):
 
 @dataclass(frozen=True)
 class VisionPathConfig:
-    feeder_mode: FeederMode
-    classification_mode: ClassificationChannelMode
     uses_classification_channel_setup: bool
     feeder_tracker_roles: tuple[str, ...]
     run_auxiliary_detection: bool
@@ -285,52 +281,17 @@ class VisionManager:
             machine_setup is not None
             and getattr(machine_setup, "uses_classification_channel", False)
         )
-        feeder_config = getattr(self._irl_config, "feeder_config", None)
-        feeder_mode = getattr(feeder_config, "mode", FeederMode.DROP_ZONE_REACTIVE_REV01)
-        classification_config = getattr(self._irl_config, "classification_channel_config", None)
-        classification_mode = getattr(
-            classification_config,
-            "mode",
-            ClassificationChannelMode.DYNAMIC,
-        )
         feeder_tracker_roles = (
             ("c_channel_2", "c_channel_3", "carousel")
             if uses_classification_channel_setup
             else ("c_channel_2", "c_channel_3")
         )
-        perception_native_feeder = feeder_mode in (
-            FeederMode.GO_TO_ANGLE_REV01,
-            FeederMode.PULSE_PERCEPTION_REV01,
-            FeederMode.CONSTANT_MOVEMENT_REV01,
-        )
-        run_auxiliary_detection = (
-            not perception_native_feeder
-            and classification_mode
-            not in (
-                ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01,
-                ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01,
-            )
-        )
-        # Experimental override: keep the dedicated inference thread running
-        # even in GO_TO_ANGLE / SIMPLE_STATE_MACHINE mode so RKNN doesn't pile
-        # onto the coordinator or AnyIO workers. Paired with
-        # SORTER_DISABLE_TEACHER_CAPTURE=1 to strip the Gemini archival work
-        # out of the loop body.
-        if _os.environ.get("SORTER_FORCE_AUX_INFERENCE", "").lower() in ("1", "true", "yes"):
-            run_auxiliary_detection = True
-        feeder_detection_path = (
-            FeederDetectionPath.OBJECT_DETECTIONS
-            if perception_native_feeder
-            else FeederDetectionPath.TRACKS
-        )
-        feeder_dynamic_overlay_path = (
-            FeederDynamicOverlayPath.RAW_DETECTIONS
-            if not run_auxiliary_detection
-            else FeederDynamicOverlayPath.TRACKS
-        )
+        # The perception service owns detection on every machine: no legacy
+        # auxiliary detection, and the feeder reads object detections.
+        run_auxiliary_detection = False
+        feeder_detection_path = FeederDetectionPath.OBJECT_DETECTIONS
+        feeder_dynamic_overlay_path = FeederDynamicOverlayPath.RAW_DETECTIONS
         return VisionPathConfig(
-            feeder_mode=feeder_mode,
-            classification_mode=classification_mode,
             uses_classification_channel_setup=uses_classification_channel_setup,
             feeder_tracker_roles=feeder_tracker_roles,
             run_auxiliary_detection=run_auxiliary_detection,
@@ -2605,14 +2566,7 @@ class VisionManager:
         if not self._feeder_tracker_active:
             return
         if role == "carousel":
-            from irl.config import ClassificationChannelMode
-            c4_mode = getattr(
-                getattr(getattr(self, "_irl_config", None), "classification_channel_config", None),
-                "mode",
-                ClassificationChannelMode.DYNAMIC,
-            )
-            if c4_mode != ClassificationChannelMode.DYNAMIC:
-                return
+            return
         tracker = self._feeder_trackers.get(role)
         if tracker is None:
             return

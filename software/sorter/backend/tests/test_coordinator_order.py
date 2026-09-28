@@ -94,14 +94,15 @@ class CoordinatorOrderTests(unittest.TestCase):
 
         self.assertEqual(["distribution", "classification", "feeder"], calls)
 
-    def test_classification_exit_incident_holds_feeder_and_distribution(self) -> None:
+    def test_c4_stall_incident_holds_feeder_and_distribution(self) -> None:
         calls: list[str] = []
         fake_runtime = _FakeRuntime(calls)
         runtime_stats = RuntimeStatsCollector()
         runtime_stats.setActiveIncident(
             {
-                "kind": "classification_exit_release",
-                "piece_uuid": "piece-stuck",
+                "kind": "exit_stuck",
+                "source_kind": "c4_stall_watchdog",
+                "channel": "c4",
                 "status": "waiting_for_operator",
             }
         )

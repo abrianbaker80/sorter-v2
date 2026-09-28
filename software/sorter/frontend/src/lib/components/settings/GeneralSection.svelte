@@ -64,18 +64,6 @@
 	let machineSetupError = $state<string | null>(null);
 	let machineSetupStatus = $state('');
 
-	let classificationMode = $state<string | null>(null);
-	let classificationDefault = $state<string | null>(null);
-	let savingClassificationMode = $state(false);
-	let classificationModeError = $state<string | null>(null);
-	let classificationModeStatus = $state('');
-
-	let feederMode = $state<string | null>(null);
-	let feederDefault = $state<string | null>(null);
-	let savingFeederMode = $state(false);
-	let feederModeError = $state<string | null>(null);
-	let feederModeStatus = $state('');
-
 	let cameraLayout = $state<CameraLayout | null>(null);
 	let savingCameraLayout = $state(false);
 	let cameraLayoutError = $state<string | null>(null);
@@ -140,26 +128,6 @@
 			: 'classification_channel';
 	}
 
-	function classificationModeLabel(mode: string): string {
-		const labels: Record<string, string> = {
-			simple_state_machine_rev01: 'Simple State Machine',
-			two_piece_state_machine_rev01: 'Two Piece',
-			classic_carousel: 'Classic Carousel',
-			dynamic: 'Dynamic'
-		};
-		return labels[mode] ?? mode;
-	}
-
-	function feederModeLabel(mode: string): string {
-		const labels: Record<string, string> = {
-			go_to_angle_rev01: 'Go to Angle',
-			pulse_perception_rev01: 'Simple Pulse',
-			constant_movement_rev01: 'Constant Movement',
-			drop_zone_reactive_rev01: 'Drop Zone Reactive'
-		};
-		return labels[mode] ?? mode;
-	}
-
 	async function loadMachineSetup() {
 		const machine = manager.selectedMachine;
 		const httpBase = machineHttpBase(machine);
@@ -180,76 +148,6 @@
 			machineSetupError = e.message ?? 'Failed to load machine setup';
 		} finally {
 			loadingMachineSetup = false;
-		}
-	}
-
-	async function loadSubsystemModes() {
-		const machine = manager.selectedMachine;
-		const httpBase = machineHttpBase(machine);
-		if (!machine || !httpBase) return;
-		try {
-			const [cRes, fRes] = await Promise.all([
-				fetch(`${httpBase}/api/classification-channel-mode`),
-				fetch(`${httpBase}/api/feeder-subsystem-mode`)
-			]);
-			if (cRes.ok) {
-				const d = await cRes.json();
-				classificationMode = d.mode;
-				classificationDefault = d.default ?? null;
-			}
-			if (fRes.ok) {
-				const d = await fRes.json();
-				feederMode = d.mode;
-				feederDefault = d.default ?? null;
-			}
-		} catch {}
-	}
-
-	async function saveClassificationMode(mode: string) {
-		const machine = manager.selectedMachine;
-		const httpBase = machineHttpBase(machine);
-		if (!machine || !httpBase) return;
-		savingClassificationMode = true;
-		classificationModeError = null;
-		classificationModeStatus = '';
-		try {
-			const res = await fetch(`${httpBase}/api/classification-channel-mode`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ mode })
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			classificationMode = data.mode;
-			classificationModeStatus = 'Saved. Restart the backend for changes to take effect.';
-		} catch (e: any) {
-			classificationModeError = e.message ?? 'Failed to save classification mode';
-		} finally {
-			savingClassificationMode = false;
-		}
-	}
-
-	async function saveFeederMode(mode: string) {
-		const machine = manager.selectedMachine;
-		const httpBase = machineHttpBase(machine);
-		if (!machine || !httpBase) return;
-		savingFeederMode = true;
-		feederModeError = null;
-		feederModeStatus = '';
-		try {
-			const res = await fetch(`${httpBase}/api/feeder-subsystem-mode`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ mode })
-			});
-			if (!res.ok) throw new Error(await res.text());
-			const data = await res.json();
-			feederMode = data.mode;
-			feederModeStatus = 'Saved. Restart the backend for changes to take effect.';
-		} catch (e: any) {
-			feederModeError = e.message ?? 'Failed to save feeder mode';
-		} finally {
-			savingFeederMode = false;
 		}
 	}
 
@@ -349,7 +247,6 @@
 			machineSetupStatus = '';
 			if (machineId) {
 				void loadMachineSetup();
-				void loadSubsystemModes();
 				void loadCameraLayout();
 			}
 		}
@@ -496,64 +393,6 @@
 				{/if}
 
 				<div class="mt-4 flex flex-col gap-4">
-					<div>
-						<div class="mb-1.5 text-xs font-medium text-text">Classification Channel Mode</div>
-						<div class="flex flex-wrap gap-2">
-							{#each ['two_piece_state_machine_rev01', 'simple_state_machine_rev01', 'classic_carousel', 'dynamic'] as mode}
-								<button
-									onclick={() => saveClassificationMode(mode)}
-									disabled={savingClassificationMode}
-									class={`flex items-center gap-1.5 border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-										classificationMode === mode
-											? 'border-primary bg-primary/10 text-text'
-											: 'border-border bg-bg text-text hover:bg-surface'
-									}`}
-								>
-									{classificationModeLabel(mode)}
-									{#if mode === classificationDefault}
-										<span class="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.14em] text-primary">
-											default
-										</span>
-									{/if}
-								</button>
-							{/each}
-						</div>
-						{#if classificationModeError}
-							<div class="mt-1 text-xs text-danger">{classificationModeError}</div>
-						{:else if classificationModeStatus}
-							<div class="mt-1 text-xs text-text-muted">{classificationModeStatus}</div>
-						{/if}
-					</div>
-
-					<div>
-						<div class="mb-1.5 text-xs font-medium text-text">Feeder Mode</div>
-						<div class="flex flex-wrap gap-2">
-							{#each ['pulse_perception_rev01', 'go_to_angle_rev01', 'constant_movement_rev01'] as mode}
-								<button
-									onclick={() => saveFeederMode(mode)}
-									disabled={savingFeederMode}
-									class={`flex items-center gap-1.5 border px-3 py-1.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-										feederMode === mode
-											? 'border-primary bg-primary/10 text-text'
-											: 'border-border bg-bg text-text hover:bg-surface'
-									}`}
-								>
-									{feederModeLabel(mode)}
-									{#if mode === feederDefault}
-										<span class="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.14em] text-primary">
-											default
-										</span>
-									{/if}
-								</button>
-							{/each}
-						</div>
-						{#if feederModeError}
-							<div class="mt-1 text-xs text-danger">{feederModeError}</div>
-						{:else if feederModeStatus}
-							<div class="mt-1 text-xs text-text-muted">{feederModeStatus}</div>
-						{/if}
-					</div>
-
 					<div>
 						<div class="mb-1.5 text-xs font-medium text-text">Camera Layout</div>
 						<div class="flex flex-wrap gap-2">

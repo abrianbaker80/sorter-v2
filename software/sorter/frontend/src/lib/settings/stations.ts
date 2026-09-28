@@ -158,18 +158,8 @@ export const incidentsNavItem: SettingsNavItem = {
 
 export const tuningNavItems: SettingsNavItem[] = [
 	{
-		href: '/settings/tuning/feeder-go-to-angle',
-		label: 'Feeder Go-To-Angle',
-		icon: SlidersHorizontal
-	},
-	{
 		href: '/settings/tuning/feeder-pulse-perception',
 		label: 'Feeder Simple Pulse',
-		icon: SlidersHorizontal
-	},
-	{
-		href: '/settings/tuning/feeder-constant-movement',
-		label: 'Feeder Constant Movement',
 		icon: SlidersHorizontal
 	},
 	{

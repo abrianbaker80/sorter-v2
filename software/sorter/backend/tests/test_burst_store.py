@@ -2,28 +2,16 @@
 
 from __future__ import annotations
 
-import sys
 import time
-import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 
-# Break the subsystems ↔ vision import cycle the same way
-# test_vision_manager_feeder_dynamic does: stub the modules that would
-# otherwise pull VisionManager back in during initial import.
-_analysis_stub = types.ModuleType("subsystems.feeder.analysis")
-_analysis_stub.parseSavedChannelArcZones = lambda *args, **kwargs: None
-_analysis_stub.zoneSectionsForChannel = lambda *args, **kwargs: (set(), set())
-_feeder_stub = types.ModuleType("subsystems.feeder")
-_feeder_stub.analysis = _analysis_stub
-_subsystems_stub = types.ModuleType("subsystems")
-_subsystems_stub.feeder = _feeder_stub
-sys.modules.setdefault("subsystems", _subsystems_stub)
-sys.modules.setdefault("subsystems.feeder", _feeder_stub)
-sys.modules.setdefault("subsystems.feeder.analysis", _analysis_stub)
+# subsystems and vision import each other; load subsystems first so vision
+# finds it whole.
+import subsystems.feeder.analysis  # noqa: E402,F401
 
 from vision.burst_store import BurstFrameStore
 from vision.types import CameraFrame

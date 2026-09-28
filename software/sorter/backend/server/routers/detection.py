@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -244,13 +243,6 @@ def perception_debug_fullframe(channel_id: int):
 SUPPORTED_API_KEY_PROVIDERS = ("openrouter",)
 FEEDER_DETECTION_ROLES = ("c_channel_2", "c_channel_3", "carousel")
 EXIT_STUCK_INCIDENT_KIND = "exit_stuck"
-CHANNEL_EXIT_STUCK_SOURCE_KIND = "channel_exit_stuck"
-CLASSIFICATION_EXIT_RELEASE_SOURCE_KIND = "classification_exit_release"
-CHANNEL_EXIT_STUCK_INCIDENT_KIND = EXIT_STUCK_INCIDENT_KIND
-CHANNEL_DROPZONE_STUCK_INCIDENT_KIND = "channel_dropzone_stuck"
-C2_SEPARATION_INCIDENT_KIND = "c2_separation_needed"
-BULK_FEEDER_STALLED_INCIDENT_KIND = "bulk_feeder_stalled"
-FEEDER_DETECTION_UNAVAILABLE_INCIDENT_KIND = "feeder_detection_unavailable"
 FEEDER_JAM_INCIDENT_KIND = "feeder_jam"
 DISTRIBUTION_CHUTE_JAM_INCIDENT_KIND = "distribution_chute_jam"
 DISTRIBUTION_SERVO_BUS_OFFLINE_INCIDENT_KIND = "distribution_servo_bus_offline"
@@ -260,9 +252,6 @@ CLASSIFICATION_MULTI_DROP_COLLISION_INCIDENT_KIND = "classification_multi_drop_c
 CLASSIFICATION_INTAKE_TIMEOUT_INCIDENT_KIND = "classification_intake_request_timeout"
 CLASSIFICATION_TRACK_LOST_INCIDENT_KIND = "classification_track_lost"
 C4_STALL_WATCHDOG_SOURCE_KIND = "c4_stall_watchdog"
-CHANNEL_EXIT_RELEASE_GEAR_RATIO = 130.0 / 12.0
-CHANNEL_EXIT_RELEASE_SETTLE_S = 0.12
-
 # ---------------------------------------------------------------------------
 # Detection algorithm helper functions
 # ---------------------------------------------------------------------------
@@ -452,34 +441,8 @@ class ClassificationExitIncidentActionPayload(BaseModel):
     piece_uuid: Optional[str] = None
 
 
-class ClassificationExitIncidentTestReleasePayload(BaseModel):
-    piece_uuid: Optional[str] = None
-    amplitude_output_deg: float
-    microsteps_per_second: int
-    cycles: int = 1
-    acceleration_microsteps_per_second_sq: Optional[int] = None
-
-
 class ChannelExitIncidentActionPayload(BaseModel):
     channel: Optional[str] = None
-
-
-class ChannelDropzoneIncidentActionPayload(BaseModel):
-    channel: Optional[str] = None
-    global_id: Optional[int] = None
-    track_id: Optional[int] = None
-
-
-class Ch2SeparationIncidentActionPayload(BaseModel):
-    channel: Optional[str] = None
-
-
-class ChannelExitIncidentTestReleasePayload(BaseModel):
-    channel: Optional[str] = None
-    amplitude_output_deg: float
-    microsteps_per_second: int
-    cycles: int = 1
-    acceleration_microsteps_per_second_sq: Optional[int] = None
 
 
 class HiveLinkPayload(BaseModel):
@@ -1797,79 +1760,7 @@ def classification_channel_debug() -> Dict[str, Any]:
         "hard_collisions": list(zone_manager.hard_collisions()) if zone_manager is not None else [],
         "active_pieces": [_piece_payload(piece) for piece in active_pieces],
         "zones": [zone.to_overlay_payload() for zone in zones],
-        "exit_release_incident": _classification_channel_exit_incident_snapshot_or_none(),
     }
-
-
-def _classification_channel_running_state() -> Any:
-    controller = shared_state.controller_ref
-    coordinator = getattr(controller, "coordinator", None) if controller is not None else None
-    classification = getattr(coordinator, "classification", None) if coordinator is not None else None
-    states_map = getattr(classification, "states_map", None)
-    if isinstance(states_map, dict):
-        for state in states_map.values():
-            if hasattr(state, "approveExitReleaseIncident"):
-                return state
-    current_state = getattr(classification, "current_state", None)
-    state_obj = None
-    if isinstance(states_map, dict) and current_state is not None:
-        state_obj = states_map.get(current_state)
-    if state_obj is not None and hasattr(state_obj, "approveExitReleaseIncident"):
-        return state_obj
-    raise HTTPException(status_code=503, detail="Classification-channel runtime not available.")
-
-
-def _classification_channel_exit_incident_snapshot_or_none() -> Dict[str, Any] | None:
-    try:
-        running = _classification_channel_running_state()
-    except HTTPException:
-        return None
-    snapshot = running.exitReleaseIncidentSnapshot()
-    return snapshot if isinstance(snapshot, dict) else None
-
-
-@router.get("/api/classification-channel/exit-incident")
-def classification_channel_exit_incident() -> Dict[str, Any]:
-    return {
-        "ok": True,
-        "incident": _classification_channel_exit_incident_snapshot_or_none(),
-    }
-
-
-@router.post("/api/classification-channel/exit-incident/continue")
-def classification_channel_exit_incident_continue(
-    payload: ClassificationExitIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    running = _classification_channel_running_state()
-    try:
-        incident = running.approveExitReleaseIncident(
-            None if payload is None else payload.piece_uuid
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "incident": incident}
-
-
-@router.post("/api/classification-channel/exit-incident/test-release")
-def classification_channel_exit_incident_test_release(
-    payload: ClassificationExitIncidentTestReleasePayload,
-) -> Dict[str, Any]:
-    running = _classification_channel_running_state()
-    try:
-        result = running.testExitReleaseIncident(
-            piece_uuid=payload.piece_uuid,
-            amplitude_output_deg=payload.amplitude_output_deg,
-            microsteps_per_second=payload.microsteps_per_second,
-            cycles=payload.cycles,
-            acceleration_microsteps_per_second_sq=payload.acceleration_microsteps_per_second_sq,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "release": result}
 
 
 @router.post("/api/classification-channel/exit-incident/auto-resolve")
@@ -1891,9 +1782,6 @@ def classification_channel_exit_incident_auto_resolve() -> Dict[str, Any]:
 def classification_channel_exit_incident_clear(
     payload: ClassificationExitIncidentActionPayload | None = None,
 ) -> Dict[str, Any]:
-    # The C4 stall watchdog's exit-stuck incident lives directly in
-    # runtime_stats (there is no exit-release runtime state to route through —
-    # in two-piece mode there is no states_map at all).
     runtime_stats = _runtime_stats_or_503()
     active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
     if (
@@ -1903,14 +1791,7 @@ def classification_channel_exit_incident_clear(
     ):
         runtime_stats.clearActiveIncident(kind=EXIT_STUCK_INCIDENT_KIND, resolved_by="operator")
         return {"ok": True, "cleared": True, "kind": EXIT_STUCK_INCIDENT_KIND, "channel": "c4"}
-    running = _classification_channel_running_state()
-    try:
-        result = running.clearExitReleaseIncident(
-            None if payload is None else payload.piece_uuid
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return result
+    return {"ok": True, "cleared": False, "reason": "no_active_incident"}
 
 
 @router.post("/api/classification-channel/fallback-incident/clear")
@@ -1971,353 +1852,6 @@ def _runtime_stats_or_503() -> Any:
     return runtime_stats
 
 
-def _normalize_channel_exit_channel(value: str | None) -> str | None:
-    if value is None:
-        return None
-    candidate = value.strip().lower().replace("-", "_")
-    if candidate in ("c2", "ch2", "c_channel_2", "channel_2"):
-        return "c2"
-    if candidate in ("c3", "ch3", "c_channel_3", "channel_3"):
-        return "c3"
-    raise HTTPException(status_code=400, detail="Unsupported channel exit incident channel.")
-
-
-def _normalize_channel_dropzone_channel(value: str | None) -> str | None:
-    if value is None:
-        return None
-    candidate = value.strip().lower().replace("-", "_")
-    if candidate in ("c2", "ch2", "c_channel_2", "channel_2"):
-        return "c2"
-    if candidate in ("c3", "ch3", "c_channel_3", "channel_3"):
-        return "c3"
-    if candidate in (
-        "c4",
-        "ch4",
-        "channel_4",
-        "c_channel_4",
-        "carousel",
-        "classification",
-        "classification_channel",
-    ):
-        return "c4"
-    raise HTTPException(status_code=400, detail="Unsupported channel dropzone incident channel.")
-
-
-def _active_channel_exit_incident(
-    requested_channel: str | None = None,
-) -> tuple[Any, Dict[str, Any]]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or not _is_channel_exit_incident(active):
-        raise HTTPException(status_code=409, detail="No C2/C3 exit incident is waiting.")
-
-    active_channel = _normalize_channel_exit_channel(str(active.get("channel") or ""))
-    wanted_channel = _normalize_channel_exit_channel(requested_channel)
-    if wanted_channel is not None and wanted_channel != active_channel:
-        raise HTTPException(status_code=400, detail="The active exit incident belongs to another channel.")
-
-    active["channel"] = active_channel
-    return runtime_stats, active
-
-
-def _is_channel_exit_incident(active: Dict[str, Any]) -> bool:
-    kind = active.get("kind")
-    source_kind = active.get("source_kind")
-    if kind == "channel_exit_stuck":
-        return True
-    if kind != CHANNEL_EXIT_STUCK_INCIDENT_KIND:
-        return False
-    if source_kind not in (None, CHANNEL_EXIT_STUCK_SOURCE_KIND):
-        return False
-    try:
-        _normalize_channel_exit_channel(str(active.get("channel") or ""))
-    except HTTPException:
-        return False
-    return True
-
-
-def _payload_global_id(payload: ChannelDropzoneIncidentActionPayload | None) -> int | None:
-    if payload is None:
-        return None
-    value = payload.global_id if payload.global_id is not None else payload.track_id
-    return int(value) if value is not None else None
-
-
-def _active_channel_dropzone_incident(
-    requested_channel: str | None = None,
-    requested_global_id: int | None = None,
-) -> tuple[Any, Dict[str, Any]]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or active.get("kind") != CHANNEL_DROPZONE_STUCK_INCIDENT_KIND:
-        raise HTTPException(status_code=409, detail="No channel dropzone incident is waiting.")
-
-    active_channel = _normalize_channel_dropzone_channel(str(active.get("channel") or ""))
-    wanted_channel = _normalize_channel_dropzone_channel(requested_channel)
-    if wanted_channel is not None and wanted_channel != active_channel:
-        raise HTTPException(status_code=400, detail="The active dropzone incident belongs to another channel.")
-
-    active_global_id = active.get("global_id", active.get("track_id"))
-    if not isinstance(active_global_id, int):
-        raise HTTPException(status_code=409, detail="The active dropzone incident has no tracker id.")
-    if requested_global_id is not None and int(requested_global_id) != int(active_global_id):
-        raise HTTPException(status_code=400, detail="The active dropzone incident belongs to another tracker id.")
-
-    active["channel"] = active_channel
-    active["global_id"] = int(active_global_id)
-    active["track_id"] = int(active_global_id)
-    return runtime_stats, active
-
-
-def _feeding_runtime_state_or_503() -> Any:
-    controller = shared_state.controller_ref
-    coordinator = getattr(controller, "coordinator", None) if controller is not None else None
-    feeder = getattr(coordinator, "feeder", None)
-    states_map = getattr(feeder, "states_map", None)
-    if isinstance(states_map, dict):
-        for state in states_map.values():
-            if hasattr(state, "acknowledgeDropzoneStuckIncident"):
-                return state
-    raise HTTPException(status_code=503, detail="Feeder runtime not available.")
-
-
-def _active_irl_or_503() -> Any:
-    irl = shared_state.getActiveIRL() or shared_state.hardware_runtime_irl
-    if irl is None:
-        raise HTTPException(status_code=503, detail="Hardware not initialized. Start or home the system first.")
-    return irl
-
-
-def _channel_exit_stepper(channel: str) -> tuple[str, Any]:
-    irl = _active_irl_or_503()
-    if channel == "c2":
-        stepper_key = "c_channel_2"
-        stepper = getattr(irl, "c_channel_2_rotor_stepper", None)
-    elif channel == "c3":
-        stepper_key = "c_channel_3"
-        stepper = getattr(irl, "c_channel_3_rotor_stepper", None)
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported channel exit incident channel.")
-    if stepper is None:
-        raise HTTPException(status_code=500, detail=f"Stepper '{stepper_key}' unavailable.")
-    return stepper_key, stepper
-
-
-def _validate_channel_exit_release_payload(
-    payload: ChannelExitIncidentTestReleasePayload,
-) -> dict[str, Any]:
-    amplitude_output = float(payload.amplitude_output_deg)
-    if amplitude_output < 0.1 or amplitude_output > 12.0:
-        raise HTTPException(status_code=400, detail="amplitude_output_deg must be between 0.1 and 12.0.")
-    speed = int(payload.microsteps_per_second)
-    if speed < 100 or speed > 16000:
-        raise HTTPException(status_code=400, detail="microsteps_per_second must be between 100 and 16000.")
-    cycles = int(payload.cycles)
-    if cycles < 1 or cycles > 20:
-        raise HTTPException(status_code=400, detail="cycles must be between 1 and 20.")
-    if payload.acceleration_microsteps_per_second_sq is None:
-        acceleration = max(1000, min(48000, int(round(speed * 3.0))))
-    else:
-        acceleration = int(payload.acceleration_microsteps_per_second_sq)
-        if acceleration < 1000 or acceleration > 48000:
-            raise HTTPException(
-                status_code=400,
-                detail="acceleration_microsteps_per_second_sq must be between 1000 and 48000.",
-            )
-    return {
-        "amplitude_output_deg": amplitude_output,
-        "microsteps_per_second": speed,
-        "acceleration_microsteps_per_second_sq": acceleration,
-        "cycles": cycles,
-    }
-
-
-def _channel_exit_release_plan(
-    *,
-    amplitude_output_deg: float,
-    cycles: int,
-) -> list[tuple[str, float, float]]:
-    amplitude_stepper = float(amplitude_output_deg) * CHANNEL_EXIT_RELEASE_GEAR_RATIO
-    plan: list[tuple[str, float, float]] = []
-    for cycle in range(1, cycles + 1):
-        is_last_cycle = cycle == cycles
-        plan.extend(
-            [
-                (f"manual-test.{cycle}.cw", amplitude_stepper, CHANNEL_EXIT_RELEASE_SETTLE_S),
-                (f"manual-test.{cycle}.ccw-cross", -2.0 * amplitude_stepper, CHANNEL_EXIT_RELEASE_SETTLE_S),
-                (f"manual-test.{cycle}.cw-return", amplitude_stepper, 0.0 if is_last_cycle else CHANNEL_EXIT_RELEASE_SETTLE_S),
-            ]
-        )
-    return plan
-
-
-def _publish_channel_exit_incident_status(
-    runtime_stats: Any,
-    incident: Dict[str, Any],
-    *,
-    status: str,
-    **extra: Any,
-) -> None:
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict):
-        return
-    if not _is_channel_exit_incident(active):
-        return
-    if active.get("channel") != incident.get("channel"):
-        return
-    updated = dict(active)
-    updated.update(extra)
-    updated["status"] = status
-    updated["awaiting_operator"] = status == "waiting_for_operator"
-    runtime_stats.setActiveIncident(updated)
-
-
-def _estimate_channel_exit_move_timeout_ms(stepper: Any, move_deg: float, speed: int) -> int:
-    estimate_fn = getattr(stepper, "estimateMoveDegreesMs", None)
-    if callable(estimate_fn):
-        try:
-            estimate = int(estimate_fn(abs(float(move_deg)), max_speed=max(1, int(speed))))
-            return max(1500, estimate + 1500)
-        except Exception:
-            pass
-    return 5000
-
-
-def _run_channel_exit_release_motion(
-    *,
-    runtime_stats: Any,
-    incident: Dict[str, Any],
-    stepper: Any,
-    lock: threading.Lock,
-    plan: list[tuple[str, float, float]],
-    speed: int,
-    acceleration: int,
-) -> None:
-    ok = True
-    error: str | None = None
-    strokes_completed = 0
-    try:
-        try:
-            stepper.enabled = True
-        except Exception:
-            pass
-        for label, move_deg, settle_s in plan:
-            try:
-                stepper.set_speed_limits(16, int(speed))
-            except Exception as exc:
-                raise RuntimeError(f"Could not apply exit-release speed: {exc}") from exc
-            set_acceleration = getattr(stepper, "set_acceleration", None)
-            if callable(set_acceleration):
-                try:
-                    set_acceleration(int(acceleration))
-                except Exception as exc:
-                    raise RuntimeError(f"Could not apply exit-release acceleration: {exc}") from exc
-
-            move_blocking = getattr(stepper, "move_degrees_blocking", None)
-            if callable(move_blocking):
-                moved = bool(
-                    move_blocking(
-                        float(move_deg),
-                        timeout_ms=_estimate_channel_exit_move_timeout_ms(stepper, move_deg, speed),
-                    )
-                )
-            else:
-                move = getattr(stepper, "move_degrees", None)
-                if not callable(move):
-                    raise RuntimeError("Stepper does not support degree moves.")
-                moved = bool(move(float(move_deg)))
-                time.sleep(max(0.0, _estimate_channel_exit_move_timeout_ms(stepper, move_deg, speed) / 1000.0))
-            if not moved:
-                raise RuntimeError(f"Exit-release move {label} was not acknowledged.")
-            strokes_completed += 1
-            if settle_s > 0.0:
-                time.sleep(float(settle_s))
-    except Exception as exc:
-        ok = False
-        error = str(exc)
-    finally:
-        _publish_channel_exit_incident_status(
-            runtime_stats,
-            incident,
-            status="waiting_for_operator",
-            last_test_ok=ok,
-            last_test_error=error,
-            last_test_completed_at=time.time(),
-            last_test_strokes_completed=strokes_completed,
-        )
-        lock.release()
-
-
-@router.post("/api/feeder/channel-exit-incident/test-release")
-def feeder_channel_exit_incident_test_release(
-    payload: ChannelExitIncidentTestReleasePayload,
-) -> Dict[str, Any]:
-    runtime_stats, incident = _active_channel_exit_incident(payload.channel)
-    stepper_key, stepper = _channel_exit_stepper(str(incident["channel"]))
-    release = _validate_channel_exit_release_payload(payload)
-    plan = _channel_exit_release_plan(
-        amplitude_output_deg=float(release["amplitude_output_deg"]),
-        cycles=int(release["cycles"]),
-    )
-
-    stopped = getattr(stepper, "stopped", True)
-    if stopped is False:
-        raise HTTPException(status_code=409, detail=f"Stepper '{stepper_key}' is still moving.")
-
-    lock = shared_state.pulse_locks.setdefault(stepper_key, threading.Lock())
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail=f"Stepper '{stepper_key}' is already moving.")
-
-    result = {
-        "channel": incident["channel"],
-        **release,
-        "first_stroke_stepper_deg": plan[0][1] if plan else 0.0,
-        "stroke_count": len(plan),
-    }
-    _publish_channel_exit_incident_status(
-        runtime_stats,
-        incident,
-        status="manual_test_running",
-        **result,
-    )
-    threading.Thread(
-        target=_run_channel_exit_release_motion,
-        kwargs={
-            "runtime_stats": runtime_stats,
-            "incident": incident,
-            "stepper": stepper,
-            "lock": lock,
-            "plan": plan,
-            "speed": int(release["microsteps_per_second"]),
-            "acceleration": int(release["acceleration_microsteps_per_second_sq"]),
-        },
-        daemon=True,
-    ).start()
-    return {"ok": True, "release": result}
-
-
-@router.post("/api/feeder/channel-exit-incident/clear")
-def feeder_channel_exit_incident_clear(
-    payload: ChannelExitIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or not _is_channel_exit_incident(active):
-        runtime_stats.clearActiveIncident(kind=CHANNEL_EXIT_STUCK_INCIDENT_KIND)
-        return {"ok": True, "cleared": False, "reason": "no_active_incident"}
-
-    active_channel = _normalize_channel_exit_channel(str(active.get("channel") or ""))
-    requested_channel = _normalize_channel_exit_channel(None if payload is None else payload.channel)
-    if requested_channel is not None and requested_channel != active_channel:
-        raise HTTPException(status_code=400, detail="The active exit incident belongs to another channel.")
-
-    runtime_stats.clearActiveIncident(
-        kind=str(active.get("kind") or CHANNEL_EXIT_STUCK_INCIDENT_KIND),
-        resolved_by="operator",
-    )
-    return {"ok": True, "cleared": True, "channel": active_channel}
-
-
 @router.post("/api/feeder/jam-incident/clear")
 def feeder_jam_incident_clear(
     payload: ChannelExitIncidentActionPayload | None = None,
@@ -2334,102 +1868,6 @@ def feeder_jam_incident_clear(
 
     runtime_stats.clearActiveIncident(kind=FEEDER_JAM_INCIDENT_KIND, resolved_by="operator")
     return {"ok": True, "cleared": True, "kind": FEEDER_JAM_INCIDENT_KIND, "channel": active.get("channel")}
-
-
-@router.post("/api/feeder/channel-dropzone-incident/acknowledge")
-def feeder_channel_dropzone_incident_acknowledge(
-    payload: ChannelDropzoneIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    _runtime_stats, active = _active_channel_dropzone_incident(
-        None if payload is None else payload.channel,
-        _payload_global_id(payload),
-    )
-    feeding = _feeding_runtime_state_or_503()
-    try:
-        return feeding.acknowledgeDropzoneStuckIncident(
-            active["channel"],
-            int(active["global_id"]),
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/api/feeder/channel-dropzone-incident/clear")
-def feeder_channel_dropzone_incident_clear(
-    payload: ChannelDropzoneIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or active.get("kind") != CHANNEL_DROPZONE_STUCK_INCIDENT_KIND:
-        runtime_stats.clearActiveIncident(kind=CHANNEL_DROPZONE_STUCK_INCIDENT_KIND)
-        return {"ok": True, "cleared": False, "reason": "no_active_incident"}
-
-    _runtime_stats, active = _active_channel_dropzone_incident(
-        None if payload is None else payload.channel,
-        _payload_global_id(payload),
-    )
-    feeding = _feeding_runtime_state_or_503()
-    try:
-        return feeding.clearDropzoneStuckIncident(
-            active["channel"],
-            int(active["global_id"]),
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/api/feeder/ch2-separation-incident/clear")
-def feeder_ch2_separation_incident_clear(
-    payload: Ch2SeparationIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or active.get("kind") != C2_SEPARATION_INCIDENT_KIND:
-        runtime_stats.clearActiveIncident(kind=C2_SEPARATION_INCIDENT_KIND)
-        return {"ok": True, "cleared": False, "reason": "no_active_incident"}
-
-    requested_channel = _normalize_channel_exit_channel(None if payload is None else payload.channel)
-    if requested_channel is not None and requested_channel != "c2":
-        raise HTTPException(status_code=400, detail="The active separation incident belongs to C2.")
-
-    runtime_stats.clearActiveIncident(kind=C2_SEPARATION_INCIDENT_KIND, resolved_by="operator")
-    return {"ok": True, "cleared": True, "channel": "c2"}
-
-
-@router.post("/api/feeder/bulk-feed-incident/clear")
-def feeder_bulk_feed_incident_clear(
-    payload: Ch2SeparationIncidentActionPayload | None = None,
-) -> Dict[str, Any]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or active.get("kind") != BULK_FEEDER_STALLED_INCIDENT_KIND:
-        runtime_stats.clearActiveIncident(kind=BULK_FEEDER_STALLED_INCIDENT_KIND)
-        return {"ok": True, "cleared": False, "reason": "no_active_incident"}
-
-    requested_channel = None if payload is None else payload.channel
-    if requested_channel is not None and requested_channel not in {"c1", "ch1", "bulk_feeder"}:
-        raise HTTPException(status_code=400, detail="The active bulk-feed incident belongs to C1.")
-
-    runtime_stats.clearActiveIncident(kind=BULK_FEEDER_STALLED_INCIDENT_KIND, resolved_by="operator")
-    return {"ok": True, "cleared": True, "channel": "c1"}
-
-
-@router.post("/api/feeder/detection-incident/clear")
-def feeder_detection_incident_clear() -> Dict[str, Any]:
-    runtime_stats = _runtime_stats_or_503()
-    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
-    if not isinstance(active, dict) or active.get("kind") != FEEDER_DETECTION_UNAVAILABLE_INCIDENT_KIND:
-        runtime_stats.clearActiveIncident(kind=FEEDER_DETECTION_UNAVAILABLE_INCIDENT_KIND)
-        return {"ok": True, "cleared": False, "reason": "no_active_incident"}
-
-    runtime_stats.clearActiveIncident(
-        kind=FEEDER_DETECTION_UNAVAILABLE_INCIDENT_KIND, resolved_by="operator"
-    )
-    return {"ok": True, "cleared": True, "channel": "feeder"}
 
 
 @router.post("/api/distribution/incident/clear")

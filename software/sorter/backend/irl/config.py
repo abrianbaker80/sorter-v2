@@ -1,4 +1,3 @@
-import enum
 import os
 import time
 from dataclasses import dataclass
@@ -16,37 +15,10 @@ from dataclasses import dataclass
 COLOR_CORRECTION_ENABLED = False
 
 
-class ClassificationChannelMode(enum.Enum):
-    CLASSIC_CAROUSEL = "classic_carousel"
-    DYNAMIC = "dynamic"
-    SIMPLE_STATE_MACHINE_REV01 = "simple_state_machine_rev01"
-    # Hold exactly two pieces at a time: one staged in the precise zone being
-    # processed, one waiting in the drop zone. Separate, self-contained flow
-    # (two_piece/) — SIMPLE_STATE_MACHINE_REV01 stays the untouched single-piece
-    # fallback. See subsystems/classification_channel/two_piece/.
-    TWO_PIECE_STATE_MACHINE_REV01 = "two_piece_state_machine_rev01"
-
-
-class FeederMode(enum.Enum):
-    DROP_ZONE_REACTIVE_REV01 = "drop_zone_reactive_rev01"
-    GO_TO_ANGLE_REV01 = "go_to_angle_rev01"
-    # Simple pulsing state machine on the new perception stack. Like
-    # go-to-angle it reads ChannelState from the perception service, but the
-    # exit/drop handling is just "pulse a fixed distance, pause a fixed time"
-    # per region — no fast-eject / COM closed loop / jitter recovery.
-    PULSE_PERCEPTION_REV01 = "pulse_perception_rev01"
-    # Constant-movement feeder on the perception stack. Inverts the pulse
-    # model: each channel runs continuously at its own constant speed and is
-    # only stopped when its downstream can't accept a piece (following
-    # channel's drop zone occupied; for C3, a piece at the exit edge while the
-    # classification channel is busy/not ready).
-    CONSTANT_MOVEMENT_REV01 = "constant_movement_rev01"
-
-
-# What a machine runs when machine.toml names no mode. The setup page reports
-# the same, so it never shows a mode the machine isn't running.
-DEFAULT_CLASSIFICATION_CHANNEL_MODE = ClassificationChannelMode.TWO_PIECE_STATE_MACHINE_REV01
-DEFAULT_FEEDER_MODE = FeederMode.PULSE_PERCEPTION_REV01
+# The one feeder flow and the one classification-channel flow every machine
+# runs, under the names Hive's control data and telemetry record them by.
+FEEDER_FLOW = "pulse_perception_rev01"
+CLASSIFICATION_CHANNEL_FLOW = "two_piece_state_machine_rev01"
 # The camera layout when machine.toml names none: a camera per C-channel plus
 # the carousel. "default" is the single feeder camera, run only when named.
 DEFAULT_CAMERA_LAYOUT = "split_feeder"
@@ -325,7 +297,6 @@ class ClassificationChannelExitReleaseStage:
 
 
 class ClassificationChannelConfig:
-    mode: ClassificationChannelMode
     max_zones: int
     intake_angle_deg: float
     intake_body_half_width_deg: float
@@ -356,7 +327,6 @@ class ClassificationChannelConfig:
     post_distribute_cooldown_s: float
 
     def __init__(self) -> None:
-        self.mode = DEFAULT_CLASSIFICATION_CHANNEL_MODE
         # Keep C4 pipelined instead of serialised: target one piece in the
         # intake/drop zone and three more spread across the platter on the way
         # to the exit. Zone hard-guards still prevent same-sector loading.
@@ -534,7 +504,6 @@ class ClassificationChannelConfig:
 
 
 class FeederConfig:
-    mode: FeederMode
     first_rotor: RotorPulseConfig
     second_rotor_normal: RotorPulseConfig
     second_rotor_precision: RotorPulseConfig
@@ -549,7 +518,6 @@ class FeederConfig:
     first_rotor_jam_max_cycles: int
 
     def __init__(self):
-        self.mode = DEFAULT_FEEDER_MODE
         self.first_rotor = RotorPulseConfig(
             steps=100,
             microsteps_per_second=2000,
@@ -1064,32 +1032,6 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     irl_config.camera_layout = camera_layout_type
     irl_config.feeding_mode = feeding_mode
     irl_config.machine_setup = machine_setup
-
-    classification_section = raw_toml.get("classification_channel", {}) if isinstance(raw_toml, dict) else {}
-    if isinstance(classification_section, dict):
-        mode_raw = classification_section.get("mode")
-        if isinstance(mode_raw, str) and mode_raw.strip():
-            try:
-                irl_config.classification_channel_config.mode = ClassificationChannelMode(
-                    mode_raw.strip()
-                )
-            except ValueError:
-                valid = ", ".join(m.value for m in ClassificationChannelMode)
-                raise ValueError(
-                    f"Invalid classification_channel.mode={mode_raw!r} in machine.toml; valid values: {valid}"
-                )
-
-    feeder_section = raw_toml.get("feeder", {}) if isinstance(raw_toml, dict) else {}
-    if isinstance(feeder_section, dict):
-        feeder_mode_raw = feeder_section.get("mode")
-        if isinstance(feeder_mode_raw, str) and feeder_mode_raw.strip():
-            try:
-                irl_config.feeder_config.mode = FeederMode(feeder_mode_raw.strip())
-            except ValueError:
-                valid = ", ".join(m.value for m in FeederMode)
-                raise ValueError(
-                    f"Invalid feeder.mode={feeder_mode_raw!r} in machine.toml; valid values: {valid}"
-                )
 
     if camera_layout_type == "split_feeder":
         # split_feeder: per-channel cameras from TOML, no single feeder or classification

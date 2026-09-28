@@ -301,13 +301,15 @@ def get_firmware_boards(refresh: bool = False) -> Dict[str, Any]:
 
 @router.get("/api/firmware/config")
 def get_firmware_config() -> Dict[str, Any]:
+    from irl.config import CLASSIFICATION_CHANNEL_FLOW, FEEDER_FLOW
+
     gc = _gc()
     payload: Dict[str, Any] = {
         "hardware_state": shared_state.hardware_state,
         "no_power_development_mode": bool(getattr(gc, "no_power_development_mode", False)),
         "machine_setup": None,
-        "feeder_mode": None,
-        "classification_channel_mode": None,
+        "feeder_mode": FEEDER_FLOW,
+        "classification_channel_mode": CLASSIFICATION_CHANNEL_FLOW,
     }
     try:
         from machine_setup import DEFAULT_MACHINE_SETUP
@@ -327,10 +329,6 @@ def get_firmware_config() -> Dict[str, Any]:
         if params_path.exists():
             raw = loadTomlFile(params_path)
             payload["machine_setup"] = raw.get("machine_setup", payload["machine_setup"])
-            payload["feeder_mode"] = raw.get("feeder", {}).get("mode")
-            payload["classification_channel_mode"] = raw.get(
-                "classification_channel", {}
-            ).get("mode")
             payload["machine_toml_present"] = True
         else:
             payload["machine_toml_present"] = False

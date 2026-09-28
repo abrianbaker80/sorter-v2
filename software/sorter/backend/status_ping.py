@@ -149,8 +149,6 @@ def _softwareInfo() -> dict[str, Any]:
 def _configInfo() -> dict[str, Any]:
     info: dict[str, Any] = {
         "machine_setup": None,
-        "feeder_mode": None,
-        "classification_channel_mode": None,
     }
     try:
         from machine_setup import DEFAULT_MACHINE_SETUP
@@ -162,15 +160,10 @@ def _configInfo() -> dict[str, Any]:
         )
     except Exception:
         pass
-    # Feeder / classification-channel modes default to the hardcoded rev04 values
-    # unless machine.toml overrides them; report whichever is actually in force.
-    try:
-        from irl.config import DEFAULT_CLASSIFICATION_CHANNEL_MODE, DEFAULT_FEEDER_MODE
+    from irl.config import CLASSIFICATION_CHANNEL_FLOW, FEEDER_FLOW
 
-        info["feeder_mode"] = DEFAULT_FEEDER_MODE.value
-        info["classification_channel_mode"] = DEFAULT_CLASSIFICATION_CHANNEL_MODE.value
-    except Exception:
-        pass
+    info["feeder_mode"] = FEEDER_FLOW
+    info["classification_channel_mode"] = CLASSIFICATION_CHANNEL_FLOW
     try:
         from machine_toml import machine_toml_path
         from toml_config import loadTomlFile
@@ -180,12 +173,6 @@ def _configInfo() -> dict[str, Any]:
             raw = loadTomlFile(params_path)
             if isinstance(raw, dict):
                 info["machine_setup"] = raw.get("machine_setup", info["machine_setup"])
-                feeder = raw.get("feeder")
-                if isinstance(feeder, dict) and feeder.get("mode"):
-                    info["feeder_mode"] = feeder.get("mode")
-                cc = raw.get("classification_channel")
-                if isinstance(cc, dict) and cc.get("mode"):
-                    info["classification_channel_mode"] = cc.get("mode")
     except Exception:
         pass
     return info
