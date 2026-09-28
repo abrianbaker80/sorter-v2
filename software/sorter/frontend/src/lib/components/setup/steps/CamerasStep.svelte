@@ -14,14 +14,12 @@
 		cameraRoles,
 		roleLabels,
 		roleDescriptions,
-		optionalRoles,
 		roleSelections,
 		reviewedZones,
 		tunedPictures,
 		cameraChoices,
 		selectedCameraLabel,
 		savingAssignments,
-		savingLayout,
 		cameraError,
 		cameraStatus,
 		onSelect,
@@ -32,14 +30,12 @@
 		cameraRoles: string[];
 		roleLabels: Record<string, string>;
 		roleDescriptions: Record<string, string>;
-		optionalRoles: Set<string>;
 		roleSelections: Record<string, string>;
 		reviewedZones: Record<string, boolean>;
 		tunedPictures: Record<string, boolean>;
 		cameraChoices: CameraChoice[];
 		selectedCameraLabel: (key: string | undefined) => string;
 		savingAssignments: boolean;
-		savingLayout: boolean;
 		cameraError: string | null;
 		cameraStatus: string;
 		onSelect: (role: string, key: string) => void;
@@ -58,7 +54,7 @@
 				role={role as any}
 				label={roleLabels[role]}
 				description={roleDescriptions[role]}
-				required={!optionalRoles.has(role)}
+				required={true}
 				selectedKey={roleSelections[role] ?? '__none__'}
 				selectedLabel={selectedCameraLabel(roleSelections[role])}
 				zoneReviewed={Boolean(reviewedZones[role])}
@@ -74,7 +70,7 @@
 	<div class="flex flex-wrap items-center gap-3">
 		<button
 			onclick={onSave}
-			disabled={savingAssignments || savingLayout}
+			disabled={savingAssignments}
 			class="setup-button-primary inline-flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60"
 		>
 			<CheckCircle2 size={14} />

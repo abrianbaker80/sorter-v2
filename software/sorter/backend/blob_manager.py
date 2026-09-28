@@ -337,9 +337,6 @@ def setApiKeys(keys: dict) -> None:
     set_api_keys(keys)
 
 
-CAMERA_NAMES = ["feeder", "classification_bottom", "classification_top"]
-
-
 class VideoRecorder:
     _run_dir: Path
     _writers: dict[str, cv2.VideoWriter]

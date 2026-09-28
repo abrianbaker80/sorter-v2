@@ -4,6 +4,7 @@
 	let {
 		id,
 		type = 'text',
+		step,
 		value = $bindable(''),
 		placeholder = '',
 		disabled = false,
@@ -14,6 +15,7 @@
 	}: {
 		id?: string;
 		type?: InputType;
+		step?: string | number;
 		value?: string | number;
 		placeholder?: string;
 		disabled?: boolean;
@@ -27,6 +29,7 @@
 <input
 	{id}
 	{type}
+	{step}
 	bind:value
 	{placeholder}
 	{disabled}

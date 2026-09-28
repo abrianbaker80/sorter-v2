@@ -5,8 +5,7 @@ import time
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from subsystems.classification.carousel import Carousel
-    from piece_transport import PieceTransport
+    from piece_transport import ClassificationChannelTransport
     from global_config import GlobalConfig
     from subsystems.bus import TickBus
 
@@ -29,8 +28,7 @@ class SharedVariables:
         self._bus = bus
         self._classification_ready: bool = False
         self._distribution_ready: bool = True
-        self.transport: Optional["PieceTransport"] = None
-        self.carousel: Optional["Carousel"] = None
+        self.transport: Optional["ClassificationChannelTransport"] = None
         # uuid of the piece distribution most recently started positioning for.
         # Written by Positioning, read by Ready, so READY waits on the piece the
         # chute was actually aimed for, not whatever holds the slot when READY
@@ -295,8 +293,4 @@ class SharedVariables:
         )
 
     def _bus_enabled(self) -> bool:
-        return bool(
-            self._gc is not None
-            and getattr(self._gc, "use_channel_bus", False)
-            and self._bus is not None
-        )
+        return self._bus is not None

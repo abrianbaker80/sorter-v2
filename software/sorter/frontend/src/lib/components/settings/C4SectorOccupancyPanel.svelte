@@ -73,15 +73,12 @@
 		return 'Free';
 	}
 
-	async function scan(forceDetection = false): Promise<void> {
+	async function scan(): Promise<void> {
 		loading = true;
 		error = '';
 		try {
-			const params = new URLSearchParams({
-				force_detection: forceDetection ? 'true' : 'false'
-			});
 			const res = await fetch(
-				`${getBackendHttpBase()}/api/classification-channel/sector-occupancy?${params.toString()}`,
+				`${getBackendHttpBase()}/api/classification-channel/sector-occupancy`,
 				{ method: 'POST' }
 			);
 			const data = (await res.json().catch(() => ({}))) as SectorOccupancyPayload | { detail?: string };
@@ -102,7 +99,7 @@
 	}
 
 	onMount(() => {
-		void scan(false);
+		void scan();
 	});
 </script>
 
@@ -125,7 +122,7 @@
 		</div>
 		<button
 			type="button"
-			onclick={() => scan(true)}
+			onclick={() => scan()}
 			disabled={loading}
 			class="inline-flex items-center gap-1.5 border border-border bg-bg px-3 py-1.5 text-xs font-medium text-text transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
 			title="Scan C4 sectors"

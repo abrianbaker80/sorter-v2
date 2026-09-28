@@ -92,11 +92,11 @@
 		const summary = step.summary?.trim();
 		if (summary) return summary;
 		if (step.stage === 'final_review') {
-			if (step.status === 'approved') return 'Advisor signed off on the color-corrected image.';
+			if (step.status === 'approved') return 'Advisor signed off on the calibrated image.';
 			if (step.status === 'concerns')
-				return 'Advisor flagged remaining concerns with the corrected image.';
+				return 'Advisor flagged remaining concerns with the calibrated image.';
 			if (step.status === 'error') return 'Final-review call failed.';
-			return 'Reviewing the color-corrected image.';
+			return 'Reviewing the calibrated image.';
 		}
 		if (step.status === 'done') return 'The advisor is satisfied with the current image.';
 		if (step.changes && step.changes.length > 0) {

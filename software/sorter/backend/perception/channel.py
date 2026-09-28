@@ -7,7 +7,7 @@ the channel's center + reference angle, and the section sets that name the
 drop and exit arcs.
 
 This module imports numpy and cv2 only. It does NOT import from
-``vision_manager``, ``subsystems.feeder.*``, ``vision.tracking.*``, or
+``vision_manager``, ``subsystems.feeder.*``, or
 anything else from the legacy stack. The arc-zone parsing is intentionally
 re-implemented here from the saved-blob schema rather than reused from
 ``subsystems.feeder.analysis`` — perception is meant to stand alone.
@@ -156,7 +156,7 @@ def _parse_arc_center(
 ) -> tuple[float, float] | None:
     """The arc center from the saved blob — the radial pivot the saved angles
     are measured from. THIS is the angle reference, not the polygon centroid.
-    The UI's zone overlay (``handdrawn_region_provider._channelMask``) uses
+    The UI's zone overlay uses
     ``arc.center`` for the exact same reason; perception must match or its
     section→pixel mapping silently drifts."""
     if not isinstance(arc_params_entry, Mapping):
@@ -175,7 +175,7 @@ def _parse_resolution(
 ) -> tuple[float, float] | None:
     """The (width, height) the polygon + arc were drawn against in the UI
     zone editor. The saved pixel coordinates are in this space; perception
-    (like ``handdrawn_region_provider._scaleForFrame``) must rescale them to
+    must rescale them to
     the live capture resolution or every zone lands off-frame when the camera
     delivers a different size than the editor used (e.g. zones saved at 4K,
     camera now streaming 720p)."""
@@ -278,9 +278,8 @@ def buildChannelDef(
 
     ``saved_resolution`` is the (width, height) the polygon + arc_center were
     drawn against in the zone editor. When it differs from ``frame_shape`` the
-    pixel coordinates are rescaled by ``(frame_w/saved_w, frame_h/saved_h)`` —
-    the same transform ``handdrawn_region_provider._scaleForFrame`` applies on
-    the legacy preview path. Section angles are resolution-independent, so only
+    pixel coordinates are rescaled by ``(frame_w/saved_w, frame_h/saved_h)``.
+    Section angles are resolution-independent, so only
     the polygon mask and the center pivot are scaled. Tests that already pass
     frame-space coordinates omit it and get the identity transform.
     """

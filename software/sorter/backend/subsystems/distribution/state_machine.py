@@ -22,7 +22,6 @@ class DistributionStateMachine(BaseSubsystem):
         layout: DistributionLayout,
         event_queue: queue.Queue,
         *,
-        vision=None,
         post_distribute_cooldown_s: float = 0.0,
     ):
         super().__init__()
@@ -46,7 +45,6 @@ class DistributionStateMachine(BaseSubsystem):
                 gc,
                 shared,
                 event_queue,
-                vision=vision,
                 post_distribute_cooldown_s=post_distribute_cooldown_s,
             ),
         }

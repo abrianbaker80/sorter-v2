@@ -6,7 +6,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 import cv2
@@ -21,9 +21,6 @@ from server.condition_collector import (
 )
 from server.hive_uploader import HiveUploader
 from server.sample_payloads import build_sample_payload
-
-if TYPE_CHECKING:
-    from vision import VisionManager
 
 
 TRAINING_ROOT = BLOB_DIR / "classification_training"
@@ -72,7 +69,6 @@ class ClassificationTrainingManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._vision_manager: VisionManager | None = None
         self._processor = DEFAULT_PROCESSOR
         self._session_id: str | None = None
         self._session_name: str | None = None
@@ -131,10 +127,6 @@ class ClassificationTrainingManager:
             }
         )
 
-    def setVisionManager(self, manager: VisionManager | None) -> None:
-        with self._lock:
-            self._vision_manager = manager
-
     def startSession(self, session_name: str | None = None) -> dict[str, Any]:
         with self._lock:
             self._createSessionLocked(session_name)
@@ -186,105 +178,6 @@ class ClassificationTrainingManager:
                 "storage_cap_bytes": self._storage_cap_bytes,
                 "storage_used_bytes": self._last_usage_bytes,
             }
-
-    def captureCurrentFrame(self, camera: str) -> dict[str, Any]:
-        with self._lock:
-            vision = self._vision_manager
-            if self._ensureSessionLocked():
-                self._persistConfig()
-            session_dir = self._requireSessionDirLocked()
-            processor = self._processor
-
-        if vision is None:
-            raise ValueError("Vision manager is not initialized.")
-
-        capture = vision.captureClassificationSample(camera)
-        zone_key = f"{camera}_zone"
-        zone = capture.get(zone_key)
-        if not isinstance(zone, np.ndarray) or zone.size == 0:
-            raise ValueError("No live classification tray crop is available for this view.")
-
-        metadata = {
-            "source": "manual_capture",
-            "source_role": "classification_chamber",
-            "capture_reason": "manual_capture",
-            "detection_scope": "classification",
-            "camera": camera,
-            "captured_at": time.time(),
-        }
-        return self._archiveSample(
-            session_dir=session_dir,
-            processor=processor,
-            preferred_camera=camera,
-            top_zone=capture.get("top_zone"),
-            bottom_zone=capture.get("bottom_zone"),
-            top_frame=capture.get("top_frame"),
-            bottom_frame=capture.get("bottom_frame"),
-            metadata=metadata,
-        )
-
-    def saveDetectionDebugCapture(
-        self,
-        *,
-        camera: str,
-        algorithm: str,
-        openrouter_model: str | None,
-        debug_result: dict[str, Any] | None,
-        top_zone: np.ndarray | None,
-        bottom_zone: np.ndarray | None,
-        top_frame: np.ndarray | None,
-        bottom_frame: np.ndarray | None,
-    ) -> dict[str, Any]:
-        with self._lock:
-            if self._ensureSessionLocked():
-                self._persistConfig()
-            session_dir = self._requireSessionDirLocked()
-            processor = self._processor
-
-        metadata: dict[str, Any] = {
-            "source": "settings_detection_test",
-            "source_role": "classification_chamber",
-            "capture_reason": "settings_detection_test",
-            "detection_scope": "classification",
-            "camera": camera,
-            "captured_at": time.time(),
-            "detection_algorithm": algorithm if isinstance(algorithm, str) and algorithm else None,
-            "detection_openrouter_model": (
-                openrouter_model
-                if isinstance(openrouter_model, str) and openrouter_model and algorithm == "gemini_sam"
-                else None
-            ),
-        }
-        if isinstance(debug_result, dict):
-            metadata.update(
-                {
-                    "detection_found": bool(debug_result.get("found")),
-                    "detection_bbox": _coerce_bbox(debug_result.get("bbox")),
-                    "detection_candidate_bboxes": [
-                        candidate
-                        for candidate in (_coerce_bbox(value) for value in debug_result.get("candidate_bboxes", []))
-                        if candidate is not None
-                    ],
-                    "detection_bbox_count": int(debug_result.get("bbox_count", 0)),
-                    "detection_score": _safe_float(debug_result.get("score")),
-                    "detection_message": (
-                        debug_result.get("message")
-                        if isinstance(debug_result.get("message"), str)
-                        else None
-                    ),
-                }
-            )
-
-        return self._archiveSample(
-            session_dir=session_dir,
-            processor=processor,
-            preferred_camera=camera,
-            top_zone=top_zone,
-            bottom_zone=bottom_zone,
-            top_frame=top_frame,
-            bottom_frame=bottom_frame,
-            metadata=metadata,
-        )
 
     def saveLiveClassificationCapture(
         self,

@@ -20,23 +20,17 @@ import {
 	CLASSIFICATION_CHANNEL_STEPPER_LABEL
 } from '$lib/settings/stepper-control';
 
-export type MachineSetupKey = 'classification_channel' | 'manual_carousel';
-
 export type CameraRole =
 	| 'c_channel_2'
 	| 'c_channel_3'
 	| 'carousel'
-	| 'classification_channel'
-	| 'classification_top'
-	| 'classification_bottom';
+	| 'classification_channel';
 
 export type ZoneChannel =
 	| 'second'
 	| 'third'
 	| 'carousel'
-	| 'classification_channel'
-	| 'class_top'
-	| 'class_bottom';
+	| 'classification_channel';
 
 export type StepperKey =
 	| 'c_channel_1'
@@ -58,9 +52,7 @@ export type StationSlug =
 	| 'c-channel-1'
 	| 'c-channel-2'
 	| 'c-channel-3'
-	| 'carousel'
-	| 'classification-channel'
-	| 'classification-chamber';
+	| 'classification-channel';
 
 export type SettingsNavItem = {
 	href: string;
@@ -164,18 +156,8 @@ export const powerStressNavItem: SettingsNavItem = {
 
 export const tuningNavItems: SettingsNavItem[] = [
 	{
-		href: '/settings/tuning/feeder-go-to-angle',
-		label: 'Feeder Go-To-Angle',
-		icon: SlidersHorizontal
-	},
-	{
 		href: '/settings/tuning/feeder-pulse-perception',
 		label: 'Feeder Simple Pulse',
-		icon: SlidersHorizontal
-	},
-	{
-		href: '/settings/tuning/feeder-constant-movement',
-		label: 'Feeder Constant Movement',
 		icon: SlidersHorizontal
 	},
 	{
@@ -227,24 +209,6 @@ export const stationPageConfigs: StationPageConfig[] = [
 		stepperKeys: ['c_channel_3']
 	},
 	{
-		slug: 'carousel',
-		href: '/settings/carousel',
-		label: 'Carousel',
-		icon: Shapes,
-		description: 'Configure the carousel camera, carousel polygon, and carousel stepper.',
-		cameraRoles: ['carousel'],
-		zoneChannels: ['carousel'],
-		stepperKeys: ['carousel'],
-		stepperEndstops: {
-			carousel: {
-				configEndpoint: '/api/hardware-config/carousel',
-				liveEndpoint: '/api/hardware-config/carousel/live',
-				homeEndpoint: '/api/hardware-config/carousel/home',
-				homeCancelEndpoint: '/api/hardware-config/carousel/home/cancel'
-			}
-		}
-	},
-	{
 		slug: 'classification-channel',
 		href: '/settings/classification-channel',
 		label: 'Classification C-Channel (C4)',
@@ -260,17 +224,6 @@ export const stationPageConfigs: StationPageConfig[] = [
 				gearRatio: CLASSIFICATION_CHANNEL_STEPPER_GEAR_RATIO
 			}
 		}
-	},
-	{
-		slug: 'classification-chamber',
-		href: '/settings/classification-chamber',
-		label: 'Classification Chamber',
-		icon: Camera,
-		description:
-			'Manage the classification chamber cameras and crop zones. Camera tuning controls are not exposed by the backend yet.',
-		cameraRoles: ['classification_top', 'classification_bottom'],
-		zoneChannels: ['class_top', 'class_bottom'],
-		stepperKeys: []
 	}
 ];
 
@@ -281,7 +234,7 @@ export type SettingsNavHeading = {
 
 export type SettingsNavEntry = SettingsNavItem | SettingsNavHeading;
 
-const baseSettingsNavItems: SettingsNavEntry[] = [
+export const settingsNavItems: SettingsNavEntry[] = [
 	generalNavItem,
 	hiveNavItem,
 	hiveModelsNavItem,
@@ -303,23 +256,6 @@ const baseSettingsNavItems: SettingsNavEntry[] = [
 	...tuningNavItems
 ];
 
-export function settingsNavItemsForSetup(setup: MachineSetupKey): SettingsNavEntry[] {
-	const hiddenSlugs =
-		setup === 'classification_channel'
-			? new Set<StationSlug>(['carousel', 'classification-chamber'])
-			: new Set<StationSlug>(['classification-channel']);
-
-	return baseSettingsNavItems.filter((entry) => {
-		if (!('href' in entry)) return true;
-		const station = stationPageConfigs.find((candidate) => candidate.href === entry.href);
-		if (!station) return true;
-		return !hiddenSlugs.has(station.slug);
-	});
-}
-
-export const settingsNavItems: SettingsNavEntry[] =
-	settingsNavItemsForSetup('classification_channel');
-
 export function getStationPageConfig(slug: string): StationPageConfig | undefined {
 	return stationPageConfigs.find((station) => station.slug === slug);
 }
@@ -329,6 +265,6 @@ export const stepperLabels: Record<StepperKey, string> = {
 	c_channel_2: 'C Channel 2',
 	c_channel_3: 'C Channel 3',
 	c_channel_4: 'C Channel 4',
-	carousel: 'Carousel',
+	carousel: CLASSIFICATION_CHANNEL_STEPPER_LABEL,
 	chute: 'Chute'
 };
