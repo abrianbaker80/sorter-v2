@@ -1,0 +1,1515 @@
+diff --git a/software/sorter/backend/smart_bins_delivery.py b/software/sorter/backend/smart_bins_delivery.py
+index 723024c..04bd25b 100644
+--- a/software/sorter/backend/smart_bins_delivery.py
++++ b/software/sorter/backend/smart_bins_delivery.py
+@@ -513,6 +513,57 @@ def lookup_request(request_key: str) -> dict[str, Any] | None:
+                  "result": json.loads(row[2])} if row else None)
+ 
+ 
++def validate_physical_claim(machine_id: str, reservation_id: str, custody: CustodyRef,
++                            *, state: str, revision: int,
++                            attempt_id: str | None = None,
++                            target_boundary: int | None = None,
++                            qualification: RoutingQualification | None = None) -> str:
++    """Read-only custody fence for the guarded physical owner.
++
++    This does not issue a motion permit. The caller must also prove its current
++    hardware ownership and physical route while holding the controller locks.
++    """
++    if state not in ("RESERVED", "RELEASE_INTENT"):
++        raise ValueError("unsupported physical claim state")
++    with _readonly() as conn:
++        row = _reservation(conn, machine_id, reservation_id)
++        if row is None or row["state"] != state or row["row_revision"] != revision:
++            return "UNSAFE_STATE"
++        if not _custody_matches(row, custody):
++            return "CUSTODY_MISMATCH"
++        if _unresolved_journey_discrepancy(conn, machine_id, row["piece_uuid"]):
++            return "UNRESOLVED_DELIVERY"
++        if state == "RELEASE_INTENT":
++            attempt = _attempt(conn, reservation_id)
++            if (attempt is None or attempt["id"] != attempt_id
++                or attempt["owner_incarnation"] != custody.owner_incarnation
++                or attempt["target_boundary"] != str(target_boundary)
++                or attempt["exit_json"] is not None):
++                return "ATTEMPT_MISMATCH"
++            if qualification is None:
++                return "UNQUALIFIED_DESTINATION"
++            if (qualification.machine_id != machine_id
++                or qualification.policy_revision_id != row["policy_revision_id"]
++                or qualification.routing_revision != row["routing_revision"]):
++                return "STALE_POLICY"
++            slot = next((item for item in qualification.slots
++                         if item.slot_id == row["intended_slot_id"]
++                         and item.cycle_id == row["intended_cycle_id"]), None)
++            if row["intended_kind"] == "BIN" and slot is None:
++                return "UNQUALIFIED_DESTINATION"
++            request = ReservationRequest(
++                piece_uuid=row["piece_uuid"], route_attempt=row["route_attempt"],
++                sorting_session_id=row["run_id"], group_key_id=row["group_key_id"],
++                quantity=0, not_in_inventory=slot.not_in_inventory if slot else False)
++            context = _validate_context(conn, request, qualification)
++            if context is not None:
++                return context["code"]
++            if row["intended_kind"] == "BIN" and _candidate(
++                conn, request, qualification, slot, misc="misc") is None:
++                return "OCCUPIED_INCOMPATIBLE"
++        return "OK"
++
++
+ def inspect_recovery(machine_id: str) -> dict[str, Any]:
+     """Read outstanding custody, evidence and blockers without a write lock."""
+     if not machine_id:
+diff --git a/software/sorter/backend/subsystems/classification_channel/marker_positioner.py b/software/sorter/backend/subsystems/classification_channel/marker_positioner.py
+index 3cbdeb3..f13b127 100644
+--- a/software/sorter/backend/subsystems/classification_channel/marker_positioner.py
++++ b/software/sorter/backend/subsystems/classification_channel/marker_positioner.py
+@@ -410,7 +410,12 @@ class MarkerPositioner:
+         self.boundary: int | None = None
+         self.pending: int | None = None
+         self.fault: str | None = None
++        self.fault_exception: Exception | None = None
++        self.fault_bookkeeping_errors: list[Exception] = []
+         self._receipt = None
++        self._dispatch_guard = None
++        self._first_dispatch_attempted = False
++        self._motor_start_failure: Exception | None = None
+         self._token = None
+         self._window = None
+         self._binding = False
+@@ -549,28 +554,61 @@ class MarkerPositioner:
+ 
+     def _fail(self, exc: Exception):
+         self.fault = str(exc)
++        self.fault_exception = exc
++        guard = self._dispatch_guard if self._first_dispatch_attempted else None
+         try:
+-            self._record("failure", reason=self.fault,
+-                          first_post_fence_frame=self._first_post_fence_frame,
+-                          history=self._history_evidence(),
+-                          **self._history_metrics(),
+-                          last_observation_state=self._last_observation_state,
+-                          last_usable_observation_state=self._last_usable_observation_state,
+-                          last_usable_post_motion_observation_state=(
+-                              self._last_usable_post_motion_observation_state
+-                          ))
+-        except Exception:
+-            pass
+-        self._diagnostic_active = False
+-        try:
+-            self.on_fault(self.fault)
++            # These hooks only fence memory and freeze evidence. Even a broken
++            # hook must leave the original hardware fault/stop callback reachable.
++            if guard is not None:
++                try:
++                    if self._motor_start_failure is not None:
++                        guard.motor_start_failed(self._motor_start_failure)
++                    else:
++                        guard.motion_failed(exc)
++                except Exception as bookkeeping_exc:
++                    self.fault_bookkeeping_errors.append(bookkeeping_exc)
+         finally:
+-            raise PositionError(self.fault) from exc
++            try:
++                self.on_fault(self.fault)
++            finally:
++                # SQLite may block or fail. The existing stop owner has already
++                # been called, and this positioner is latched against dispatch.
++                if guard is not None:
++                    try:
++                        guard.persist_uncertainty()
++                    except Exception as bookkeeping_exc:
++                        self.fault_bookkeeping_errors.append(bookkeeping_exc)
++                try:
++                    self._record("failure", reason=self.fault,
++                                  first_post_fence_frame=self._first_post_fence_frame,
++                                  history=self._history_evidence(),
++                                  **self._history_metrics(),
++                                  last_observation_state=self._last_observation_state,
++                                  last_usable_observation_state=self._last_usable_observation_state,
++                                  last_usable_post_motion_observation_state=(
++                                      self._last_usable_post_motion_observation_state
++                                  ))
++                except Exception:
++                    pass
++                self._diagnostic_active = False
++                raise PositionError(self.fault) from exc
+ 
+     def _available(self):
+         if self.fault is not None or self.pending is not None:
+             raise PositionError("positioner faulted or already has an owned request")
+ 
++    def install_dispatch_guard(self, guard) -> None:
++        """Install the explicit physical-owner fence only while bound and idle."""
++        if (self._dispatch_guard is not None or self.boundary is None
++            or self.pending is not None or self.fault is not None or self._receipt is not None):
++            raise PositionError("dispatch guard requires one idle bound owner")
++        for name in ("before_request", "before_first_dispatch", "before_trim",
++                     "after_motor_start", "motor_start_failed", "motion_failed",
++                     "persist_uncertainty"):
++            if not callable(getattr(guard, name, None)):
++                raise PositionError(f"dispatch guard lacks {name}")
++        self._dispatch_guard = guard
++
+     def _observe_stopped(self):
+         self._token = self.motor.stationary_token()
+         if self.motor.coordinate_identity() != self.mapping.motor_coordinates:
+@@ -620,7 +658,11 @@ class MarkerPositioner:
+             raise PositionError("normal index must be exactly the next bound boundary")
+         if type(speed) is not int or speed < 16:
+             raise ValueError("speed must be a positive configured motor speed")
++        if self._dispatch_guard is not None:
++            self._dispatch_guard.before_request(boundary, self)
+         self.pending, self._speed = boundary, speed
++        self._first_dispatch_attempted = False
++        self._motor_start_failure = None
+         self._binding, self._preparing = False, True
+         self._corrections, self._total_correction = 0, 0.0
+         self._last_error = None
+@@ -652,6 +694,8 @@ class MarkerPositioner:
+         target. Never sends an index-sized move or rebases a bound instance.
+         The same correction envelope, deadline and confirmation rules apply.
+         """
++        if self._dispatch_guard is not None:
++            raise PositionError("guarded maintenance trim needs a separate durable permit")
+         self._available()
+         self.mapping.phase(boundary)
+         if self.boundary is not None:
+@@ -676,9 +720,26 @@ class MarkerPositioner:
+         stage_started = self.clock()
+         if stage_started > self._started + self.limits.timeout_s:
+             raise PositionError("marker index deadline exceeded during observation")
+-        receipt = self.motor.start(
+-            requested_degrees, self._speed, self._token
+-        )
++        first = not self._first_dispatch_attempted
++        if self._dispatch_guard is not None:
++            if first:
++                self._dispatch_guard.before_first_dispatch(self)
++            else:
++                self._dispatch_guard.before_trim(self)
++        self._first_dispatch_attempted = True
++        try:
++            receipt = self.motor.start(
++                requested_degrees, self._speed, self._token
++            )
++            if receipt is None:
++                raise PositionError("tracked motor returned no receipt")
++            if self._dispatch_guard is not None:
++                self._dispatch_guard.after_motor_start(self, receipt, first=first)
++        except Exception as exc:
++            # Preserve the original failure for _fail; no persistence may run
++            # here before poll invokes the existing fault/stop callback.
++            self._motor_start_failure = exc
++            raise
+         # Only an accepted owned move begins another bounded positioning stage.
+         # Use dispatch time, not receipt-processing time, for its full budget.
+         self._receipt = receipt
+diff --git a/software/sorter/backend/subsystems/classification_channel/physical_runtime.py b/software/sorter/backend/subsystems/classification_channel/physical_runtime.py
+index 834698b..5e94534 100644
+--- a/software/sorter/backend/subsystems/classification_channel/physical_runtime.py
++++ b/software/sorter/backend/subsystems/classification_channel/physical_runtime.py
+@@ -27,7 +27,8 @@ class Binding:
+     admitted: bool = False
+     result_applied: bool = False
+     capture_until: float = 0.0
+-    landing_scene: object = None
++    landing_scene: object = None
++    reservation_id: str | None = None
+ 
+     @property
+     def key(self):
+@@ -42,8 +43,9 @@ class PhysicalC4Runtime:
+         *,
+         speed: int,
+         distribution,
+-        journeys=None,
+-        apply_result=None,
++        journeys=None,
++        apply_result=None,
++        native_bridge=None,
+     ):
+         if positioner.boundary != fifo.boundary or positioner.pending is not None:
+             raise PositionError("FIFO requires an established marker boundary")
+@@ -61,7 +63,10 @@ class PhysicalC4Runtime:
+         self._verify = None
+         self._verify_token = None
+         self._verify_started = None
+-        self._pending = None
++        self._pending = None
++        self.native_bridge = native_bridge
++        if native_bridge is not None:
++            native_bridge.attach(self, positioner)
+ 
+     @property
+     def can_admit(self):
+@@ -70,8 +75,9 @@ class PhysicalC4Runtime:
+             and not self.recovering
+             and self._verify is None
+             and self._pending is None
+-            and self.handoff is None
+-            and self.fifo.pockets[self.fifo.intake_pocket_id].state is PocketState.EMPTY
++            and self.handoff is None
++            and (self.native_bridge is None or not self.native_bridge.blocks_admission)
++            and self.fifo.pockets[self.fifo.intake_pocket_id].state is PocketState.EMPTY
+         )
+ 
+     def reserve(self, piece, episode):
+@@ -82,10 +88,16 @@ class PhysicalC4Runtime:
+             or episode.pocket_id != self.fifo.intake_pocket_id
+         ):
+             raise RuntimeError("C3 reservation does not match confirmed intake")
+-        pocket = self.fifo.deposit(
+-            {"journey_uuid": piece.uuid, "episode_id": episode.episode_id}
+-        )
+-        binding = Binding(pocket.pocket_id, pocket.generation, piece, episode)
++        reservation_id = None
++        if self.native_bridge is not None:
++            reservation_id = self.native_bridge.admission_reservation(
++                piece, episode, self.fifo.pockets[self.fifo.intake_pocket_id]
++            )
++        pocket = self.fifo.deposit(
++            {"journey_uuid": piece.uuid, "episode_id": episode.episode_id}
++        )
++        binding = Binding(pocket.pocket_id, pocket.generation, piece, episode)
++        binding.reservation_id = reservation_id
+         episode.piece_uuid = piece.uuid
+         piece.c4_pocket_id, piece.c4_generation = binding.key
+         self.bindings[binding.key] = self.handoff = binding
+@@ -143,11 +155,38 @@ class PhysicalC4Runtime:
+             return False
+         return True
+ 
+-    def tick(self, now: float, *, feed: bool = False, allow_motion: bool = True):
+-        # A pause can finish an already accepted finite move, never start another.
+-        if self._pending is not None:
+-            confirmation = self.positioner.poll()
+-            if confirmation is not None:
++    def tick(self, now: float, *, feed: bool = False, allow_motion: bool = True):
++        # A pause can finish an already accepted finite move, never start another.
++        if self.native_bridge is not None:
++            guarded = self.native_bridge.index
++            if (self.native_bridge.recovery_blocker is not None
++                or self.native_bridge.refused_target is not None):
++                return
++            if guarded is not None and guarded.stage in ("confirmed", "exit_persisted"):
++                self.native_bridge.persist_exit()
++                self._complete_guarded_index(now)
++                return
++            if guarded is not None and guarded.stage not in ("prepared", "armed"):
++                return
++            if guarded is not None and self._pending is None:
++                if guarded.stage == "prepared":
++                    self.native_bridge.prepare_target(guarded.target)
++                if not self.paused and allow_motion:
++                    self._pending = guarded.target
++                    try:
++                        self.positioner.request_index(self._pending.boundary, self.speed)
++                    except Exception as exc:
++                        guarded.stage = "blocked"
++                        guarded.error = f"positioner request failed: {exc}"
++                        raise
++                return
++        if self._pending is not None:
++            if (self.native_bridge is not None
++                and (self.paused or not allow_motion)
++                and not self.native_bridge.first_dispatch_consumed):
++                return
++            confirmation = self.positioner.poll()
++            if confirmation is not None:
+                 if (
+                     not isinstance(confirmation, ConfirmedIndex)
+                     or confirmation.boundary != self._pending.boundary
+@@ -155,7 +194,12 @@ class PhysicalC4Runtime:
+                     raise PositionError(
+                         "marker confirmation does not match pending FIFO index"
+                     )
+-                # FIFO microsteps are a logical coordinate, not a motor receipt.
++                if self.native_bridge is not None:
++                    self.native_bridge.capture_confirmation(confirmation)
++                    self.native_bridge.persist_exit()
++                    self._complete_guarded_index(now)
++                    return
++                # FIFO microsteps are a logical coordinate, not a motor receipt.
+                 # Marker corrections must not rebase pocket IDs or generations.
+                 events = self.planner.complete_index(
+                     self._pending,
+@@ -241,17 +285,53 @@ class PhysicalC4Runtime:
+                 and now >= self.planner.fall_clear_at
+             ),
+         )
+-        if decision.index is not None:
+-            self._pending = decision.index
+-        if self._pending is not None:
+-            self.positioner.request_index(self._pending.boundary, self.speed)
++        if decision.index is not None:
++            if self.native_bridge is not None:
++                try:
++                    self.native_bridge.prepare_target(decision.index)
++                except Exception:
++                    self.native_bridge.fence_refused_target(decision.index)
++                    raise
++            self._pending = decision.index
++        if self._pending is not None:
++            try:
++                self.positioner.request_index(self._pending.boundary, self.speed)
++            except Exception as exc:
++                if self.native_bridge is not None and self.native_bridge.index is not None:
++                    self.native_bridge.index.stage = "blocked"
++                    self.native_bridge.index.error = f"positioner request failed: {exc}"
++                raise
++
++    def _complete_guarded_index(self, now: float) -> None:
++        bridge = self.native_bridge
++        target = self._pending
++        bridge.begin_completion(target)
++        # FIFO microsteps are logical coordinates, not a motor receipt.
++        events = self.planner.complete_index(
++            target, confirmed_microsteps=target.absolute_microsteps, now=now
++        )
++        bridge.begin_handoff(events)
++        try:
++            for event in events:
++                binding = self.bindings.get((event.pocket.pocket_id, event.pocket.generation))
++                self.distribution.discharge(event, binding)
++                if binding and binding.journey:
++                    self.journeys.close(binding.journey)
++                self.bindings.pop((event.pocket.pocket_id, event.pocket.generation), None)
++        except Exception as exc:
++            bridge.handoff_failed(exc)
++            raise
++        bridge.finish()
++        self._pending = None
+ 
+-    def pause(self):
+-        self.paused = True
++    def pause(self):
++        if self.native_bridge is not None:
++            self.native_bridge.pause()
++        self.paused = True
+ 
+-    def resume(self, now):
+-        if self._pending is not None:
+-            raise PositionError("consume the accepted marker index before resuming")
++    def resume(self, now):
++        if self._pending is not None:
++            raise PositionError("resolve the owned marker index before resuming")
+         self._verify_token = self.positioner.motor.stationary_token()
+         self._verify = StableMarkers(
+             self.positioner.source.fence(),
+@@ -261,7 +341,9 @@ class PhysicalC4Runtime:
+         self._verify_started = now
+         self.paused = False
+ 
+-    def reestablish_for_recovery(self, confirmation, positioner):
++    def reestablish_for_recovery(self, confirmation, positioner):
++        if self.native_bridge is not None:
++            raise PositionError("guarded recovery needs a separate durable permit")
+         if (
+             not isinstance(confirmation, ConfirmedIndex)
+             or positioner.boundary != confirmation.boundary
+@@ -276,7 +358,9 @@ class PhysicalC4Runtime:
+         )
+         self.recover(unknown=False)
+ 
+-    def recover(self, *, unknown=True):
++    def recover(self, *, unknown=True):
++        if self.native_bridge is not None:
++            raise PositionError("guarded recovery needs a separate durable permit")
+         if self._pending is not None:
+             raise PositionError("finish the owned index before recovery")
+         self.fifo.discard_all(include_unknown=unknown)
+diff --git a/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py b/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py
+new file mode 100644
+index 0000000..7ef7aea
+--- /dev/null
++++ b/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py
+@@ -0,0 +1,410 @@
++"""Optional, inactive native smart-bin fence for the existing C4 owner.
++
++The caller holds the lifecycle and controller operation locks throughout each
++entry point. The bridge records one prepared target; FIFO and positioner remain
++the only occupancy and motor owners. Constructing either without this bridge
++keeps the legacy path.
++"""
++
++from __future__ import annotations
++
++import time
++from dataclasses import dataclass, replace
++from uuid import uuid4
++
++import smart_bins_delivery as delivery
++from .marker_positioner import ConfirmedIndex, PositionError
++from .physical_fifo import IndexTarget, Pocket, PocketState
++
++
++@dataclass
++class _Index:
++    target: IndexTarget
++    owner_incarnation: str
++    pocket: Pocket
++    binding: object | None
++    custody: delivery.CustodyRef | None
++    reservation_id: str | None
++    qualification: object | None
++    release_evidence: delivery.ReleaseEvidence | None
++    intent_key: str | None
++    motor_identity: str
++    motor_token: object
++    stage: str = "prepared"
++    attempt_id: str | None = None
++    first_dispatch_consumed: bool = False
++    first_receipt: object | None = None
++    confirmation: ConfirmedIndex | None = None
++    exit_key: str | None = None
++    exit_evidence: delivery.ExitEvidence | None = None
++    error: str | None = None
++    failure: Exception | None = None
++    uncertainty_key: str | None = None
++    uncertainty_evidence: delivery.UncertaintyEvidence | None = None
++    uncertainty_result: dict | None = None
++    uncertainty_error: str | None = None
++
++
++class PhysicalNativeBridge:
++    """Narrow owner interface for simulated native release.
++
++    owner supplies owner_incarnation and assert_locked(), native_qualified(),
++    reservation_for(), release_evidence(), current_route(), and
++    empty_route_ready(). Its route methods report current physical readiness;
++    the ledger separately validates reservation and policy facts.
++    """
++
++    def __init__(self, machine_id: str, owner):
++        if not machine_id or not getattr(owner, "owner_incarnation", None):
++            raise ValueError("guarded bridge needs machine and owner identity")
++        for name in ("assert_locked", "native_qualified", "reservation_for",
++                     "release_evidence", "current_route", "empty_route_ready"):
++            if not callable(getattr(owner, name, None)):
++                raise ValueError(f"guarded bridge needs owner.{name}")
++        self.machine_id, self.owner = machine_id, owner
++        self.runtime = None
++        self.positioner = None
++        self.index: _Index | None = None
++        self.recovery_blocker: str | None = None
++        self.refused_target: tuple[IndexTarget, Pocket, object | None] | None = None
++
++    def attach(self, runtime, positioner) -> None:
++        self.owner.assert_locked()
++        if self.runtime is not None or positioner.pending is not None:
++            raise PositionError("guarded owner must attach to an idle positioner once")
++        if any(p.state is not PocketState.EMPTY for p in runtime.fifo.pockets):
++            raise PositionError("guarded attach requires empty FIFO and explicit custody inspection")
++        if not callable(getattr(positioner, "install_dispatch_guard", None)):
++            raise PositionError("positioner lacks the required dispatch hook")
++        inspection = delivery.inspect_recovery(self.machine_id)
++        if inspection["unresolved_discrepancies"]:
++            self.recovery_blocker = "unresolved durable discrepancy"
++        for claim in inspection["claims"]:
++            if claim["state"] != "RESERVED" or claim["owner_incarnation"] != self.owner.owner_incarnation:
++                self.recovery_blocker = "outstanding durable custody needs reconciliation"
++        positioner.install_dispatch_guard(self)
++        self.runtime, self.positioner = runtime, positioner
++
++    @property
++    def blocks_admission(self) -> bool:
++        return (self.recovery_blocker is not None or self.index is not None
++                or self.refused_target is not None)
++
++    def fence_refused_target(self, target: IndexTarget) -> None:
++        """Retain a planner target that could not acquire its guarded evidence."""
++        if self.index is None and self.refused_target is None:
++            pocket = self._exit_pocket(target)
++            self.refused_target = (
++                target, pocket,
++                self.runtime.bindings.get((pocket.pocket_id, pocket.generation)))
++
++    @property
++    def first_dispatch_consumed(self) -> bool:
++        return self.index is not None and self.index.first_dispatch_consumed
++
++    def admission_reservation(self, piece, episode, pocket: Pocket) -> str:
++        self.owner.assert_locked()
++        if self.blocks_admission:
++            raise PositionError(self.recovery_blocker or "guarded index outstanding")
++        if not self.owner.native_qualified(piece, episode):
++            raise PositionError("native admission is unqualified or Harvest-bound")
++        custody = delivery.CustodyRef(
++            piece.uuid, self.owner.owner_incarnation, episode.episode_id,
++            pocket.pocket_id, pocket.generation + 1)
++        reservation_id = self.owner.reservation_for(piece, episode, custody)
++        if not reservation_id:
++            raise PositionError("native admission needs an existing reservation")
++        code = delivery.validate_physical_claim(
++            self.machine_id, reservation_id, custody, state="RESERVED", revision=0)
++        if code != "OK":
++            raise PositionError(f"native admission refused: {code}")
++        return reservation_id
++
++    def _exit_pocket(self, target: IndexTarget) -> Pocket:
++        fifo = self.runtime.fifo
++        if fifo.pending_index != target or target.boundary != fifo.boundary + 1:
++            raise PositionError("prepared FIFO target changed")
++        return next(p for p in fifo.pockets if fifo.station_of(p.pocket_id) == 0)
++
++    def prepare_target(self, target: IndexTarget) -> None:
++        self.owner.assert_locked()
++        if self.recovery_blocker:
++            raise PositionError(self.recovery_blocker)
++        if self.refused_target is not None:
++            raise PositionError("prepared target refused; owner reconciliation required")
++        if self.index is not None:
++            self._assert_index_owner(self.index)
++            if self.index.target != target:
++                raise PositionError("another guarded target is outstanding")
++            self._retry_intent()
++            return
++        if self.runtime.recovering:
++            raise PositionError("guarded recovery sweep has no durable permit")
++        owner_incarnation = self.owner.owner_incarnation
++        pocket = self._exit_pocket(target)
++        binding = self.runtime.bindings.get((pocket.pocket_id, pocket.generation))
++        custody = None
++        reservation_id = None
++        qualification = None
++        evidence = None
++        key = None
++        if pocket.state is PocketState.EMPTY:
++            if binding is not None or not self.owner.empty_route_ready(target, pocket):
++                raise PositionError("empty exit proof is unavailable")
++        else:
++            if binding is None or not binding.admitted or not binding.reservation_id:
++                raise PositionError("exiting load lacks native custody")
++            if not self.runtime.current(binding):
++                raise PositionError("exiting binding changed")
++            custody = delivery.CustodyRef(
++                binding.piece.uuid, owner_incarnation,
++                binding.episode.episode_id, binding.pocket_id, binding.generation)
++            reservation_id = binding.reservation_id
++            qualified = self.owner.release_evidence(binding, target, reservation_id)
++            if qualified is None or len(qualified) != 2:
++                raise PositionError("native route is unqualified")
++            qualification, evidence = qualified
++            if (not isinstance(evidence, delivery.ReleaseEvidence)
++                or evidence.custody != custody or evidence.target_boundary != target.boundary
++                or not evidence.current_owner or not evidence.route_ready
++                or evidence.harvest_allocation_ref is not None or evidence.harvest_metadata):
++                raise PositionError("owner release evidence does not match custody")
++            if ((pocket.state is PocketState.ROUTED and evidence.destination_kind != "BIN")
++                or (pocket.state is PocketState.DISCARD and evidence.destination_kind != "REJECT")
++                or pocket.state is PocketState.PENDING):
++                raise PositionError("physical route and reserved destination disagree")
++            key = str(uuid4())
++        motor = self.positioner.motor
++        state = _Index(target, owner_incarnation, pocket, binding, custody, reservation_id,
++                       qualification, evidence, key, motor.coordinate_identity(),
++                       motor.stationary_token())
++        self.index = state
++        self._retry_intent()
++
++    def _assert_index_owner(self, state: _Index) -> None:
++        if self.owner.owner_incarnation != state.owner_incarnation:
++            reason = "guarded index owner incarnation changed"
++            if state.stage in ("prepared", "armed"):
++                state.stage = "blocked"
++                state.error = reason
++            raise PositionError(reason)
++
++    def _retry_intent(self) -> None:
++        state = self.index
++        if state is None:
++            raise PositionError("no prepared index")
++        self.owner.assert_locked()
++        self._assert_index_owner(state)
++        if state.stage == "armed":
++            return
++        if state.stage != "prepared":
++            raise PositionError(state.error or "guarded index cannot be rearmed")
++        if self.runtime._pending is not None or self.positioner.pending is not None:
++            raise PositionError("lost intent acknowledgement needs proof of no motor attempt")
++        self.positioner.motor.check_token(state.motor_token)
++        if self.positioner.motor.coordinate_identity() != state.motor_identity:
++            raise PositionError("motor ownership changed during intent")
++        if self._exit_pocket(state.target) != state.pocket:
++            raise PositionError("exiting pocket changed during intent")
++        if state.reservation_id is not None:
++            result = delivery.prepare_release(
++                self.machine_id, state.reservation_id,
++                expected_reservation_revision=0, request_key=state.intent_key,
++                qualification=state.qualification, evidence=state.release_evidence)
++            if result.get("code") != "OK" or result.get("target_boundary") != state.target.boundary:
++                state.error = f"release intent refused: {result.get('code')}"
++                state.stage = "blocked"
++                raise PositionError(state.error)
++            state.attempt_id = result["attempt_id"]
++        state.stage = "armed"
++
++    def before_request(self, boundary: int, positioner) -> None:
++        self.owner.assert_locked()
++        state = self.index
++        if state is not None:
++            self._assert_index_owner(state)
++        if (state is None or state.stage != "armed" or state.target.boundary != boundary
++            or positioner is not self.positioner or self.runtime._pending != state.target):
++            raise PositionError("missing exact guarded index authorization")
++
++    def _live(self, positioner) -> _Index:
++        self.owner.assert_locked()
++        state = self.index
++        if state is not None:
++            self._assert_index_owner(state)
++        if (state is None or state.stage != "armed" or positioner is not self.positioner
++            or positioner.pending != state.target.boundary
++            or self.runtime._pending != state.target
++            or self.runtime.recovering
++            or (self.runtime.paused and not state.first_dispatch_consumed)
++            or positioner.motor.coordinate_identity() != state.motor_identity
++            or self.runtime.fifo.pending_index != state.target):
++            raise PositionError("guarded owner or target changed")
++        positioner.motor.check_token(positioner._token)
++        if state.first_receipt is None and positioner._token != state.motor_token:
++            raise PositionError("motor ownership token changed")
++        pocket = self._exit_pocket(state.target)
++        if pocket != state.pocket:
++            raise PositionError("exiting pocket changed")
++        if state.reservation_id is None:
++            if pocket.state is not PocketState.EMPTY or not self.owner.empty_route_ready(
++                state.target, pocket
++            ):
++                raise PositionError("empty exit proof became stale")
++        else:
++            binding = state.binding
++            if (not self.runtime.current(binding) or binding.reservation_id != state.reservation_id
++                or not self.owner.native_qualified(binding.piece, binding.episode)):
++                raise PositionError("native custody changed")
++            current_route = self.owner.current_route(binding, state.target, state.reservation_id)
++            if current_route is None:
++                raise PositionError("native route no longer ready")
++            if replace(
++                current_route,
++                machine_state_revision=state.qualification.machine_state_revision
++            ) != state.qualification:
++                raise PositionError("native route qualification changed")
++            code = delivery.validate_physical_claim(
++                self.machine_id, state.reservation_id, state.custody,
++                state="RELEASE_INTENT", revision=1,
++                attempt_id=state.attempt_id, target_boundary=state.target.boundary,
++                qualification=current_route)
++            if code != "OK":
++                raise PositionError(f"native dispatch refused: {code}")
++        return state
++
++    def before_first_dispatch(self, positioner) -> None:
++        state = self._live(positioner)
++        if state.first_dispatch_consumed or state.first_receipt is not None:
++            raise PositionError("first dispatch permission already consumed")
++        state.first_dispatch_consumed = True
++
++    def before_trim(self, positioner) -> None:
++        state = self._live(positioner)
++        if (not state.first_dispatch_consumed or state.first_receipt is None
++            or positioner._receipt is None):
++            raise PositionError("trim lacks the accepted tracked index")
++
++    def after_motor_start(self, positioner, receipt, *, first: bool) -> None:
++        state = self.index
++        if state is None or (first and not state.first_dispatch_consumed):
++            raise PositionError("motor receipt has no guarded attempt")
++        if first:
++            state.first_receipt = receipt
++
++    def _retain_uncertainty(self, exc: Exception, reason: str) -> None:
++        """Fence in memory only; fault/stop must run before persistence."""
++        state = self.index
++        if state is None or state.stage == "uncertain":
++            return
++        state.stage = "uncertain"
++        state.failure = exc
++        state.error = f"{reason}: {exc}"
++        if state.reservation_id is None:
++            return
++        state.uncertainty_key = str(uuid4())
++        state.uncertainty_evidence = delivery.UncertaintyEvidence(
++            state.custody.piece_uuid, state.custody.owner_incarnation,
++            state.error,
++            f"motor-start-uncertain:{state.uncertainty_key}", state.attempt_id)
++
++    def motor_start_failed(self, exc: Exception) -> None:
++        self._retain_uncertainty(exc, "tracked motor start acceptance is uncertain")
++
++    def motion_failed(self, exc: Exception) -> None:
++        """An accepted move without marker confirmation remains uncertain."""
++        state = self.index
++        if state is not None and state.first_dispatch_consumed:
++            self._retain_uncertainty(exc, "accepted tracked index lacks marker confirmation")
++
++    def persist_uncertainty(self) -> None:
++        """One post-stop write or explicit same-payload retry; never motion."""
++        self.owner.assert_locked()
++        state = self.index
++        if (state is None or state.stage != "uncertain" or state.reservation_id is None
++            or state.uncertainty_result is not None):
++            return
++        if state.uncertainty_key is None or state.uncertainty_evidence is None:
++            raise PositionError("frozen uncertainty evidence is unavailable")
++        try:
++            result = delivery.mark_uncertain(
++                self.machine_id, state.reservation_id,
++                expected_reservation_revision=1, request_key=state.uncertainty_key,
++                evidence=state.uncertainty_evidence)
++            if result.get("code") != "OK":
++                raise PositionError(f"uncertainty record refused: {result.get('code')}")
++        except Exception as record_exc:
++            state.uncertainty_error = str(record_exc)
++            raise
++        state.uncertainty_result = result
++        state.uncertainty_error = None
++
++    def capture_confirmation(self, confirmation: ConfirmedIndex) -> None:
++        self.owner.assert_locked()
++        state = self.index
++        if (state is None or state.stage != "armed"
++            or not state.first_dispatch_consumed or state.first_receipt is None
++            or confirmation.boundary != state.target.boundary):
++            raise PositionError("marker confirmation lacks the guarded dispatch")
++        state.confirmation = confirmation
++        state.stage = "confirmed"
++        if state.reservation_id is not None:
++            state.exit_key = str(uuid4())
++            marker_ref = (f"marker:{confirmation.source_epoch}:"
++                          f"{confirmation.source_sequence}:"
++                          f"{confirmation.source_capture_ns}")
++            state.exit_evidence = delivery.ExitEvidence(
++                state.custody, state.attempt_id, state.target.boundary,
++                True, marker_ref, time.time())
++
++    def persist_exit(self) -> None:
++        self.owner.assert_locked()
++        state = self.index
++        if state is None or state.stage not in ("confirmed", "exit_persisted"):
++            raise PositionError("no retained marker confirmation")
++        if state.stage == "exit_persisted":
++            return
++        if state.reservation_id is not None:
++            result = delivery.confirm_exit(
++                self.machine_id, state.reservation_id,
++                expected_reservation_revision=1, request_key=state.exit_key,
++                evidence=state.exit_evidence)
++            if result.get("code") != "OK" or result.get("attempt_id") != state.attempt_id:
++                state.error = f"exit persistence refused: {result.get('code')}"
++                raise PositionError(state.error)
++        state.stage = "exit_persisted"
++
++    def begin_completion(self, target: IndexTarget) -> None:
++        self.owner.assert_locked()
++        if self.index is None or self.index.target != target or self.index.stage != "exit_persisted":
++            raise PositionError("FIFO completion requires durable exit")
++        self.index.stage = "completion_attempted"
++
++    def begin_handoff(self, events) -> None:
++        state = self.index
++        if state is None or state.stage != "completion_attempted":
++            raise PositionError("guarded completion identity lost")
++        expected = () if state.reservation_id is None else (state.binding.key,)
++        actual = tuple((e.pocket.pocket_id, e.pocket.generation) for e in events)
++        if actual != expected:
++            state.error = "FIFO discharge differs from guarded exit"
++            state.stage = "handoff_ambiguous"
++            raise PositionError(state.error)
++        state.stage = "handoff"
++
++    def handoff_failed(self, exc: Exception) -> None:
++        if self.index is not None:
++            self.index.stage = "handoff_ambiguous"
++            self.index.error = f"downstream handoff ambiguous: {exc}"
++
++    def finish(self) -> None:
++        if self.index is None or self.index.stage != "handoff":
++            raise PositionError("guarded handoff incomplete")
++        self.index = None
++
++    def pause(self) -> None:
++        state = self.index
++        if (state is not None and state.stage in ("prepared", "armed")
++            and not state.first_dispatch_consumed):
++            state.stage = "paused_unissued"
++            state.error = "paused before first motor dispatch"
+diff --git a/software/sorter/backend/tests/test_smart_bins_physical_bridge.py b/software/sorter/backend/tests/test_smart_bins_physical_bridge.py
+new file mode 100644
+index 0000000..5655415
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_physical_bridge.py
+@@ -0,0 +1,672 @@
++"""Isolated native C4 bridge qualification with the real FIFO and marker rig."""
++
++from __future__ import annotations
++
++# The imported fixture sets temporary SQLite/config paths before backend imports.
++import time
++from fractions import Fraction
++from threading import RLock
++
++import pytest
++
++from test_smart_bins_delivery import prepared, qualification, connect
++import smart_bins_delivery as delivery
++import smart_bins_service as service
++from defs.known_object import KnownObject
++from subsystems.classification_channel.marker_positioner import PositionError
++from subsystems.classification_channel.physical_fifo import (
++    PhysicalC4FIFO, Pocket, PocketState,
++)
++from subsystems.classification_channel.physical_runtime import PhysicalC4Runtime
++from subsystems.classification_channel.smart_bins_physical_bridge import PhysicalNativeBridge
++from subsystems.classification_channel.transfer_episode import TransferEpisode
++from test_marker_positioner import Rig
++from test_physical_c4_runtime import Chute
++
++
++class Owner:
++    owner_incarnation = "owner"
++
++    def __init__(self):
++        self.lock = RLock()
++        self.reservations = {}
++        self.route_ready = True
++        self.empty_ready = True
++        self.native = True
++
++    def assert_locked(self):
++        if not self.lock._is_owned():
++            raise RuntimeError("lifecycle/controller owner locks are required")
++
++    def native_qualified(self, piece, episode):
++        self.assert_locked()
++        return self.native and not getattr(piece, "harvest_allocation_ref", None)
++
++    def reservation_for(self, piece, episode, custody):
++        self.assert_locked()
++        return self.reservations.get(piece.uuid)
++
++    def release_evidence(self, binding, target, reservation_id):
++        self.assert_locked()
++        now = time.time()
++        custody = delivery.CustodyRef(
++            binding.piece.uuid, self.owner_incarnation, binding.episode.episode_id,
++            binding.pocket_id, binding.generation)
++        return qualification(), delivery.ReleaseEvidence(
++            custody, target.boundary, "BIN", "s0", "c0", True, self.route_ready,
++            "current-owner", "aligned-route", now, now + 4)
++
++    def current_route(self, binding, target, reservation_id):
++        self.assert_locked()
++        return qualification() if self.route_ready else None
++
++    def empty_route_ready(self, target, pocket):
++        self.assert_locked()
++        return self.empty_ready
++
++
++class Bench:
++    def __init__(self, owner, *, gains=()):
++        self.owner = owner
++        self.rig = Rig(gains=gains)
++        self.rig.bind()
++        self.chute = Chute()
++        self.bridge = PhysicalNativeBridge("m", owner)
++        with owner.lock:
++            self.runtime = PhysicalC4Runtime(
++                PhysicalC4FIFO(microsteps_per_revolution=Fraction(52000, 3)),
++                self.rig.p, speed=500, distribution=self.chute,
++                native_bridge=self.bridge)
++        self.binding = None
++        self.reservation_id = None
++
++    def add_native_piece(self):
++        piece = KnownObject()
++        ep = TransferEpisode(
++            self.runtime.fifo.boundary, self.runtime.fifo.intake_pocket_id,
++            self.rig.clock(), time.time(), leader_id=42)
++        pocket = self.runtime.fifo.pockets[self.runtime.fifo.intake_pocket_id]
++        request = service.ReservationRequest(
++            piece_uuid=piece.uuid, route_attempt="first", sorting_session_id="session",
++            group_key_id="A", owner_incarnation=self.owner.owner_incarnation,
++            episode_id=ep.episode_id, pocket_index=pocket.pocket_id,
++            pocket_generation=pocket.generation + 1)
++        with self.owner.lock:
++            route = qualification()
++            preview = service.preview(request, route)
++            assert preview["code"] == "OK"
++            claim = service.reserve(
++                request, route, expected_state_revision=preview["state_revision"],
++                expected_qualification_hash=preview["qualification_hash"],
++                request_key=f"reserve-{piece.uuid}")
++            assert claim["code"] == "OK"
++            self.owner.reservations[piece.uuid] = claim["reservation_id"]
++            binding = self.runtime.reserve(piece, ep)
++            self.runtime.finish_handoff(binding, arrived=True)
++            assert self.runtime.fifo.resolve(
++                *binding.key, PocketState.ROUTED, destination="s0")
++        self.binding = binding
++        self.reservation_id = claim["reservation_id"]
++        return binding
++
++    def tick(self, *, allow_motion=True):
++        self.rig.clock.advance()
++        with self.owner.lock:
++            self.runtime.tick(self.rig.clock(), allow_motion=allow_motion)
++
++    def advance(self):
++        old = self.runtime.fifo.boundary
++        for _ in range(180):
++            self.tick()
++            if self.runtime.fifo.boundary > old:
++                return
++        pytest.fail("index did not complete")
++
++    def at_native_exit(self):
++        assert self.binding is not None
++        for _ in range(6):
++            self.advance()
++        assert self.runtime.fifo.boundary == 6
++        assert self.runtime.fifo.station_of(self.binding.pocket_id) == 0
++
++    def claim(self):
++        return service.lookup_reservation("m", self.reservation_id)
++
++
++@pytest.fixture
++def bench(prepared):
++    owner = Owner()
++    rig = Bench(owner)
++    rig.add_native_piece()
++    rig.at_native_exit()
++    return rig
++
++
++def test_intent_precedes_first_motor_and_exit_precedes_fifo_and_discharge(bench):
++    seen = []
++    original_start = bench.rig.start
++    original_discharge = bench.chute.discharge
++
++    def start(degrees, speed, token):
++        row = bench.claim()
++        assert row["state"] == "RELEASE_INTENT"
++        assert bench.runtime.fifo.boundary == 6
++        seen.append("intent-before-motor")
++        return original_start(degrees, speed, token)
++
++    def discharge(event, binding):
++        assert bench.claim()["state"] == "EXIT_CONFIRMED"
++        assert bench.runtime.fifo.boundary == 7
++        seen.append("exit-before-discharge")
++        original_discharge(event, binding)
++
++    bench.rig.start = start
++    bench.chute.discharge = discharge
++    bench.advance()
++    assert seen == ["intent-before-motor", "exit-before-discharge"]
++    assert [binding for _, binding in bench.chute.exits] == [bench.binding]
++    assert bench.binding.key not in bench.runtime.bindings
++    assert bench.bridge.index is None
++    assert bench.claim()["state"] == "EXIT_CONFIRMED"
++
++
++def test_intent_failure_and_ambiguous_ack_keep_exact_target_without_motion(
++    bench, prepared, monkeypatch,
++):
++    actual = delivery.prepare_release
++    key_seen = []
++
++    def lose_ack(*args, **kwargs):
++        result = actual(*args, **kwargs)
++        key_seen.append(kwargs["request_key"])
++        raise OSError("lost intent acknowledgement")
++
++    monkeypatch.setattr(delivery, "prepare_release", lose_ack)
++    motor_calls = len(bench.rig.commands)
++    with pytest.raises(OSError, match="lost intent"):
++        bench.tick()
++    state = bench.bridge.index
++    assert state.stage == "prepared"
++    assert bench.runtime._pending is None
++    assert bench.runtime.planner._active.index == state.target
++    assert bench.runtime.fifo.pending_index == state.target
++    assert bench.runtime.current(bench.binding)
++    assert not bench.runtime.can_admit
++    assert len(bench.rig.commands) == motor_calls
++    assert bench.claim()["state"] == "RELEASE_INTENT"
++    monkeypatch.setattr(delivery, "prepare_release", actual)
++    bench.tick()
++    assert state.intent_key == key_seen[0] and state.stage == "armed"
++    assert bench.runtime._pending == state.target
++    bench.advance()
++    assert bench.claim()["state"] == "EXIT_CONFIRMED"
++    with connect(prepared) as conn:
++        count = conn.execute(
++            "SELECT count(*) FROM smart_bin_release_attempts WHERE reservation_id=?",
++            (bench.reservation_id,)).fetchone()[0]
++    assert count == 1
++
++
++def test_uncommitted_intent_failure_retains_target_and_custody(bench, monkeypatch):
++    def fail(*args, **kwargs):
++        raise OSError("SQLite write failed")
++
++    monkeypatch.setattr(delivery, "prepare_release", fail)
++    before = len(bench.rig.commands)
++    with pytest.raises(OSError, match="SQLite write failed"):
++        bench.tick()
++    assert len(bench.rig.commands) == before
++    assert bench.claim()["state"] == "RESERVED"
++    assert bench.runtime.fifo.pending_index == bench.bridge.index.target
++    assert bench.runtime.current(bench.binding) and not bench.runtime.can_admit
++
++
++@pytest.mark.parametrize("change", [
++    "missing", "consumed", "owner", "target", "route", "contradiction",
++])
++def test_late_or_missing_first_dispatch_authorization_never_calls_motor(
++    bench, prepared, change,
++):
++    bench.tick()  # intent committed; request_index only fences a stopped rotor
++    state = bench.bridge.index
++    assert state.stage == "armed" and not state.first_dispatch_consumed
++    before = len(bench.rig.commands)
++    if change == "missing":
++        bench.bridge.index = None
++    elif change == "consumed":
++        state.first_dispatch_consumed = True
++    elif change == "owner":
++        bench.owner.owner_incarnation = "replacement"
++    elif change == "target":
++        bench.rig.p.pending += 1
++    elif change == "route":
++        bench.owner.route_ready = False
++    else:
++        with connect(prepared) as conn:
++            conn.execute(
++                "INSERT INTO smart_bin_discrepancies "
++                "(id,machine_id,reservation_id,cycle_id,kind,status,evidence_ref,"
++                "details_json,created_at) VALUES('late','m',?,'c0','NATIVE_UNCERTAIN',"
++                "'open','late-contradiction','{}',?)",
++                (bench.reservation_id, time.time()))
++    with pytest.raises(PositionError):
++        for _ in range(20):
++            bench.tick()
++    assert len(bench.rig.commands) == before
++    assert bench.runtime.fifo.boundary == 6
++    assert bench.runtime.current(bench.binding)
++
++
++def test_unknown_motor_acceptance_consumes_first_permission_and_records_uncertainty(
++    bench,
++):
++    original = bench.rig.start
++
++    def ack_then_raise(degrees, speed, token):
++        original(degrees, speed, token)
++        raise OSError("ACK lost after command acceptance")
++
++    bench.rig.start = ack_then_raise
++    bench.tick()
++    with pytest.raises(PositionError, match="ACK lost"):
++        for _ in range(20):
++            bench.tick()
++    assert bench.bridge.index.first_dispatch_consumed
++    assert bench.bridge.index.stage == "uncertain"
++    assert bench.claim()["state"] == "UNCERTAIN"
++    before = len(bench.rig.commands)
++    for _ in range(3):
++        bench.tick()
++    assert len(bench.rig.commands) == before == 7
++    assert bench.runtime.fifo.boundary == 6
++
++
++def test_accepted_move_without_marker_confirmation_records_uncertainty(bench):
++    bench.tick()
++    for _ in range(20):
++        bench.tick()
++        if bench.bridge.first_dispatch_consumed:
++            break
++    assert bench.bridge.first_dispatch_consumed
++    bench.rig.marker_missing = True
++    with pytest.raises(PositionError, match="deadline"):
++        for _ in range(180):
++            bench.tick()
++    assert bench.bridge.index.stage == "uncertain"
++    assert bench.claim()["state"] == "UNCERTAIN"
++    assert bench.runtime.fifo.boundary == 6
++    assert len(bench.rig.commands) == 7
++
++
++def test_bounded_trim_uses_original_attempt_and_no_second_first_permit(
++    prepared,
++):
++    owner = Owner()
++    b = Bench(owner, gains=(1, 1, 1, 1, 1, 1, 0.95, 1))
++    b.add_native_piece()
++    b.at_native_exit()
++    b.advance()
++    assert len(b.rig.commands) == 8
++    with connect(prepared) as conn:
++        attempts = conn.execute(
++            "SELECT count(*) FROM smart_bin_release_attempts WHERE reservation_id=?",
++            (b.reservation_id,)).fetchone()[0]
++    assert attempts == 1
++    assert b.claim()["state"] == "EXIT_CONFIRMED"
++
++
++def test_exit_ack_loss_retains_marker_then_retries_once_without_motion(
++    bench, monkeypatch,
++):
++    actual = delivery.confirm_exit
++    keys = []
++
++    def ack_lost(*args, **kwargs):
++        result = actual(*args, **kwargs)
++        keys.append(kwargs["request_key"])
++        raise OSError("exit ACK lost")
++
++    monkeypatch.setattr(delivery, "confirm_exit", ack_lost)
++    bench.tick()
++    with pytest.raises(OSError, match="exit ACK lost"):
++        for _ in range(20):
++            bench.tick()
++    state = bench.bridge.index
++    confirmation = state.confirmation
++    before = len(bench.rig.commands)
++    assert state.stage == "confirmed"
++    assert bench.runtime.fifo.boundary == 6
++    assert bench.runtime.current(bench.binding)
++    assert not bench.chute.exits and not bench.runtime.can_admit
++    monkeypatch.setattr(delivery, "confirm_exit", actual)
++    bench.tick()
++    assert state.exit_key == keys[0] and state.confirmation is confirmation
++    assert len(bench.rig.commands) == before
++    assert bench.runtime.fifo.boundary == 7
++    assert len(bench.chute.exits) == 1
++    bench.tick(allow_motion=False)
++    assert len(bench.chute.exits) == 1
++
++
++def test_downstream_callback_failure_retains_identity_without_repeating(
++    bench,
++):
++    def fail(event, binding):
++        raise OSError("handoff failed after exit")
++
++    bench.chute.discharge = fail
++    bench.tick()
++    with pytest.raises(OSError, match="handoff failed"):
++        for _ in range(20):
++            bench.tick()
++    state = bench.bridge.index
++    assert state.stage == "handoff_ambiguous"
++    assert state.confirmation is not None
++    assert state.binding is bench.binding
++    assert bench.claim()["state"] == "EXIT_CONFIRMED"
++    assert bench.runtime.fifo.boundary == 7
++    assert bench.binding.key in bench.runtime.bindings
++    motor_calls = len(bench.rig.commands)
++    bench.tick()
++    assert len(bench.rig.commands) == motor_calls
++    assert not bench.runtime.can_admit
++
++
++def test_pausing_unissued_index_fences_it_but_accepted_move_completes(bench):
++    bench.tick()
++    before = len(bench.rig.commands)
++    with bench.owner.lock:
++        bench.runtime.pause()
++    for _ in range(4):
++        bench.tick()
++    assert len(bench.rig.commands) == before
++    assert bench.bridge.index.stage == "paused_unissued"
++    with bench.owner.lock, pytest.raises(PositionError, match="owned marker index"):
++        bench.runtime.resume(bench.rig.clock())
++
++
++def test_pause_after_accepted_motor_allows_finite_completion(bench):
++    bench.tick()
++    for _ in range(20):
++        bench.tick()
++        if bench.bridge.first_dispatch_consumed:
++            break
++    assert bench.bridge.first_dispatch_consumed
++    with bench.owner.lock:
++        bench.runtime.pause()
++    bench.advance()
++    assert bench.runtime.fifo.boundary == 7
++    assert bench.claim()["state"] == "EXIT_CONFIRMED"
++
++
++def test_new_owner_does_not_reconstruct_permit_from_outstanding_intent(
++    bench,
++):
++    bench.tick()
++    assert bench.claim()["state"] == "RELEASE_INTENT"
++    other = Owner()
++    other.owner_incarnation = "new-process"
++    fresh = Bench(other)
++    assert fresh.bridge.recovery_blocker
++    assert not fresh.runtime.can_admit
++    with other.lock, pytest.raises(PositionError, match="missing exact"):
++        fresh.rig.p.request_index(1, 500)
++    assert not fresh.rig.commands
++
++
++def test_proven_empty_index_and_stale_empty_proof(prepared):
++    owner = Owner()
++    b = Bench(owner)
++    b.add_native_piece()
++    b.tick()
++    assert b.bridge.index.reservation_id is None
++    assert b.bridge.index.pocket.state is PocketState.EMPTY
++    owner.empty_ready = False
++    with pytest.raises(PositionError, match="empty exit proof"):
++        for _ in range(20):
++            b.tick()
++    assert not b.rig.commands and b.runtime.fifo.boundary == 0
++
++
++def test_unknown_exit_and_guarded_recovery_refuse_before_motion(prepared):
++    owner = Owner()
++    b = Bench(owner)
++    b.add_native_piece()
++    with owner.lock:
++        b.runtime.fifo._pockets[4] = Pocket(
++            4, 1, PocketState.DISCARD, deposited_boundary=0,
++            metadata=(("unknown", "true"),))
++        with pytest.raises(PositionError, match="durable permit"):
++            b.runtime.recover()
++        with pytest.raises(PositionError, match="durable permit"):
++            b.rig.p.begin_target_trim(1, 500)
++    with pytest.raises(PositionError, match="lacks native custody"):
++        b.tick()
++    assert not b.rig.commands
++    assert b.bridge.refused_target is not None
++    assert not b.runtime.can_admit
++    b.tick()
++    assert not b.rig.commands
++
++
++def test_missing_hook_refuses_guarded_construction_and_legacy_still_indexes(
++    prepared,
++):
++    owner = Owner()
++    rig = Rig()
++    rig.bind()
++    rig.p.install_dispatch_guard = None
++    with owner.lock, pytest.raises(PositionError, match="lacks the required"):
++        PhysicalC4Runtime(
++            PhysicalC4FIFO(microsteps_per_revolution=Fraction(52000, 3)),
++            rig.p, speed=500, distribution=Chute(),
++            native_bridge=PhysicalNativeBridge("m", owner))
++    legacy_rig = Rig()
++    legacy_rig.bind()
++    legacy = PhysicalC4Runtime(
++        PhysicalC4FIFO(microsteps_per_revolution=Fraction(52000, 3)),
++        legacy_rig.p, speed=500, distribution=Chute())
++    piece = KnownObject()
++    episode = TransferEpisode(0, 0, legacy_rig.clock(), time.time(), leader_id=42)
++    binding = legacy.reserve(piece, episode)
++    legacy.finish_handoff(binding, arrived=True)
++    for _ in range(160):
++        legacy_rig.clock.advance()
++        legacy.tick(legacy_rig.clock())
++        if legacy.fifo.boundary == 1:
++            break
++    assert legacy.fifo.boundary == 1 and len(legacy_rig.commands) == 1
++
++
++def _r2_inject_motion_failure(bench, monkeypatch, phase):
++    """Drive the real positioner to an unknown start or a post-move sample fault."""
++    failure = OSError(f"original {phase} failure")
++    bench.tick()
++    if phase == "start":
++        original_start = bench.rig.start
++
++        def accepted_without_ack(degrees, speed, token):
++            original_start(degrees, speed, token)
++            raise failure
++
++        monkeypatch.setattr(bench.rig, "start", accepted_without_ack)
++    else:
++        for _ in range(20):
++            bench.tick()
++            if bench.bridge.first_dispatch_consumed:
++                break
++        assert bench.bridge.first_dispatch_consumed
++
++        def sample_failed():
++            raise failure
++
++        monkeypatch.setattr(bench.rig, "sample", sample_failed)
++    return failure
++
++
++@pytest.mark.parametrize("phase", ["start", "marker"])
++@pytest.mark.parametrize("write", ["success", "unavailable", "ack_lost"])
++def test_r2_stop_precedes_uncertainty_and_failed_recording_replays_frozen_payload(
++    bench, prepared, monkeypatch, phase, write,
++):
++    failure = _r2_inject_motion_failure(bench, monkeypatch, phase)
++    state = bench.bridge.index
++    identity = (state.target, state.binding, state.custody, state.attempt_id)
++    actual = delivery.mark_uncertain
++    events, requests = [], []
++    fail_recording = write != "success"
++
++    def record(*args, **kwargs):
++        events.append("persist")
++        requests.append((args, kwargs.copy()))
++        if fail_recording and write == "unavailable":
++            raise OSError("uncertainty database unavailable")
++        result = actual(*args, **kwargs)
++        if fail_recording and write == "ack_lost":
++            raise OSError("uncertainty acknowledgement lost")
++        return result
++
++    def stop(reason):
++        events.append("stop")
++        bench.rig.failures.append(reason)
++
++    monkeypatch.setattr(delivery, "mark_uncertain", record)
++    monkeypatch.setattr(bench.rig.p, "on_fault", stop)
++    with pytest.raises(PositionError, match=f"original {phase} failure"):
++        for _ in range(20):
++            bench.tick()
++    assert events == ["stop", "persist"]
++    assert bench.rig.failures == [str(failure)]
++    assert bench.rig.p.fault_exception is failure
++    assert state.failure is failure
++    assert state.first_dispatch_consumed and state.stage == "uncertain"
++    assert (state.target, state.binding, state.custody, state.attempt_id) == identity
++    assert state.uncertainty_key == requests[0][1]["request_key"]
++    assert state.uncertainty_evidence is requests[0][1]["evidence"]
++    assert str(failure) in state.uncertainty_evidence.reason
++    assert bench.runtime.current(bench.binding)
++    assert not bench.runtime.can_admit
++    original_error = state.error
++    before = len(bench.rig.commands)
++    for _ in range(3):
++        bench.tick()
++    assert len(bench.rig.commands) == before == 7
++    if fail_recording:
++        assert state.uncertainty_error
++        fail_recording = False
++        with bench.owner.lock:
++            bench.bridge.persist_uncertainty()
++        assert requests[1] == requests[0]
++        assert requests[1][1]["evidence"] is requests[0][1]["evidence"]
++        assert state.uncertainty_error is None
++    with bench.owner.lock:
++        bench.bridge.persist_uncertainty()
++    assert len(requests) == (1 if write == "success" else 2)
++    assert state.error == original_error and state.failure is failure
++    assert bench.claim()["state"] == "UNCERTAIN"
++    with connect(prepared) as conn:
++        count = conn.execute(
++            "SELECT count(*) FROM smart_bin_discrepancies WHERE reservation_id=?",
++            (bench.reservation_id,)).fetchone()[0]
++    assert count == 1
++
++
++@pytest.mark.parametrize("phase", ["start", "marker"])
++def test_r2_guard_bookkeeping_exception_cannot_suppress_original_stop(
++    bench, monkeypatch, phase,
++):
++    failure = _r2_inject_motion_failure(bench, monkeypatch, phase)
++    state = bench.bridge.index
++    bookkeeping_failure = RuntimeError("guard bookkeeping failed")
++
++    def broken_bookkeeping(exc, **kwargs):
++        raise bookkeeping_failure
++
++    hook = "motor_start_failed" if phase == "start" else "motion_failed"
++    monkeypatch.setattr(bench.bridge, hook, broken_bookkeeping)
++    with pytest.raises(Exception) as caught:
++        for _ in range(20):
++            bench.tick()
++    assert bench.rig.failures == [str(failure)]
++    assert isinstance(caught.value, PositionError)
++    assert bench.rig.p.fault_exception is failure
++    assert bookkeeping_failure in bench.rig.p.fault_bookkeeping_errors
++    assert state.first_dispatch_consumed
++    assert state.binding is bench.binding and state.attempt_id
++    assert bench.runtime.current(bench.binding)
++    assert not bench.runtime.can_admit
++    before = len(bench.rig.commands)
++    with pytest.raises(PositionError, match=f"original {phase} failure"):
++        bench.tick()
++    assert len(bench.rig.commands) == before == 7
++
++
++@pytest.mark.parametrize("boundary", ["preparation", "retry", "request", "dispatch"])
++def test_r2_empty_index_owner_change_refuses_original_authorization(
++    prepared, monkeypatch, boundary,
++):
++    owner = Owner()
++    b = Bench(owner)
++    b.add_native_piece()
++    if boundary == "preparation":
++        original_empty_ready = owner.empty_route_ready
++
++        def replace_during_preparation(target, pocket):
++            proof = original_empty_ready(target, pocket)
++            owner.owner_incarnation = "replacement"
++            return proof
++
++        monkeypatch.setattr(owner, "empty_route_ready", replace_during_preparation)
++        with pytest.raises(PositionError, match="owner"):
++            b.tick()
++    elif boundary == "request":
++        original_request = b.rig.p.request_index
++
++        def replace_before_request(target, speed):
++            owner.owner_incarnation = "replacement"
++            original_request(target, speed)
++
++        monkeypatch.setattr(b.rig.p, "request_index", replace_before_request)
++        with pytest.raises(PositionError, match="owner"):
++            b.tick()
++    else:
++        b.tick()
++        state = b.bridge.index
++        target, token, pocket = state.target, b.rig.token, state.pocket
++        owner.owner_incarnation = "replacement"
++        if boundary == "retry":
++            with owner.lock, pytest.raises(PositionError, match="owner"):
++                b.bridge.prepare_target(target)
++        else:
++            with pytest.raises(PositionError, match="owner"):
++                for _ in range(20):
++                    b.tick()
++        assert b.rig.token == token
++        assert b.runtime.fifo.pending_index == target
++        assert b.runtime.fifo.pockets[pocket.pocket_id] == pocket
++    state = b.bridge.index
++    assert state.owner_incarnation == "owner"
++    assert state.reservation_id is None and state.attempt_id is None
++    assert not b.rig.commands
++    assert not b.runtime.can_admit
++    owner.owner_incarnation = "owner"
++    with owner.lock, pytest.raises(PositionError):
++        b.bridge.prepare_target(state.target)
++    assert not b.rig.commands
++
++
++def test_r2_same_owner_empty_index_completes_without_fabricated_claim(prepared):
++    owner = Owner()
++    b = Bench(owner)
++    b.add_native_piece()
++    b.tick()
++    state = b.bridge.index
++    assert state.reservation_id is None
++    b.advance()
++    assert b.runtime.fifo.boundary == 1
++    assert len(b.rig.commands) == 1 and not b.chute.exits
++    assert b.bridge.index is None
++    assert b.claim()["state"] == "RESERVED"
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_reservations").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM smart_bin_release_attempts").fetchone()[0] == 0
