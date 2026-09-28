@@ -1,0 +1,513 @@
+diff --git a/software/sorter/backend/smart_bins_native_completion.py b/software/sorter/backend/smart_bins_native_completion.py
+index 4ee76a802c7607f720189e30bd27dfe77eb481fc..62896b855ad9d4ac559610b58a44e1e5ebcf32b4 100644
+--- a/software/sorter/backend/smart_bins_native_completion.py
++++ b/software/sorter/backend/smart_bins_native_completion.py
+@@ -84,6 +84,9 @@ class NativeHandoff:
+     publication_state: str = "pending"
+     publication_error: str | None = None
+     publication_exception: Exception | None = None
++    transport: object | None = None
++    admission_released: bool = False
++    ownership_lost: bool = False
+ 
+ 
+ class NativeCompletionAdapter:
+@@ -94,6 +97,7 @@ class NativeCompletionAdapter:
+             raise ValueError("native completion requires an attached physical bridge")
+         self.bridge = bridge
+         self._handoff: NativeHandoff | None = None
++        bridge.attach_completion_guard(self)
+ 
+     def capture_handoff(self, event, binding) -> NativeHandoff:
+         """Validate durable EXIT_CONFIRMED before transport can advance."""
+@@ -165,10 +169,11 @@ class NativeCompletionAdapter:
+                 row["intended_slot_id"], row["intended_cycle_id"], row["run_id"],
+                 destination_bin)
+ 
+-    def retain_handoff(self, handoff: NativeHandoff) -> None:
+-        if self._handoff is not None and self._handoff.publication_state != "complete":
++    def retain_handoff(self, handoff: NativeHandoff, *, transport) -> None:
++        if self.blocks_admission():
+             raise NativeCompletionError("previous native completion remains held")
+         self._handoff = handoff
++        handoff.transport = transport
+         handoff.piece.native_machine_id = handoff.machine_id
+         handoff.piece.native_reservation_id = handoff.reservation_id
+ 
+@@ -185,7 +190,30 @@ class NativeCompletionAdapter:
+         return handoff
+ 
+     def blocks_admission(self) -> bool:
+-        return self._handoff is not None and self._handoff.publication_state != "complete"
++        return self._handoff is not None and (
++            not self._handoff.admission_released or self._handoff.ownership_lost)
++
++    def releases_admission(self, reservation_id: str, attempt_id: str) -> bool:
++        handoff = self._handoff
++        return bool(handoff is not None
++                    and handoff.reservation_id == reservation_id
++                    and handoff.attempt_id == attempt_id
++                    and handoff.receipt is not None
++                    and handoff.publication_state == "complete"
++                    and handoff.admission_released
++                    and not handoff.ownership_lost)
++
++    def hold_admission(self, piece) -> None:
++        if self._handoff is not None and self._handoff.piece is piece:
++            self._handoff.admission_released = False
++
++    def release_admission(self, piece) -> None:
++        handoff = self.require_handoff(piece)
++        if (handoff.receipt is None or handoff.publication_state != "complete"
++            or handoff.ownership_lost
++            or not self.verified_piece(piece)):
++            raise NativeCompletionError("native completion is not ready for admission")
++        handoff.admission_released = True
+ 
+     def verified_piece(self, piece) -> bool:
+         try:
+diff --git a/software/sorter/backend/subsystems/classification_channel/physical_distribution.py b/software/sorter/backend/subsystems/classification_channel/physical_distribution.py
+index de2d5cae0ee7ad2b27f4491ec64daa69669ff57a..87001e53832a4611d8261403d80e63c4be7d748a 100644
+--- a/software/sorter/backend/subsystems/classification_channel/physical_distribution.py
++++ b/software/sorter/backend/subsystems/classification_channel/physical_distribution.py
+@@ -128,8 +128,13 @@ class PhysicalDistribution:
+         else:
+             if getattr(self.transport, "dynamic_mode", False):
+                 raise RuntimeError("guarded C4 discharge requires staged transport")
++            prior_guard = getattr(self.shared, "native_completion_guard", None)
++            if (prior_guard is not None and prior_guard is not native
++                and prior_guard.blocks_admission()):
++                raise RuntimeError("previous guarded completion remains held")
+             handoff = native.capture_handoff(event, binding)
+-            native.retain_handoff(handoff)
++            native.retain_handoff(handoff, transport=self.transport)
++            self.shared.native_completion_guard = native
+             # Fence the route before the transport slot changes. Any failure
+             # leaves the native identity retained for explicit reconciliation.
+             self.shared.set_distribution_gate(False, reason="guarded C4 handoff")
+diff --git a/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py b/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py
+index 7ef7aea18e7660c072036728612b4521552cc4e1..1710309af778a398a8d337b424e9973123367f43 100644
+--- a/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py
++++ b/software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py
+@@ -67,6 +67,16 @@ class PhysicalNativeBridge:
+         self.index: _Index | None = None
+         self.recovery_blocker: str | None = None
+         self.refused_target: tuple[IndexTarget, Pocket, object | None] | None = None
++        self._completion_guard = None
++        self._completion_waiting: tuple[str, str] | None = None
++
++    def attach_completion_guard(self, guard) -> None:
++        """Couple a single downstream completion owner to C3/C4 admission."""
++        if (self._completion_guard is not None and self._completion_guard is not guard
++            or getattr(guard, "bridge", None) is not self
++            or not callable(getattr(guard, "releases_admission", None))):
++            raise PositionError("guarded completion owner is missing or changed")
++        self._completion_guard = guard
+ 
+     def attach(self, runtime, positioner) -> None:
+         self.owner.assert_locked()
+@@ -87,8 +97,18 @@ class PhysicalNativeBridge:
+ 
+     @property
+     def blocks_admission(self) -> bool:
+-        return (self.recovery_blocker is not None or self.index is not None
+-                or self.refused_target is not None)
++        if (self.recovery_blocker is not None or self.index is not None
++            or self.refused_target is not None):
++            return True
++        if self._completion_waiting is None:
++            return False
++        guard = self._completion_guard
++        if guard is None:
++            return True
++        try:
++            return not guard.releases_admission(*self._completion_waiting)
++        except Exception:
++            return True
+ 
+     def fence_refused_target(self, target: IndexTarget) -> None:
+         """Retain a planner target that could not acquire its guarded evidence."""
+@@ -400,6 +420,9 @@ class PhysicalNativeBridge:
+     def finish(self) -> None:
+         if self.index is None or self.index.stage != "handoff":
+             raise PositionError("guarded handoff incomplete")
++        if self.index.reservation_id is not None:
++            self._completion_waiting = (self.index.reservation_id,
++                                        self.index.attempt_id)
+         self.index = None
+ 
+     def pause(self) -> None:
+diff --git a/software/sorter/backend/subsystems/distribution/sending.py b/software/sorter/backend/subsystems/distribution/sending.py
+index 8d2127580dec6ba4a2ec5d831ff24bcdbd321539..6f20d7be5afdc27608114f34c1d0edb7fd881edb 100644
+--- a/software/sorter/backend/subsystems/distribution/sending.py
++++ b/software/sorter/backend/subsystems/distribution/sending.py
+@@ -72,7 +72,7 @@ class Sending(BaseState):
+             if self.piece is None:
+                 elapsed_ms = (now - self.start_time) * 1000
+                 self._setOccupancyState("sending.wait_drop_piece")
+-                if self.native_completion is not None:
++                if self.native_completion is not None or self._nativeCompletionPending():
+                     self.shared.set_distribution_gate(False, reason="native drop identity pending")
+                     if elapsed_ms >= MISSING_DROP_PIECE_GRACE_MS:
+                         self._holdNative("guarded distribution-drop piece is missing")
+@@ -92,6 +92,14 @@ class Sending(BaseState):
+ 
+         if self.native_completion is not None:
+             return self._stepNative(now)
++        if self._nativeCompletionPending() or (
++            self.piece is not None and any(
++                getattr(self.piece, name, None) is not None
++                for name in ("native_machine_id", "native_reservation_id", "native_delivery_id")
++            )
++        ):
++            self._holdNative("guarded distribution drop has no completion adapter")
++            return None
+ 
+         # An orphaned positioning slot can enter SENDING without a new physical
+         # index. A previously completed drop must never be credited twice.
+@@ -174,6 +182,7 @@ class Sending(BaseState):
+         piece = self.piece
+         try:
+             handoff = adapter.require_handoff(piece)
++            self._requireCurrentNativeDrop(handoff)
+             if piece.stage is PieceStage.distributed and handoff.receipt is None:
+                 raise RuntimeError("distributed flag lacks durable native receipt")
+         except Exception as exc:
+@@ -202,11 +211,17 @@ class Sending(BaseState):
+             piece.updated_at = now
+             self._committed = True
+             try:
++                self._requireCurrentNativeDrop(handoff)
+                 self._clearNativeIncident()
+             except Exception as exc:
+-                self._holdNative(f"native completion incident resolution failed: {exc}")
++                self._holdNative(f"native completion post-commit hold: {exc}")
+                 return None
+ 
++        try:
++            self._requireCurrentNativeDrop(handoff)
++        except Exception as exc:
++            self._holdNative(str(exc))
++            return None
+         if not self._publishNativeAfterCommit(handoff):
+             self._holdNative(handoff.publication_error or "native notification failed")
+             return None
+@@ -216,9 +231,41 @@ class Sending(BaseState):
+         if not self._shouldReopenGate():
+             self._setOccupancyState("sending.wait_piece_exit")
+             return None
+-        self.shared.set_distribution_gate(True, reason=None)
++        try:
++            self._requireCurrentNativeDrop(handoff)
++            self.shared.set_distribution_gate(True, reason=None)
++            adapter.release_admission(piece)
++        except Exception as exc:
++            self._holdNative(f"native gate release held: {exc}")
++            return None
+         return DistributionState.IDLE
+ 
++    def _requireCurrentNativeDrop(self, handoff) -> None:
++        if handoff.ownership_lost:
++            raise RuntimeError("guarded distribution drop ownership was lost")
++        transport = self.shared.transport
++        if (transport is None or transport is not handoff.transport
++            or getattr(transport, "dynamic_mode", False)):
++            handoff.ownership_lost = True
++            raise RuntimeError("guarded distribution drop ownership changed")
++        try:
++            current = transport.getPieceForDistributionDrop()
++        except Exception:
++            handoff.ownership_lost = True
++            raise
++        if current is not self.piece:
++            handoff.ownership_lost = True
++            raise RuntimeError("guarded distribution drop ownership changed")
++
++    def _nativeCompletionPending(self) -> bool:
++        guard = getattr(self.shared, "native_completion_guard", None)
++        if guard is None:
++            return False
++        try:
++            return bool(guard.blocks_admission())
++        except Exception:
++            return True
++
+     def _publishNativeAfterCommit(self, handoff) -> bool:
+         if handoff.publication_state == "complete":
+             return True
+@@ -247,6 +294,8 @@ class Sending(BaseState):
+         return True
+ 
+     def _holdNative(self, detail: str) -> None:
++        if self.native_completion is not None:
++            self.native_completion.hold_admission(self.piece)
+         self.shared.set_distribution_gate(False, reason="native completion held")
+         self._setOccupancyState("sending.native_completion_held")
+         stats = self.gc.runtime_stats
+diff --git a/software/sorter/backend/tests/test_smart_bins_sending.py b/software/sorter/backend/tests/test_smart_bins_sending.py
+index db77660bbcb29223ac8aa8e496ca585e4ae58739..9ad51ca873511ac09c5ca79ed468084292e0b77f 100644
+--- a/software/sorter/backend/tests/test_smart_bins_sending.py
++++ b/software/sorter/backend/tests/test_smart_bins_sending.py
+@@ -136,6 +136,31 @@ class _Context:
+                              (self.piece.uuid,)).fetchone()[0],
+             )
+ 
++    def next_admission(self):
++        piece = KnownObject(part_id="raw-3001", color_id="raw-5", category_id="A")
++        runtime = self.bench.runtime
++        episode = TransferEpisode(
++            runtime.fifo.boundary, runtime.fifo.intake_pocket_id,
++            self.bench.rig.clock(), time.time(), leader_id=43)
++        pocket = runtime.fifo.pockets[runtime.fifo.intake_pocket_id]
++        request = service.ReservationRequest(
++            piece_uuid=piece.uuid, route_attempt="next",
++            sorting_session_id="session", group_key_id="A",
++            owner_incarnation=self.owner.owner_incarnation,
++            episode_id=episode.episode_id, pocket_index=pocket.pocket_id,
++            pocket_generation=pocket.generation + 1)
++        with self.owner.lock:
++            route = qualification()
++            preview = service.preview(request, route)
++            assert preview["code"] == "OK"
++            claim = service.reserve(
++                request, route, expected_state_revision=preview["state_revision"],
++                expected_qualification_hash=preview["qualification_hash"],
++                request_key=f"reserve-{piece.uuid}")
++            assert claim["code"] == "OK"
++            self.owner.reservations[piece.uuid] = claim["reservation_id"]
++        return piece, episode
++
+ 
+ @pytest.fixture
+ def context(prepared, monkeypatch):
+@@ -476,3 +501,230 @@ def test_history_corrections_and_separate_run_identity(context):
+                                    "WHERE id=?", (ctx.bench.reservation_id,)).fetchone()
+     assert history[:] == ("runtime-run", 0, "corrected-color")
+     assert reservation[0] == "session"
++
++
++@pytest.mark.parametrize("identity", ["valid", "incomplete", "foreign", "cleared"])
++def test_missing_sending_adapter_holds_guarded_drop(context, identity):
++    ctx = context
++    ctx.discharge()
++    if identity == "incomplete":
++        ctx.piece.native_reservation_id = None
++    elif identity == "foreign":
++        ctx.piece.native_reservation_id = "foreign-reservation"
++    elif identity == "cleared":
++        ctx.piece.native_machine_id = None
++        ctx.piece.native_reservation_id = None
++    ctx.sending = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events)
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.piece.stage is PieceStage.distributing
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty()
++    assert not ctx.gc.run_recorder.pieces
++    assert not ctx.shared.distribution_ready
++    assert ctx.bench.claim()["state"] == "EXIT_CONFIRMED"
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_missing_adapter_and_drop_does_not_reopen_guarded_gate(context):
++    ctx = context
++    ctx.discharge()
++    ctx.shared.transport.advanceTransport()
++    ctx.sending = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events)
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += 2
++    assert ctx.sending.step() is None
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty()
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_unguarded_drop_still_uses_legacy_sending(context):
++    ctx = context
++    ordinary = KnownObject(part_id="raw-3001", color_id="raw-5",
++                           category_id="A", stage=PieceStage.distributing)
++    ctx.shared.transport.placePieceForDistribution(ordinary)
++    ctx.shared.transport.advanceTransport()
++    sender = Sending(SimpleNamespace(), ctx.gc, ctx.shared, ctx.events)
++    ctx.clock[0] = time.time() + 2
++    assert sender.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert sender.step() is DistributionState.IDLE
++    assert ordinary.stage is PieceStage.distributed
++    assert ctx.shared.distribution_ready
++    assert ctx.events.qsize() == 1
++
++
++@pytest.mark.parametrize("replacement", ["missing", "wrong_piece", "new_transport"])
++def test_cached_native_piece_rechecks_current_drop_before_commit(context, replacement):
++    ctx = context
++    ctx.discharge()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    assert ctx.sending.piece is ctx.piece
++    if replacement == "wrong_piece":
++        ctx.shared.transport.placePieceForDistribution(KnownObject())
++    if replacement == "new_transport":
++        ctx.shared.transport = ClassificationChannelTransport()
++        ctx.shared.transport.placePieceForDistribution(ctx.piece)
++    ctx.shared.transport.advanceTransport()
++    if replacement == "new_transport":
++        assert ctx.shared.transport.getPieceForDistributionDrop() is ctx.piece
++    else:
++        assert ctx.shared.transport.getPieceForDistributionDrop() is not ctx.piece
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.piece.stage is PieceStage.distributing
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty()
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_cached_native_piece_loss_after_commit_keeps_receipt(context, monkeypatch):
++    ctx = context
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    notifications = []
++    monkeypatch.setattr(
++        "server.set_progress_sync.getSetProgressSyncWorker",
++        lambda: SimpleNamespace(notify=lambda: notifications.append("sent")))
++    ctx.discharge()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    incident = {"kind": "external_hold", "piece_uuid": "other", "channel": "c4"}
++    ctx.gc.runtime_stats.setActiveIncident(incident)
++    incident = ctx.gc.runtime_stats.activeIncident()
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    receipt = handoff.receipt
++    assert receipt and handoff.publication_state == "complete"
++    assert ctx.counts()[:2] == (1, 1)
++    assert ctx.events.qsize() == progress.calls == len(notifications) == 1
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++    assert ctx.gc.runtime_stats.clearActiveIncidentIfMatches(
++        incident, resolved_by="test_external_hold_cleared")
++    ctx.shared.transport.advanceTransport()
++    assert ctx.sending.step() is None
++    assert handoff.receipt is receipt
++    assert ctx.counts()[:2] == (1, 1)
++    assert ctx.events.qsize() == progress.calls == len(notifications) == 1
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_drop_loss_during_durable_completion_skips_publication(context, monkeypatch):
++    ctx = context
++    ctx.discharge()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    original = delivery.complete_native
++
++    def commit_then_lose_drop(*args, **kwargs):
++        result = original(*args, **kwargs)
++        ctx.shared.transport.advanceTransport()
++        return result
++
++    monkeypatch.setattr(delivery, "complete_native", commit_then_lose_drop)
++    assert ctx.sending.step() is None
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    receipt = handoff.receipt
++    assert receipt and ctx.counts()[:2] == (1, 1)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++    assert ctx.sending.step() is None
++    assert handoff.receipt is receipt
++    assert ctx.counts()[:2] == (1, 1)
++    assert ctx.events.empty() and not ctx.gc.run_recorder.pieces
++
++
++def test_guarded_drop_loss_cannot_be_repaired_by_restaging_object(context):
++    ctx = context
++    ctx.discharge()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    ctx.shared.transport.advanceTransport()
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is None
++    assert ctx.counts() == (0, 0, 0)
++    ctx.shared.transport.placePieceForDistribution(ctx.piece)
++    ctx.shared.transport.advanceTransport()
++    assert ctx.shared.transport.getPieceForDistributionDrop() is ctx.piece
++    assert ctx.sending.step() is None
++    assert ctx.counts() == (0, 0, 0)
++    assert ctx.events.empty()
++    assert not ctx.shared.distribution_ready
++    assert not ctx.bench.runtime.can_admit
++
++
++@pytest.mark.parametrize("failure", ["before", "lost_ack"])
++def test_unsettled_native_completion_blocks_owner_admission(context, monkeypatch, failure):
++    ctx = context
++    ctx.discharge()
++    next_piece, episode = ctx.next_admission()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    original = delivery.complete_native
++
++    def fail(*args, **kwargs):
++        if failure == "before":
++            raise OSError("write unavailable")
++        result = original(*args, **kwargs)
++        raise OSError("ack lost")
++
++    monkeypatch.setattr(delivery, "complete_native", fail)
++    assert ctx.sending.step() is None
++    assert ctx.counts()[0] == (0 if failure == "before" else 1)
++    assert not ctx.bench.runtime.can_admit
++    with ctx.owner.lock, pytest.raises(RuntimeError, match="C3 release conflicts"):
++        ctx.bench.runtime.reserve(next_piece, episode)
++    assert ctx.bench.runtime.handoff is None
++    assert ctx.bench.runtime.fifo.pockets[episode.pocket_id].state is PocketState.EMPTY
++    monkeypatch.setattr(delivery, "complete_native", original)
++    assert ctx.sending.step() is DistributionState.IDLE
++    assert ctx.bench.runtime.can_admit
++    assert ctx.counts()[:2] == (1, 1)
++    ctx.bench.runtime.pause()
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_failed_after_commit_callback_keeps_owner_admission_held(context):
++    ctx = context
++    progress = _Progress()
++    progress.fail = True
++    ctx.gc.set_progress_tracker = progress
++    ctx.discharge()
++    next_piece, episode = ctx.next_admission()
++    ctx.clock[0] = time.time() + 2
++    assert ctx.settle() is None
++    assert ctx.counts()[:2] == (1, 1)
++    assert ctx.adapter.require_handoff(ctx.piece).publication_state == "failed"
++    assert not ctx.bench.runtime.can_admit
++    with ctx.owner.lock, pytest.raises(RuntimeError, match="C3 release conflicts"):
++        ctx.bench.runtime.reserve(next_piece, episode)
++    assert ctx.bench.runtime.handoff is None
++    assert progress.calls == 1
++    assert ctx.sending.step() is None
++    assert progress.calls == 1
++    assert not ctx.bench.runtime.can_admit
++
++
++def test_missing_completion_coupling_fails_closed_after_handoff(context):
++    ctx = context
++    ctx.discharge()
++    next_piece, episode = ctx.next_admission()
++    ctx.bench.bridge._completion_guard = None
++    assert not ctx.bench.runtime.can_admit
++    with ctx.owner.lock, pytest.raises(RuntimeError, match="C3 release conflicts"):
++        ctx.bench.runtime.reserve(next_piece, episode)
++    assert ctx.bench.runtime.handoff is None
++    assert ctx.bench.runtime.fifo.pockets[episode.pocket_id].state is PocketState.EMPTY
