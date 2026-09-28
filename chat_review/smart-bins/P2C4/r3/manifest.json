@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2C4 r3 guarded completion correction",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true,
+    "uncommitted": true,
+    "python": "3.12.12"
+  },
+  "accepted_predecessor_review": {
+    "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+    "package": "chat_review/smart-bins/P2C3/r3",
+    "result_tree": "14c8a136f98136e55f2b982b386ce452e24a1252"
+  },
+  "reviewed_predecessor": {
+    "commit": "99524b6cfb4a48d46638b65403ad2128a432b1b2",
+    "package": "chat_review/smart-bins/P2C4/r2",
+    "result_tree": "6851554c7d236a7d763f500617881323f54991b6"
+  },
+  "predecessor_chain": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2",
+      "patch": "P2B.patch"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2",
+      "patch": "P2C1.patch"
+    },
+    {
+      "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+      "package": "chat_review/smart-bins/P2C2/r2",
+      "patch": "P2C2.patch"
+    },
+    {
+      "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+      "package": "chat_review/smart-bins/P2C3/r3",
+      "patch": "P2C3.patch"
+    }
+  ],
+  "patches": {
+    "P2C4.patch": {
+      "scope": "complete P2C4 slice",
+      "base_tree": "14c8a136f98136e55f2b982b386ce452e24a1252",
+      "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187",
+      "paths": [
+        "software/sorter/backend/smart_bins_completion_recovery.py",
+        "software/sorter/backend/smart_bins_delivery.py",
+        "software/sorter/backend/smart_bins_native_completion.py",
+        "software/sorter/backend/subsystems/classification_channel/physical_distribution.py",
+        "software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py",
+        "software/sorter/backend/subsystems/distribution/sending.py",
+        "software/sorter/backend/tests/test_smart_bins_completion_recovery.py",
+        "software/sorter/backend/tests/test_smart_bins_delivery.py"
+      ],
+      "reconstruction_verified": true
+    },
+    "P2C4-r2-to-r3.patch": {
+      "scope": "correction only",
+      "base_tree": "6851554c7d236a7d763f500617881323f54991b6",
+      "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187",
+      "paths": [
+        "software/sorter/backend/smart_bins_completion_recovery.py",
+        "software/sorter/backend/smart_bins_native_completion.py",
+        "software/sorter/backend/subsystems/distribution/sending.py",
+        "software/sorter/backend/tests/test_smart_bins_completion_recovery.py"
+      ],
+      "reconstruction_verified": true
+    }
+  },
+  "reconstruction": {
+    "start_commit": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "ordered_predecessor_patches": [
+      "chat_review/smart-bins/P1/r2/P1.patch",
+      "chat_review/smart-bins/P2A1/r2/P2A1.patch",
+      "chat_review/smart-bins/P2A2/r3/P2A2.patch",
+      "chat_review/smart-bins/P2B/r2/P2B.patch",
+      "chat_review/smart-bins/P2C1/r2/P2C1.patch",
+      "chat_review/smart-bins/P2C2/r2/P2C2.patch",
+      "chat_review/smart-bins/P2C3/r3/P2C3.patch"
+    ],
+    "then_patch": "chat_review/smart-bins/P2C4/r3/P2C4.patch",
+    "correction_alternative": {
+      "start_with": "chat_review/smart-bins/P2C4/r2/P2C4.patch",
+      "then_patch": "chat_review/smart-bins/P2C4/r3/P2C4-r2-to-r3.patch"
+    },
+    "result_tree_verified": true
+  },
+  "source_test_files": {
+    "software/sorter/backend/smart_bins_completion_recovery.py": {
+      "sha256": "97936d499557063acf319101376901e751fa12a7277c8612d2e572fa24621363",
+      "correction": "modified"
+    },
+    "software/sorter/backend/smart_bins_delivery.py": {
+      "sha256": "86f3872003db84882708efb9ba1000c9a35a061afe4751480ae2d628348b73cf",
+      "correction": "unchanged_from_r2"
+    },
+    "software/sorter/backend/smart_bins_native_completion.py": {
+      "sha256": "41d2b690c45555473dc44832ef84d7e57abc0a2d0be0a73385fcc1f7a0870c9d",
+      "correction": "modified"
+    },
+    "software/sorter/backend/subsystems/classification_channel/physical_distribution.py": {
+      "sha256": "c3fefe90ffb0d2cdcbf83e64da6d04ad92bd27193dd5bb96c785c1d408db22d9",
+      "correction": "unchanged_from_r2"
+    },
+    "software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py": {
+      "sha256": "9c25cee0835b02de40e85d3619d832f430392b34ea9b7f0402d2e5a138a861c7",
+      "correction": "unchanged_from_r2"
+    },
+    "software/sorter/backend/subsystems/distribution/sending.py": {
+      "sha256": "ef37921fc4ef57d8f28175e4de66f958ddd7475ed29b37d135cae5204a51ae8a",
+      "correction": "modified"
+    },
+    "software/sorter/backend/tests/test_smart_bins_completion_recovery.py": {
+      "sha256": "15bede23a52d3cf4901163948e75dd6c4712016cf816c6655cb2a184f28659c7",
+      "correction": "modified"
+    },
+    "software/sorter/backend/tests/test_smart_bins_delivery.py": {
+      "sha256": "510603f635113e37836d1d9046f4e7f9632f832de29cb76327f4b1f36e9680b4",
+      "correction": "unchanged_from_r2"
+    }
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2C4/r3/REVIEW.md": "e92cafa1ed9b3611f74253016ac3e58826d232809ae1bbe55e0b137072e5e8bb",
+    "chat_review/smart-bins/P2C4/r3/P2C4.patch": "e047a4ca5a27772479f1a651305bca412cc5563ce933ddf5e699f6e673cabc5f",
+    "chat_review/smart-bins/P2C4/r3/P2C4-r2-to-r3.patch": "ef1145ac55b65bfdee8d00493fbdb178bff7e49917b8912f64c9efaca164cd5e"
+  },
+  "tests": [
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_completion_recovery.py -q",
+      "result": "37 passed"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_completion_recovery.py tests/test_smart_bins_sending.py tests/test_smart_bins_delivery.py tests/test_smart_bins_physical_bridge.py tests/test_smart_bins_reservations.py tests/test_smart_bins_storage.py tests/test_smart_bins_migration.py -q",
+      "result": "232 passed"
+    }
+  ]
+}

@@ -1,0 +1,373 @@
+diff --git a/software/sorter/backend/smart_bins_completion_recovery.py b/software/sorter/backend/smart_bins_completion_recovery.py
+index e8a896c4d1bab928e9132907bcab1412af790865..3a3a37c6aa77218ed9454d74522917530bdacefc 100644
+--- a/software/sorter/backend/smart_bins_completion_recovery.py
++++ b/software/sorter/backend/smart_bins_completion_recovery.py
+@@ -434,3 +434,16 @@ def inspect_on_connection(conn, machine_id: str) -> dict[str, Any]:
+     blockers.extend({"followup_id": None, **row, "missing_evidence": True}
+                     for row in unlinked)
+     return {"followups": rows, "followup_blockers": blockers}
++
++
++def authorization_on_connection(conn, machine_id: str, followup_id: str) -> tuple[
++    dict[str, Any], list[dict[str, Any]]
++]:
++    """Assess one current handoff and all other machine obligations in one snapshot."""
++    report = inspect_on_connection(conn, machine_id)
++    current = next((row for row in report["followups"] if row["id"] == followup_id), None)
++    if current is None:
++        raise CompletionRecoveryError("completion follow-up is absent")
++    other_blockers = [row for row in report["followup_blockers"]
++                      if row["followup_id"] != followup_id]
++    return current, other_blockers
+diff --git a/software/sorter/backend/smart_bins_native_completion.py b/software/sorter/backend/smart_bins_native_completion.py
+index a2836819d2f41a0a4397c3d9af52587c7b08cf49..475173bc32725637d74cbcec1c5569450278e1ec 100644
+--- a/software/sorter/backend/smart_bins_native_completion.py
++++ b/software/sorter/backend/smart_bins_native_completion.py
+@@ -308,10 +308,10 @@ class NativeCompletionAdapter:
+         """Authorize against current durable evidence, never a replayed receipt."""
+         try:
+             with delivery._readonly() as conn:
+-                row = completion_recovery.assess_on_connection(
++                row, other_blockers = completion_recovery.authorization_on_connection(
+                     conn, handoff.machine_id, handoff.followup_id)
+             expected_delivery = handoff.receipt["delivery_id"] if handoff.receipt else None
+-            if (row["state"] not in states or row["missing_evidence"]
++            if (other_blockers or row["state"] not in states or row["missing_evidence"]
+                 or row["reservation_id"] != handoff.reservation_id
+                 or row["release_attempt_id"] != handoff.attempt_id
+                 or row["piece_uuid"] != handoff.piece.uuid
+@@ -331,7 +331,25 @@ class NativeCompletionAdapter:
+         except Exception as exc:
+             raise CurrentFollowupHeld("current native follow-up eligibility unavailable") from exc
+ 
++    def require_clear_predecessors(self, handoff: NativeHandoff) -> None:
++        """Keep a new attempt pending if an older machine obligation is held."""
++        try:
++            with delivery._readonly() as conn:
++                _, other_blockers = completion_recovery.authorization_on_connection(
++                    conn, handoff.machine_id, handoff.followup_id)
++            if other_blockers:
++                raise CurrentFollowupHeld("previous native follow-up is held")
++        except CurrentFollowupHeld:
++            raise
++        except Exception as exc:
++            raise CurrentFollowupHeld("previous follow-up eligibility unavailable") from exc
++
+     def begin_publication(self, handoff: NativeHandoff) -> None:
++        # A predecessor can acquire a late hold after this piece's delivery
++        # commits. Refuse to mark the callback attempt before assessing it.
++        # The current row may itself have a replayable attempt receipt; only
++        # the post-transition check decides whether callbacks are authorized.
++        self.require_clear_predecessors(handoff)
+         completion_recovery.transition(
+             handoff.machine_id, handoff.followup_id,
+             action="PUBLICATION_ATTEMPT", expected_revision=handoff.followup_revision,
+diff --git a/software/sorter/backend/subsystems/distribution/sending.py b/software/sorter/backend/subsystems/distribution/sending.py
+index a78692f124b0b9412c8af8ed65754acf09e1dbba..25f7f4daf7af1159bd92581ccdf7642f5558e666 100644
+--- a/software/sorter/backend/subsystems/distribution/sending.py
++++ b/software/sorter/backend/subsystems/distribution/sending.py
+@@ -251,6 +251,12 @@ class Sending(BaseState):
+             self._requireCurrentNativeDrop(handoff)
+             adapter.close(handoff)
+             adapter.require_current_followup(handoff, states=("CLOSED",))
++        except Exception as exc:
++            # No external gate action has run. A failed or lost CLOSE write
++            # remains retryable with its original key and revision.
++            self._holdNative(f"native closure held: {exc}")
++            return None
++        try:
+             self.shared.set_distribution_gate(True, reason=None)
+             adapter.release_admission(piece)
+         except Exception as exc:
+diff --git a/software/sorter/backend/tests/test_smart_bins_completion_recovery.py b/software/sorter/backend/tests/test_smart_bins_completion_recovery.py
+index ecc75bad44148082300ef971464802449687ce3e..676f6883fe8c05559ed924572f7deb26cd8181e0 100644
+--- a/software/sorter/backend/tests/test_smart_bins_completion_recovery.py
++++ b/software/sorter/backend/tests/test_smart_bins_completion_recovery.py
+@@ -7,6 +7,7 @@ from test_smart_bins_delivery import (
+     prepared, connect, claim, prepare, confirm, complete,
+ )
+ 
++import json
+ import time
+ from dataclasses import replace
+ from types import SimpleNamespace
+@@ -17,7 +18,9 @@ import smart_bins_completion_recovery as recovery
+ import smart_bins_delivery as delivery
+ from subsystems.distribution.sending import CHUTE_SETTLE_MS
+ from subsystems.distribution.states import DistributionState
+-from smart_bins_native_completion import NativeCompletionError
++from smart_bins_native_completion import (
++    CurrentFollowupHeld, NativeCompletionError, NativeHandoff,
++)
+ from defs.known_object import PieceStage
+ from subsystems.classification_channel.physical_fifo import PocketState
+ from subsystems.distribution.sending import Sending
+@@ -90,6 +93,52 @@ def late_hold(ctx, handoff, *, kind="OWNERSHIP_LOST", key="late-hold"):
+         expected_revision=handoff.followup_revision, request_key=key)
+ 
+ 
++def other_machine_held_followup(path):
++    """Seed a valid independent exit and retain its open follow-up."""
++    with connect(path) as conn:
++        conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('other-machine')")
++        conn.execute("INSERT INTO smart_bin_policy_revisions "
++                     "VALUES('other-policy','other-machine','artifact','{}',1)")
++        conn.execute("INSERT INTO sorting_sessions(id,machine_id,started_at,status) "
++                     "VALUES('other-session','other-machine',1,'active')")
++        conn.execute("INSERT INTO smart_bin_slots "
++                     "(id,machine_id,layout_revision,layer_index,section_index,bin_index) "
++                     "VALUES('other-slot','other-machine','layout',0,0,0)")
++        conn.execute("INSERT INTO smart_bin_cycles "
++                     "(id,machine_id,slot_id,opened_at,provenance) "
++                     "VALUES('other-cycle','other-machine','other-slot',1,'observed')")
++        conn.execute(
++            "INSERT INTO smart_bin_reservations "
++            "(id,machine_id,piece_uuid,route_attempt,request_key,run_id,"
++            "policy_revision_id,group_key_id,routing_revision,quantity,intended_kind,"
++            "intended_slot_id,intended_cycle_id,owner_incarnation,episode_id,"
++            "pocket_index,pocket_generation,state,row_revision,created_at,updated_at) "
++            "VALUES('other-reservation','other-machine','other-piece','first',"
++            "'other-reserve','other-session','other-policy','A',0,1,'BIN',"
++            "'other-slot','other-cycle','other-owner','other-episode',0,1,"
++            "'EXIT_CONFIRMED',2,1,1)")
++        conn.execute("INSERT INTO smart_bin_release_attempts "
++                     "VALUES('other-attempt','other-reservation','other-owner','17',1)")
++        conn.execute("INSERT INTO smart_bin_release_evidence "
++                     "(attempt_id,reservation_id,intent_json,exit_json) VALUES(?,?,?,?)",
++                     ("other-attempt", "other-reservation", "{}",
++                      json.dumps({"marker_evidence_ref": "other-marker"})))
++    handoff = NativeHandoff(
++        SimpleNamespace(uuid="other-piece"), "other-machine", "other-reservation",
++        delivery.CustodyRef("other-piece", "other-owner", "other-episode", 0, 1),
++        "other-attempt", 17, "other-marker", "BIN", "other-slot", "other-cycle",
++        "other-session", (0, 0, 0), request_key="other-retain",
++        followup_id="other-followup")
++    assert recovery.stage_handoff(handoff)["state"] == "RETAINED"
++    assert recovery.record_hold(
++        "other-machine", handoff.followup_id, kind="OWNERSHIP_LOST",
++        reason="independent owner loss", expected_revision=0,
++        request_key="other-loss")["state"] == "RETAINED"
++    with connect(path) as conn:
++        report = recovery.inspect_on_connection(conn, "other-machine")
++    assert len(report["followup_blockers"]) == 1
++
++
+ def test_retained_before_transport_and_restart_block(context):
+     ctx = context
+     observed = []
+@@ -647,3 +696,215 @@ def test_followup_eligibility_read_failure_keeps_admission_held(context, monkeyp
+     assert ctx.sending.step() is None
+     assert not ctx.shared.distribution_ready
+     assert ctx.events.qsize() == 1
++
++
++@pytest.mark.parametrize("failure", ["before_commit", "lost_ack"])
++def test_close_write_failure_retries_original_request_without_side_effect_hold(
++    context, monkeypatch, failure
++):
++    ctx = context
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    ctx.discharge()
++    settle_time(ctx)
++    actual_transition = recovery.transition
++    actual_gate = ctx.shared.set_distribution_gate
++    close_calls = []
++    gate_opens = []
++
++    def observe_gate(ready, *, reason):
++        if ready:
++            gate_opens.append(reason)
++        return actual_gate(ready, reason=reason)
++
++    def interrupt_close(*args, **kwargs):
++        if kwargs["action"] == "CLOSE":
++            close_calls.append((kwargs["request_key"], kwargs["expected_revision"],
++                                kwargs["delivery_id"]))
++            if len(close_calls) == 1:
++                if failure == "lost_ack":
++                    actual_transition(*args, **kwargs)
++                raise OSError("closure acknowledgement unavailable")
++        return actual_transition(*args, **kwargs)
++
++    monkeypatch.setattr(ctx.shared, "set_distribution_gate", observe_gate)
++    monkeypatch.setattr(recovery, "transition", interrupt_close)
++    assert ctx.sending.step() is None
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    assert not gate_opens and not ctx.shared.distribution_ready
++    assert not handoff.admission_released and not ctx.bench.runtime.can_admit
++    assert followup(ctx)["state"] == (
++        "PUBLICATION_SUCCEEDED" if failure == "before_commit" else "CLOSED")
++    assert followup(ctx)["failure_kind"] is None
++    assert ctx.events.qsize() == progress.calls == 1
++    assert ctx.counts()[:2] == (1, 1)
++    with connect(ctx.path) as conn:
++        before_close_audits = conn.execute(
++            "SELECT count(*) FROM smart_bin_audit_events WHERE request_key=?",
++            (f"{handoff.request_key}:close",)).fetchone()[0]
++    assert before_close_audits == (0 if failure == "before_commit" else 1)
++
++    assert ctx.sending.step() is DistributionState.IDLE
++    assert len(close_calls) == 2 and close_calls[0] == close_calls[1]
++    assert len(gate_opens) == 1 and ctx.shared.distribution_ready
++    assert handoff.admission_released and handoff.closure_durable
++    assert followup(ctx)["state"] == "CLOSED"
++    assert followup(ctx)["failure_kind"] is None
++    assert ctx.events.qsize() == progress.calls == 1
++    assert ctx.counts()[:2] == (1, 1)
++    with connect(ctx.path) as conn:
++        assert conn.execute(
++            "SELECT count(*) FROM smart_bin_audit_events WHERE request_key=?",
++            (f"{handoff.request_key}:close",)).fetchone()[0] == 1
++        assert conn.execute(
++            "SELECT count(*) FROM smart_bin_completion_receipts WHERE request_key=?",
++            (f"{handoff.request_key}:close",)).fetchone()[0] == 1
++
++
++def test_real_gate_failure_retains_side_effect_hold(context, monkeypatch):
++    ctx = context
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    ctx.discharge()
++    settle_time(ctx)
++    actual_gate = ctx.shared.set_distribution_gate
++    gate_opens = []
++
++    def fail_open(ready, *, reason):
++        if ready:
++            gate_opens.append(reason)
++            raise OSError("distribution gate failed to open")
++        return actual_gate(ready, reason=reason)
++
++    monkeypatch.setattr(ctx.shared, "set_distribution_gate", fail_open)
++    assert ctx.sending.step() is None
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    assert len(gate_opens) == 1
++    assert followup(ctx)["state"] == "CLOSED"
++    assert followup(ctx)["failure_kind"] == "SIDE_EFFECT_FAILED"
++    assert not ctx.shared.distribution_ready and not handoff.admission_released
++    assert not ctx.bench.runtime.can_admit
++    assert ctx.events.qsize() == progress.calls == 1
++    assert ctx.sending.step() is None
++    assert len(gate_opens) == 1 and ctx.events.qsize() == progress.calls == 1
++
++
++@pytest.mark.parametrize("kind", ["OWNERSHIP_LOST", "SIDE_EFFECT_FAILED"])
++def test_replaced_predecessor_late_hold_fences_live_owner(context, kind):
++    ctx = context
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    ctx.discharge()
++    settle_time(ctx)
++    assert ctx.sending.step() is DistributionState.IDLE
++    first, first_handoff = second_native_piece(ctx)
++    ctx.clock[0] += 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    assert ctx.sending.step() is DistributionState.IDLE
++    second = ctx.piece
++    second_handoff = ctx.adapter.require_handoff(second)
++    assert ctx.events.qsize() == progress.calls == 2
++    with connect(ctx.path) as conn:
++        delivered_before = [tuple(row) for row in conn.execute(
++            "SELECT id,piece_uuid,evidence_ref FROM smart_bin_deliveries ORDER BY id")]
++        history_before = [tuple(row) for row in conn.execute(
++            "SELECT uuid,run_id FROM piece_records WHERE uuid IN (?,?) ORDER BY uuid",
++            (first.uuid, second.uuid))]
++        audit_before = conn.execute(
++            "SELECT count(*) FROM smart_bin_audit_events").fetchone()[0]
++    assert len(delivered_before) == len(history_before) == 2
++    hold = late_hold(ctx, first_handoff, kind=kind, key=f"predecessor-{kind}")
++    assert hold["row_revision"] == first_handoff.followup_revision + 1
++    assert fresh_owner_blocker() == "unresolved native completion follow-up"
++    with pytest.raises(CurrentFollowupHeld):
++        ctx.adapter.require_current_followup(second_handoff, states=("CLOSED",))
++    assert not ctx.adapter.releases_admission(
++        second_handoff.reservation_id, second_handoff.attempt_id)
++    assert ctx.adapter.blocks_admission() and not ctx.bench.runtime.can_admit
++    assert ctx.sending.step() is None
++    assert not ctx.shared.distribution_ready
++    assert ctx.sending.step() is None
++    assert ctx.events.qsize() == progress.calls == 2
++    attempted = replace(second_handoff, followup_id="third-followup",
++                        request_key="third-request", transport=None)
++    with ctx.owner.lock, pytest.raises(
++        NativeCompletionError, match="previous native completion remains held"
++    ):
++        ctx.adapter.retain_handoff(attempted, transport=ctx.shared.transport)
++    assert attempted.transport is None
++    assert ctx.adapter.require_handoff(second) is second_handoff
++    for handoff in (first_handoff, second_handoff):
++        replay = recovery.transition(
++            "m", handoff.followup_id, action="CLOSE", expected_revision=3,
++            request_key=f"{handoff.request_key}:close",
++            delivery_id=handoff.receipt["delivery_id"])
++        assert replay["state"] == "CLOSED"
++    with connect(ctx.path) as conn:
++        delivered_after = [tuple(row) for row in conn.execute(
++            "SELECT id,piece_uuid,evidence_ref FROM smart_bin_deliveries ORDER BY id")]
++        assert delivered_after == delivered_before
++        assert [tuple(row) for row in conn.execute(
++            "SELECT uuid,run_id FROM piece_records WHERE uuid IN (?,?) ORDER BY uuid",
++            (first.uuid, second.uuid))] == history_before
++        assert conn.execute("SELECT count(*) FROM smart_bin_audit_events").fetchone()[0] == audit_before + 1
++    assert ctx.counts()[:2] == (2, 1)
++
++
++def test_predecessor_hold_before_second_publication_blocks_callbacks(context, monkeypatch):
++    ctx = context
++    progress = _Progress()
++    ctx.gc.set_progress_tracker = progress
++    ctx.discharge()
++    settle_time(ctx)
++    assert ctx.sending.step() is DistributionState.IDLE
++    first, first_handoff = second_native_piece(ctx)
++    ctx.clock[0] += 2
++    assert ctx.sending.step() is None
++    ctx.clock[0] += CHUTE_SETTLE_MS / 1000 + 0.1
++    actual_complete = delivery.complete_native
++
++    def complete_then_hold(*args, **kwargs):
++        receipt = actual_complete(*args, **kwargs)
++        late_hold(ctx, first_handoff, key="predecessor-before-publication")
++        return receipt
++
++    monkeypatch.setattr(delivery, "complete_native", complete_then_hold)
++    assert ctx.sending.step() is None
++    second_handoff = ctx.adapter.require_handoff(ctx.piece)
++    assert ctx.piece.native_delivery_id == second_handoff.receipt["delivery_id"]
++    assert followup(ctx)["state"] == "DELIVERY_PENDING_PUBLICATION"
++    assert followup(ctx)["failure_kind"] is None
++    assert ctx.events.qsize() == progress.calls == 1
++    assert len(ctx.gc.run_recorder.pieces) == 1
++    assert not ctx.shared.distribution_ready and not ctx.bench.runtime.can_admit
++    assert ctx.sending.step() is None
++    assert ctx.events.qsize() == progress.calls == 1
++    assert ctx.counts()[:2] == (2, 1)
++    assert first.uuid != ctx.piece.uuid
++
++
++def test_other_machine_followup_hold_does_not_block_publication(context):
++    ctx = context
++    ctx.discharge()
++    other_machine_held_followup(ctx.path)
++    assert delivery.inspect_recovery("other-machine")["followup_blockers"]
++    settle_time(ctx)
++    assert ctx.sending.step() is DistributionState.IDLE
++    assert ctx.events.qsize() == 1 and ctx.shared.distribution_ready
++    assert ctx.bench.runtime.can_admit
++    assert delivery.inspect_recovery("m")["followup_blockers"] == []
++
++
++def test_shared_authorization_read_failure_fences_closed_owner(context, monkeypatch):
++    ctx = context
++    ctx.discharge()
++    settle_time(ctx)
++    assert ctx.sending.step() is DistributionState.IDLE
++    handoff = ctx.adapter.require_handoff(ctx.piece)
++    monkeypatch.setattr(recovery, "inspect_on_connection", lambda *args: (
++        _ for _ in ()).throw(OSError("recovery assessment unavailable")))
++    assert not ctx.adapter.releases_admission(handoff.reservation_id, handoff.attempt_id)
++    assert not ctx.bench.runtime.can_admit
++    assert ctx.sending.step() is None
++    assert not ctx.shared.distribution_ready
