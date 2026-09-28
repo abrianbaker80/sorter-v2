@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "repository": "abrianbaker80/sorter-v2",
+  "slice": "P2C2 r1 guarded native physical dispatch and exit",
+  "implementation": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true,
+    "uncommitted": true,
+    "python": "3.12.12"
+  },
+  "accepted_predecessors": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2"
+    }
+  ],
+  "patch": {
+    "file": "chat_review/smart-bins/P2C2/r1/P2C2.patch",
+    "scope": "P2C2 slice only from exact accepted P2C1 r2 source",
+    "base_tree": "43640dfac3e75774be73785084fc6debdedd4bb9",
+    "result_tree": "e98fc03ea3406406f1b8816059f06595510cede0",
+    "reconstruction_verified": true,
+    "paths": [
+      "software/sorter/backend/smart_bins_delivery.py",
+      "software/sorter/backend/subsystems/classification_channel/marker_positioner.py",
+      "software/sorter/backend/subsystems/classification_channel/physical_runtime.py",
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py",
+      "software/sorter/backend/tests/test_smart_bins_physical_bridge.py"
+    ]
+  },
+  "source_test_sha256": {
+    "software/sorter/backend/smart_bins_delivery.py": "a2f6a379b0b6ac1e755c898717eafba760b0288d496a95d11bcedcf3e50c55fe",
+    "software/sorter/backend/subsystems/classification_channel/marker_positioner.py": "0cf4406ac7f9250798a28618b809f2832acc85679ad56d586de85aa3699d5257",
+    "software/sorter/backend/subsystems/classification_channel/physical_runtime.py": "958e1af3c3a1d9980ede12cacf372d097138d002d37056e6461339a314f8fa4c",
+    "software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py": "62d5466a246f742ce157cac030a6d38dd921a7d319957a5e2ca75d77d5496347",
+    "software/sorter/backend/tests/test_smart_bins_physical_bridge.py": "ea8775cbc374cfb292ee53ab0940a68e2a24c549bc0f14af15194b2114177a24"
+  },
+  "packaged_file_sha256": {
+    "chat_review/smart-bins/P2C2/r1/P2C2.patch": "d9cc69e694c4f6b1808d6a53a268291185207d7760d271c074bd73fb6bb2a5c7",
+    "chat_review/smart-bins/P2C2/r1/REVIEW.md": "f718cd9835f3e12a67e0fd325d63dcef4dd35381d093dee1927e491f067f9fd4"
+  },
+  "tests": [
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_physical_bridge.py -q",
+      "result": "20 passed",
+      "stage": "focused final"
+    },
+    {
+      "command": "uv run --frozen python -m pytest tests/test_smart_bins_physical_bridge.py tests/test_physical_c4_runtime.py tests/test_marker_positioner.py tests/test_smart_bins_delivery.py -q",
+      "result": "160 passed",
+      "stage": "affected final"
+    }
+  ]
+}
