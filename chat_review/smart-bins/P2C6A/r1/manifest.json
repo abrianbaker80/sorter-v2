@@ -228,7 +228,30 @@
     "branch_protected": false
   },
   "packaged_file_sha256": {
-    "chat_review/smart-bins/P2C6A/r1/REVIEW.md": "ac5c7293e61b7b1806dea48e807e9ba52907cf086003abd31edebb75d9aa9dba",
+    "chat_review/smart-bins/P2C6A/r1/REVIEW.md": "b62af6a87db773b65ed5d070b06d91702a17fb4e1fea78d5b09636c87e32a418",
     "chat_review/smart-bins/P2C6A/r1/P2C6A.patch": "c083fa3ed2134a1710b9deac924c2a780750e678af90384794034c5b6d808659"
+  },
+  "golden_live_reference": {
+    "source": "user supplied; no operational access",
+    "version": "stable v0.2.9",
+    "head": "2c8269843c16282659c9edbfbf03e7c7042a15ce",
+    "reported_pieces_per_minute": "7\u20139",
+    "firmware_version": "v0.8.1",
+    "firmware_commit": "8d560d26",
+    "distribution": "distribution-v1-2",
+    "modified": false,
+    "physically_requalified": false
+  },
+  "succession_gate": "Separate live-baseline convergence / performance-preservation review must complete before P2C6B runtime Harvest integration.",
+  "documentation_followup": {
+    "parent": "45a97ce428b0a82833ae3ac8cf9f2f7efd7ef010",
+    "paths": [
+      "chat_review/smart-bins/P2C6A/r1/REVIEW.md",
+      "chat_review/smart-bins/P2C6A/r1/manifest.json"
+    ],
+    "patch_unchanged": true,
+    "source_unchanged": true,
+    "tests": "reused recorded results for unchanged source",
+    "chain_and_source_hashes_reverified": true
   }
 }

@@ -209,3 +209,37 @@ GitHub reports no Actions workflows, rulesets or branch protection for this
 publication branch. Remote ref, commit paths and artifact bytes are read back
 after the push. This publication is a review package, not an implementation
 commit, deployment, live migration or physical qualification.
+
+## Golden live reference and succession gate
+
+The user-provided golden sorting/performance reference is live SorterOS stable
+v0.2.9 at `2c8269843c16282659c9edbfbf03e7c7042a15ce`, reported to run
+continuously at roughly 7–9 pieces/minute. The v0.2.9 change is the Tailscale
+reauthentication correction; it does not materially change sorting/runtime
+behavior. Its firmware remains v0.8.1, commit `8d560d26`, distribution-v1-2.
+Harvest is not integrated into that proven live version.
+
+This inactive slice did not modify or physically requalify that 7–9 PPM live
+baseline. These live details are supplied reference information, not a fresh
+live inspection or a candidate performance result. No runtime performance claim
+is made. Ordinary non-Harvest sorting remains unwired from this journal: no
+production startup initialization, per-piece Harvest dependency, C3/C4 change,
+Sending integration, physical dispatch, or background worker was added.
+
+After P2C6A acceptance, the next slice must be a separate live-baseline
+convergence / performance-preservation review against that v0.2.9 reference.
+P2C6B runtime Harvest integration must not begin until that review is complete.
+Publication ends this slice; it does not authorize the next slice.
+
+### Documentation follow-up verification
+
+The initial P2C6A package at
+`45a97ce428b0a82833ae3ac8cf9f2f7efd7ef010` was read back from GitHub and all
+three artifact hashes matched. This follow-up changes only REVIEW.md and
+manifest.json to record the explicit live reference and succession gate.
+The original P2C6A.patch and all five implementation/test files are unchanged.
+The accepted predecessor chain plus P2C6A.patch was reconstructed again and
+matched the recorded result tree and all five source blob IDs/SHA-256 hashes.
+The test totals above are reused recorded results for those unchanged bytes;
+no tests were rerun for this documentation-only follow-up. The implementation
+HEAD, empty index, 38 protected files and three blocked indexes were reverified.
