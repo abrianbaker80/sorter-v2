@@ -1,0 +1,902 @@
+{
+  "slice": "RB03/r1",
+  "qualification": "source and fake-hardware tests only; not deployed or physically qualified",
+  "base": {
+    "v030_commit": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "v030_tree": "21e805b60da575ff7468fcc3570a517d80f01cd0",
+    "rb01_review": "8c83a0ceb261f2e071b0b4dccff6765b0fb12e1f",
+    "rb01_result_tree": "ab7e7461a69efc1db74faac2c8e8f3318ca10341",
+    "rb02_review": "688778a6f11222207e64a419a2dd64322b74b061",
+    "rb02_result_tree": "df609a4d5c953f253737a927432ab3598647765e",
+    "p2c6p_b_reference": "d451afdb5a93d3e3b7bc8d84c57a15f005b23f7b",
+    "old_semantic_result": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf"
+  },
+  "patch": {
+    "base_tree": "df609a4d5c953f253737a927432ab3598647765e",
+    "result_tree": "b4cf20bd92855e2ccdb22748fcf952f19b169738",
+    "patch_sha256": "c5140ffb048f373fddb9439b75db5375fc6bd23cebf59ca9ab751305cd837881",
+    "patch_bytes": 149143,
+    "files": {
+      "software/sorter/backend/coordinator.py": {
+        "before_blob": "0e0036a55dccdcb5572d9f3ca642edea21679ad5",
+        "before_sha256": "002a3210760b6e05ef6d3ed7d15bd201adfd4ab4841e299ebbd3280a9ffd50d0",
+        "after_blob": "0947599c06cbe6b46374c00af5209b3a3f1b00b7",
+        "after_sha256": "2f6141a2046a0d9200b0d42abff034da00180ff6af1be674b13d78958cfc4533"
+      },
+      "software/sorter/backend/hardware/sorter_interface.py": {
+        "before_blob": "53bccc7ca8ca4a6e96c882f716254f2d67a9ec21",
+        "before_sha256": "085d9a2befe2fab0f0289693d6b7fc3f2c3e6bcb17d4ec7ee49e23f6f52000f5",
+        "after_blob": "4ed4198875a06c552e73a939b86171106d3a250e",
+        "after_sha256": "fefee138b0b5bc205d6de3490e0723f2146282da35087d2fc71f6b476f272377"
+      },
+      "software/sorter/backend/hardware/waveshare_bus_service.py": {
+        "before_blob": "bf6e5a8dd58239d5e86b43448b16254079d77eb2",
+        "before_sha256": "7044f14b42a05157587faffb4f0b9766ed1d70dd681a458326fc560df1b2cec3",
+        "after_blob": "f0d35b7a34d996c6f56188db570bbfba035f78e0",
+        "after_sha256": "cfd367233ff41ed4cbe662e81b8ed378ccd2b87194b537c58e27637adaa4c9a2"
+      },
+      "software/sorter/backend/hardware/waveshare_servo.py": {
+        "before_blob": "46f8de308466064fcaccfb24d3a1d045e0159cc6",
+        "before_sha256": "76ecea0be881b7b61d2efd355415488f7451152c21ba6bd92d301faa6aca83e2",
+        "after_blob": "679ab57d69eb6cf5a3d09ba2e4a0ffc75b90c97c",
+        "after_sha256": "2a6ff8e797bdcc44b151eb6a3b7581d2074986fc442e4920279e049383d7b8eb"
+      },
+      "software/sorter/backend/main.py": {
+        "before_blob": "03223bbfba0820dccc6b5936a9fd68eda963cae4",
+        "before_sha256": "dcf35e8389f8f7b030011e6d995939f4c067057d00c1a9452d358787a747cc05",
+        "after_blob": "37f640726dfb0d4c2913c1bddeeac9fcf195e4c2",
+        "after_sha256": "5372c8879a4137e721be1c8ff83ed518a93466f53751d95c9277b721b6c36c4a"
+      },
+      "software/sorter/backend/piece_transport.py": {
+        "before_blob": "121c1dff9ee5fa3d94f85b2be7404053be4dcbf1",
+        "before_sha256": "39810a409fdc0ee205cc202fd8873a81124d1ecc7e275c155cf883b445cbd3e9",
+        "after_blob": "719e29434f8e7a0c7e94e4864b7f827657ee36a2",
+        "after_sha256": "26ec32abc5b2e707028e8c10fd91938d830158f054fedf081b7b970fba6c0961"
+      },
+      "software/sorter/backend/server/routers/hardware.py": {
+        "before_blob": "32cb1c3b16f17d17a1e9c83f36b9e9fcc8bb34e2",
+        "before_sha256": "34434f9364271e946c9b738241fe91bb08688d17149887682afbba6db7edf116",
+        "after_blob": "0425e7a1ae586eb7d4e334a419a995cc4bdce1db",
+        "after_sha256": "3136c9b57ddca25b94a2ee90ea59f2d2c5f92520a3751f0be1d9f044e18b708c"
+      },
+      "software/sorter/backend/server/routers/steppers.py": {
+        "before_blob": "a4eaa2cd9df707119d6e3880a78a297c2ff3395b",
+        "before_sha256": "9253f1bf3cb1b5c7a2c1fdff77edfbf9ebdc74d6e57d0f9ec9f39da7cf28d6c0",
+        "after_blob": "e863a9e80ad3aef24229605aa49c99dc48f4f03e",
+        "after_sha256": "5e8e8a5040deb9d04c5c1f013321a3c18514deb0860eb23413b64fd5e1dde881"
+      },
+      "software/sorter/backend/smart_bins_native_custody.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "9586b0da31f8eeb89ac5517b7a961dd8556f4428",
+        "after_sha256": "76a79f51481e41a31c0d0e42c1557c5b1be845e9d4b5cd47910ad1bce2306356"
+      },
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "cf6f02987fcdddac862638ca96f1611739fe1686",
+        "after_sha256": "b12365c20a1b8e5517f110a9ad3616a37ee58f26a3d54f8b5fcf7da9419260a6"
+      },
+      "software/sorter/backend/subsystems/classification_channel/two_piece/base.py": {
+        "before_blob": "6194c6cf7daef1e54bc660f276d06c03c459db56",
+        "before_sha256": "ef26af57eb460ff56a3ac54594b80da8c2cbc5651abe8025ff48506e840b223e",
+        "after_blob": "3f6c678dc7ee2a870649456b5335960f118dac5c",
+        "after_sha256": "8ebbb15b4b74867df9e0a1fa3a83bc7209f0f4dcb3582577cdc3662e88b39e3e"
+      },
+      "software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py": {
+        "before_blob": "da90c0b98267cbe5147e9be83cc1a6a4829bf8f1",
+        "before_sha256": "0fa530ce61250f48aadbd3ec4441171dfadc971e8e97d1e38fc0f9b6580dd458",
+        "after_blob": "24f2f4d1a50204bcbeb2c5ec5e537c07f586369a",
+        "after_sha256": "023301f13dbab2c9ba0626012a07de4298473e20a854b354c616fed2a0b28445"
+      },
+      "software/sorter/backend/subsystems/classification_channel/two_piece/flow.py": {
+        "before_blob": "53a459390e79d0be74b3fa87c688a930c6b6f3b5",
+        "before_sha256": "4e1fa6d5c0455e5bb1d9d8b28818104945c4517e927e90f77b1def99759c39ff",
+        "after_blob": "935958bede2bdce7c8ab9dbf6e3131212dc32210",
+        "after_sha256": "258b8a17afa97cc31a95d13424a17b669454f4e073c0752629e8c0fbac1946c5"
+      },
+      "software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py": {
+        "before_blob": "d87ccf7d8f86e3578204446cfdbad530cf7c093f",
+        "before_sha256": "577732b799bc4aec3a84b7fa429d9c186c54461ecfedcc2e07d533adeef00ce1",
+        "after_blob": "7327c39139fb4dda9d8458e267f8b02974c789a1",
+        "after_sha256": "cad1426905a24f3d57af4e8db72c693ca68eb7911216efae1cef34ea60820f44"
+      },
+      "software/sorter/backend/subsystems/distribution/flap_path.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "000350a9795ac6b998a6c6c48ef5d083fc211560",
+        "after_sha256": "aa46cbdfbcc33836f1fab6194a714caaaf6acb4e831bc4997f5846713b80588a"
+      },
+      "software/sorter/backend/subsystems/distribution/positioning.py": {
+        "before_blob": "b55a3f62c8a50ac13c7f0a5fbd21602f893346ca",
+        "before_sha256": "0f4a354a5025a00c6396fc069044012c2a0962ac8ac8513172bc26a1e934f632",
+        "after_blob": "d33fa77368c173d1f3127011a0240dc8e3734d87",
+        "after_sha256": "0c92bddb0ddfcae827d18cb31762b61d0d8a84c708e75d86e25f14f9e0ef22bf"
+      },
+      "software/sorter/backend/subsystems/distribution/ready.py": {
+        "before_blob": "92b59acd0808b0c6c72f0e804eba9a5f3c25fa7b",
+        "before_sha256": "6870c19d5edf90ff5e446d5f79a43c1d0c880f5b1bad87bbd29a1a1d82703508",
+        "after_blob": "ce1620492c3485a89ee6b555f6fd4433469e2193",
+        "after_sha256": "7bbe144eaf2040c61ba8dcd288efb94b2e4ed4d471116c660653a7bca323ee32"
+      },
+      "software/sorter/backend/subsystems/feeder/pulse_perception/flow.py": {
+        "before_blob": "5ed037298ab15c0a4481cb1b289a6a91817dd239",
+        "before_sha256": "c4ff3417f612cc66b209462e2c71aa42096b1147521784b50f847066cdcb41ac",
+        "after_blob": "02d3a6258e51e360c978d1531861d9bbcdaa3414",
+        "after_sha256": "5e1a07280b8c1fb91d481814fc09c40eabf5e446598bac2ae293960294ef3c8a"
+      },
+      "software/sorter/backend/subsystems/shared_variables.py": {
+        "before_blob": "3aba9b91b4e95be13b88721b4dd2a7e839f5f7cf",
+        "before_sha256": "59718592f9f1280a47503ec9554752e75dd9ffba18ed4c4c16f3be31ad6b3367",
+        "after_blob": "9c2ae47875e11461e6dc0f6a17a741ba1c27ed64",
+        "after_sha256": "0a63d9cc20395aa1a70b37bf211042882b09014521635193bdd07b30979dfe0a"
+      },
+      "software/sorter/backend/tests/test_native_motion_truth.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "2a5bb2d432eb941333ae740857583396904995d1",
+        "after_sha256": "8a2b6e19ac6823d1f46e2c0a8984407a9c75aa6c45612f609989a7f4126c7d37"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_custody.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "507e0b1b373618f5e3aff11bb448553ea3b68d37",
+        "after_sha256": "95fba31767c56808d377539968f416311407a4899184c3c739bd6d88bfc7a950"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "28de3fd2982763997284b31199763db035790fbb",
+        "after_sha256": "59a5d3b56d240c7bd61df5fab1cdbed4fe2ea6300b3d766ec5b2bc154f88f63e"
+      },
+      "software/sorter/backend/tests/test_waveshare_servo_truth.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "0a4c901d187891be4a3ce01d1c66c4cf1cb11c58",
+        "after_sha256": "35dfa944a701f3d59452c5a7cbccf666441947e80c97b2283102af1f80ca7362"
+      }
+    },
+    "changed_paths": [
+      "software/sorter/backend/coordinator.py",
+      "software/sorter/backend/hardware/sorter_interface.py",
+      "software/sorter/backend/hardware/waveshare_bus_service.py",
+      "software/sorter/backend/hardware/waveshare_servo.py",
+      "software/sorter/backend/main.py",
+      "software/sorter/backend/piece_transport.py",
+      "software/sorter/backend/server/routers/hardware.py",
+      "software/sorter/backend/server/routers/steppers.py",
+      "software/sorter/backend/smart_bins_native_custody.py",
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py",
+      "software/sorter/backend/subsystems/classification_channel/two_piece/base.py",
+      "software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py",
+      "software/sorter/backend/subsystems/classification_channel/two_piece/flow.py",
+      "software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py",
+      "software/sorter/backend/subsystems/distribution/flap_path.py",
+      "software/sorter/backend/subsystems/distribution/positioning.py",
+      "software/sorter/backend/subsystems/distribution/ready.py",
+      "software/sorter/backend/subsystems/feeder/pulse_perception/flow.py",
+      "software/sorter/backend/subsystems/shared_variables.py",
+      "software/sorter/backend/tests/test_native_motion_truth.py",
+      "software/sorter/backend/tests/test_smart_bins_native_custody.py",
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py",
+      "software/sorter/backend/tests/test_waveshare_servo_truth.py"
+    ],
+    "adapter_command_free_ast": true,
+    "isolated_reconstruction": true,
+    "old_candidate_unchanged": true,
+    "head": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "index_sha256": "18c7474d1a3a7fc2b9b8b894f6340ca5e8e607d78b0de3a154156c3c08b1027f",
+    "index_empty": true,
+    "new_ruff_findings": 0,
+    "baseline_ruff_findings": 39,
+    "isolated_indexes": "C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-package-vupfzm2d",
+    "format": "normal unified diff with three context lines, binary/full-index, exact byte blobs; git apply --cached"
+  },
+  "schema": {
+    "native_custody_version": 1,
+    "initialization": "explicit initialize_native_schema only; not called at startup",
+    "tables": [
+      "smart_bin_native_versions",
+      "smart_bin_native_settings",
+      "smart_bin_native_claims",
+      "smart_bin_native_evidence",
+      "smart_bin_native_holds"
+    ],
+    "rb02_unchanged": true,
+    "native_receiving_completion": false
+  },
+  "motion_entry_coverage": [
+    {
+      "entry": "Startup/discovery",
+      "source": "main.main, _initialize_hardware, _home_hardware",
+      "contract": "Attach before API startup; inspect held claims before mkIRLInterface can restore/calibrate/open hardware. No automatic schema initialization."
+    },
+    {
+      "entry": "Coordinator",
+      "source": "Coordinator.__init__, step",
+      "contract": "Shared ownership lock spans native Distribution -> Classification -> Feeder order. Guarded distribution gate starts closed."
+    },
+    {
+      "entry": "Route preparation",
+      "source": "Positioning.step/_nativeCustodyStep",
+      "contract": "C4 and C3 stopped check; authoritative RB02 reservation commits before native flap/chute commands. Route scope only while RESERVED."
+    },
+    {
+      "entry": "READY",
+      "source": "Ready.step; SharedVariables.set_distribution_gate",
+      "contract": "Full flap observations, exact positioned UUID/head generation, durable intent commit, then one live permit and gate."
+    },
+    {
+      "entry": "Normal eject",
+      "source": "two_piece.base.startOutputMove",
+      "contract": "Consume exact permit before native finite C4 move; record accepted/rejected/ambiguous receipt separately; never retry."
+    },
+    {
+      "entry": "Initial/post-eject staging",
+      "source": "two_piece.base.startOutputMove",
+      "contract": "Same entry fence. Unknown/resident staging creates durable hold and refuses; consumed/unresolved prior release cannot authorize staging."
+    },
+    {
+      "entry": "Multi-drop",
+      "source": "two_piece.flow and Positioning",
+      "contract": "Existing bucket hold cycles retained; unknown quantity produces snapshot/hold before route or release. No one-piece invention."
+    },
+    {
+      "entry": "Stall recovery",
+      "source": "two_piece.flow.attemptStallAutoClear",
+      "contract": "Persist affected-claim snapshot/uncertainty before native pre-promotion, door opening or sweep; guarded recovery refuses motion."
+    },
+    {
+      "entry": "Channel clear / spoke home",
+      "source": "channel_clear.clearChannelByAdvancing; spoke_home.maybeRunSpokeHome",
+      "contract": "Held claims or unknown/occupied perception refuse sweep. Fresh already-clear observation records no exact identity/destination; unsuccessful purge blocks alignment."
+    },
+    {
+      "entry": "C3 admission",
+      "source": "pulse_perception.flow._move",
+      "contract": "Before pulse speed or move; C1/C2 have no Smart Bin DB query."
+    },
+    {
+      "entry": "Manual/test/calibration",
+      "source": "routers.steppers/hardware; StepperMotor/Waveshare/PCA command entries",
+      "contract": "HTTP 409 before endpoint motion when held; common driver lock closes dispatch races, including background sweeps and calibration. Stops/disables remain available."
+    },
+    {
+      "entry": "Route configuration",
+      "source": "steppers._guard_route_configuration and hardware configuration endpoints",
+      "contract": "Ownership lock spans parameter/layout/calibration edits; held custody returns HTTP 409 before side effects."
+    },
+    {
+      "entry": "Waveshare service/direct bus",
+      "source": "WaveshareBusService.move_to/set_torque/calibrate_servo; ScServoBus.move_to/set_torque",
+      "contract": "Ownership lock precedes existing serial lock; no second serial lock, polling worker, resend or recovery-threshold change."
+    }
+  ],
+  "waveshare": {
+    "before_reproductions": {
+      "original_cases": 4,
+      "moving_read_loss_case": 1,
+      "total": 5,
+      "saved_source_sha256": "76ecea0be881b7b61d2efd355415488f7451152c21ba6bd92d301faa6aca83e2",
+      "script": "reproduce_saved_before.py (local evidence directory)"
+    },
+    "post_fix_tests": "test_waveshare_servo_truth.py plus test_waveshare_servo.py/test_servo_controller.py/test_servo_stop_releases.py in final combined run",
+    "driver_hashes": {
+      "hardware/waveshare_servo.py": {
+        "before_blob": "46f8de308466064fcaccfb24d3a1d045e0159cc6",
+        "before_sha256": "76ecea0be881b7b61d2efd355415488f7451152c21ba6bd92d301faa6aca83e2",
+        "after_blob": "679ab57d69eb6cf5a3d09ba2e4a0ffc75b90c97c",
+        "after_sha256": "2a6ff8e797bdcc44b151eb6a3b7581d2074986fc442e4920279e049383d7b8eb"
+      },
+      "hardware/waveshare_bus_service.py": {
+        "before_blob": "bf6e5a8dd58239d5e86b43448b16254079d77eb2",
+        "before_sha256": "7044f14b42a05157587faffb4f0b9766ed1d70dd681a458326fc560df1b2cec3",
+        "after_blob": "f0d35b7a34d996c6f56188db570bbfba035f78e0",
+        "after_sha256": "cfd367233ff41ed4cbe662e81b8ed378ccd2b87194b537c58e27637adaa4c9a2"
+      }
+    },
+    "machine_platform_servo_controller_unchanged": true,
+    "moving_result": "bool | None",
+    "false_move_result": "AMBIGUOUS, never proof of no motion"
+  },
+  "tests": {
+    "driver-truth": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_native_motion_truth.py",
+        "tests/test_waveshare_servo_truth.py",
+        "tests/test_waveshare_servo.py",
+        "tests/test_servo_controller.py",
+        "tests/test_servo_stop_releases.py",
+        "tests/test_servo_bus_fatal.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-cewv2ypz\n................................................................         [100%]\n============================== warnings summary ===============================\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\server\\api.py:196: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    @app.on_event(\"startup\")\n\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\.venv\\Lib\\site-packages\\fastapi\\applications.py:4579: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    return self.router.on_event(event_type)\n\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\server\\api.py:209: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    @app.on_event(\"shutdown\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n64 passed, 4 warnings in 4.81s\n"
+    },
+    "native-baseline": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_c4_distribution_handoff.py",
+        "tests/test_c4_multi_drop_doors.py",
+        "tests/test_rev01_spoke_home.py",
+        "tests/test_stepper_endpoint_safety.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-m4xbowsk\n..................................                                       [100%]\n34 passed in 1.49s\n"
+    },
+    "native-runtime": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_smart_bins_native_runtime.py",
+        "tests/test_c4_distribution_handoff.py",
+        "tests/test_c4_multi_drop_doors.py",
+        "tests/test_rev01_spoke_home.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-czhhiok8\n................................................                         [100%]\n48 passed in 3.42s\n"
+    },
+    "configuration-fence": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_smart_bins_native_runtime.py",
+        "tests/test_stepper_endpoint_safety.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-8afb77te\n.........................                                                [100%]\n25 passed in 3.72s\n"
+    },
+    "rb02-regression": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_smart_bins_storage.py",
+        "tests/test_smart_bins_reservations.py",
+        "tests/test_smart_bins_delivery.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-0oi83wy0\n........................................................................ [ 81%]\n................                                                         [100%]\n88 passed in 9.90s\n"
+    },
+    "final-combined": {
+      "command": [
+        "uv",
+        "run",
+        "--frozen",
+        "--offline",
+        "python",
+        "C:\\Users\\abria\\OneDrive\\Documents\\ChatGPT\\Sorter Bin Assignment\\rb03_evidence\\run_tests.py",
+        "-q",
+        "tests/test_smart_bins_native_custody.py",
+        "tests/test_waveshare_servo_truth.py",
+        "tests/test_native_motion_truth.py",
+        "tests/test_smart_bins_native_runtime.py",
+        "tests/test_waveshare_servo.py",
+        "tests/test_servo_controller.py",
+        "tests/test_servo_stop_releases.py",
+        "tests/test_servo_bus_fatal.py",
+        "tests/test_c4_distribution_handoff.py",
+        "tests/test_c4_multi_drop_doors.py",
+        "tests/test_rev01_spoke_home.py",
+        "tests/test_stepper_endpoint_safety.py",
+        "tests/test_smart_bins_storage.py",
+        "tests/test_smart_bins_reservations.py",
+        "tests/test_smart_bins_delivery.py",
+        "tests/test_hardware_bus.py"
+      ],
+      "cwd": "C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend",
+      "exit_code": 0,
+      "output": "RB03 disposable DB root: C:\\Users\\abria\\AppData\\Local\\Temp\\sorter-rb03-tests-lwozw87w\n........................................................................ [ 28%]\n........................................................................ [ 57%]\n........................................................................ [ 85%]\n....................................                                     [100%]\n============================== warnings summary ===============================\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\server\\api.py:196: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    @app.on_event(\"startup\")\n\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\.venv\\Lib\\site-packages\\fastapi\\applications.py:4579: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    return self.router.on_event(event_type)\n\ntests/test_servo_bus_fatal.py::MainBootServoHealthCheckTests::test_boot_with_all_offline_sets_fatal_banner\n  C:\\Users\\abria\\Downloads\\sorter-v2-88-update-pcb\\smart-bins-v030-integration-20260929\\software\\sorter\\backend\\server\\api.py:209: DeprecationWarning: \n          on_event is deprecated, use lifespan event handlers instead.\n  \n          Read more about it in the\n          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).\n          \n    @app.on_event(\"shutdown\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n252 passed, 4 warnings in 14.06s\n"
+    }
+  },
+  "final_total": 252,
+  "final_warnings": 4,
+  "warnings": "unchanged FastAPI on_event deprecation",
+  "isolation": "disposable SQLite/config, network audit denial, real serial denied, no main() or live service; frozen offline environment",
+  "lint": {
+    "command": [
+      "uv",
+      "run",
+      "--frozen",
+      "--offline",
+      "ruff",
+      "check",
+      "--output-format=json"
+    ],
+    "new_findings": [],
+    "baseline_diagnostics": 39,
+    "details": [
+      {
+        "path": "software/sorter/backend/main.py",
+        "base": [
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_state import initialize_local_state"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_state import get_api_keys"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_metrics import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from global_config import mkGlobalConfig, GlobalConfig"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from runtime_variables import mkRuntimeVariables"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from utils.event import slimKnownObjectForSocket"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.api import app"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.shared_state import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from sorter_controller import SorterController"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from stepper_stall_monitor import StepperStallMonitor"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from run_recorder import RunRecorder"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from lifetime_stats import LifetimeStatsTracker"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from message_queue.handler import handleServerToMainEvent"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.consts import BACKEND_PORT"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand"
+          ],
+          [
+            "F401",
+            "`defs.events.MainThreadToServerCommand` imported but unused",
+            "from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.events import RuntimeStatsEvent, RuntimeStatsData"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from irl.config import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from vision import VisionManager"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from process_guard import acquire_backend_process_guard, ProcessGuardError"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from hardware.waveshare_bus_service import close_all_waveshare_bus_services"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.waveshare_inventory import get_waveshare_inventory_manager"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import uvicorn"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import threading"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import queue"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import time"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import asyncio"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import signal"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import sys"
+          ],
+          [
+            "F401",
+            "`irl.config.BinLayoutConfig` imported but unused",
+            "from irl.config import IRLInterface, BinLayoutConfig, mkLayoutFromConfig"
+          ],
+          [
+            "F401",
+            "`irl.bin_layout.getBinLayout` imported but unused",
+            "from irl.bin_layout import getBinLayout"
+          ]
+        ],
+        "current": [
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_state import initialize_local_state"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_state import get_api_keys"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from local_metrics import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from global_config import mkGlobalConfig, GlobalConfig"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from runtime_variables import mkRuntimeVariables"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from utils.event import slimKnownObjectForSocket"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.api import app"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.shared_state import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from sorter_controller import SorterController"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from stepper_stall_monitor import StepperStallMonitor"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from run_recorder import RunRecorder"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from lifetime_stats import LifetimeStatsTracker"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from message_queue.handler import handleServerToMainEvent"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.consts import BACKEND_PORT"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand"
+          ],
+          [
+            "F401",
+            "`defs.events.MainThreadToServerCommand` imported but unused",
+            "from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from defs.events import RuntimeStatsEvent, RuntimeStatsData"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from irl.config import ("
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from vision import VisionManager"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from process_guard import acquire_backend_process_guard, ProcessGuardError"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from hardware.waveshare_bus_service import close_all_waveshare_bus_services"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.waveshare_inventory import get_waveshare_inventory_manager"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import uvicorn"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import threading"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import queue"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import time"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import asyncio"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import signal"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "import sys"
+          ],
+          [
+            "F401",
+            "`irl.config.BinLayoutConfig` imported but unused",
+            "from irl.config import IRLInterface, BinLayoutConfig, mkLayoutFromConfig"
+          ],
+          [
+            "F401",
+            "`irl.bin_layout.getBinLayout` imported but unused",
+            "from irl.bin_layout import getBinLayout"
+          ]
+        ]
+      },
+      {
+        "path": "software/sorter/backend/server/routers/hardware.py",
+        "base": [
+          [
+            "F401",
+            "`irl.bin_layout.defaultMaxDimensionForBinCount` imported but unused",
+            "defaultMaxDimensionForBinCount,"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.config_helpers import ("
+          ],
+          [
+            "F401",
+            "`server.config_helpers.toml_value` imported but unused",
+            "toml_value as _toml_value,"
+          ],
+          [
+            "F841",
+            "Local variable `previous_inverts` is assigned to but never used",
+            "previous_inverts = [bool(channel[\"invert\"]) for channel in previous[\"channels\"]]"
+          ],
+          [
+            "F821",
+            "Undefined name `DEFAULT_SECTION_COUNT`",
+            "default_section_count = int(current[\"layers\"][0][\"section_count\"]) if current[\"layers\"] else DEFAULT_SECTION_COUNT"
+          ]
+        ],
+        "current": [
+          [
+            "F401",
+            "`irl.bin_layout.defaultMaxDimensionForBinCount` imported but unused",
+            "defaultMaxDimensionForBinCount,"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.config_helpers import ("
+          ],
+          [
+            "F401",
+            "`server.config_helpers.toml_value` imported but unused",
+            "toml_value as _toml_value,"
+          ],
+          [
+            "F841",
+            "Local variable `previous_inverts` is assigned to but never used",
+            "previous_inverts = [bool(channel[\"invert\"]) for channel in previous[\"channels\"]]"
+          ],
+          [
+            "F821",
+            "Undefined name `DEFAULT_SECTION_COUNT`",
+            "default_section_count = int(current[\"layers\"][0][\"section_count\"]) if current[\"layers\"] else DEFAULT_SECTION_COUNT"
+          ]
+        ]
+      },
+      {
+        "path": "software/sorter/backend/server/routers/steppers.py",
+        "base": [
+          [
+            "F401",
+            "`os` imported but unused",
+            "import os"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.config_helpers import ("
+          ]
+        ],
+        "current": [
+          [
+            "F401",
+            "`os` imported but unused",
+            "import os"
+          ],
+          [
+            "E402",
+            "Module level import not at top of file",
+            "from server.config_helpers import ("
+          ]
+        ]
+      },
+      {
+        "path": "software/sorter/backend/subsystems/feeder/pulse_perception/flow.py",
+        "base": [
+          [
+            "F841",
+            "Local variable `c4` is assigned to but never used",
+            "c4 = states.get(4, EMPTY_STATE)"
+          ]
+        ],
+        "current": [
+          [
+            "F841",
+            "Local variable `c4` is assigned to but never used",
+            "c4 = states.get(4, EMPTY_STATE)"
+          ]
+        ]
+      }
+    ]
+  },
+  "diff_check": true,
+  "publication_validation": {
+    "nested_patch_context_whitespace_lines": 126,
+    "unexpected_findings": 0,
+    "documents_diff_check": true,
+    "source_tree_diff_check": true,
+    "exact_reconstruction": true
+  },
+  "preservation": {
+    "branch": "smart-bins-v030-integration",
+    "head": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "index_empty": true,
+    "index_sha256": "18c7474d1a3a7fc2b9b8b894f6340ca5e8e607d78b0de3a154156c3c08b1027f",
+    "implementation_uncommitted": true,
+    "old_candidate_unchanged": true,
+    "old_candidate_inventory_sha256": "d4ae072299bc0590115451435325d135ae22dc0b375d459b14827c45733af03e",
+    "accepted_before_file_count": 1591,
+    "accepted_before_matches_rb02": true,
+    "rb01_rb02_isolated_reconstruction": true,
+    "protected_sha256": {
+      "software/sorter/backend/hardware/bus.py": "8e572f8d7dad63a5b0e92a01f96408af87099f2a8ff4f82133697bc784f69615",
+      "software/sorter/backend/smart_bins_storage.py": "923b07906a19c9e730cb9511aaa51b9a774caaff2fb6b299a2bd4ccb07514373",
+      "software/sorter/backend/smart_bins_service.py": "860bf13a3f11fb1c26fc4db3006b8b9c4efe0a0011863b7b6839f8f2e40b399b",
+      "software/sorter/backend/smart_bins_delivery.py": "bd1d927242e25810922bbaa7974184f53e7c951cf0b366ab953685695331844f",
+      "software/sorter/backend/machine_platform/servo_controller.py": "ec4504ae0fd2cad1957a3059077618bab816264685a29c853d89d6109006ee52",
+      "software/sorter/backend/subsystems/distribution/sending.py": "c6a4ab23d8962f783f86ab13224a56d92889eaa48ce8e3faaa8abe257bfa5707",
+      "software/sorter/backend/runtime_stats.py": "f7592f8012ba619ff990bead99a7aa8efbcf0136d129e82ad3d1a54bb24b1c53",
+      "software/sorter/backend/run_recorder.py": "c9ae0bc9e4fb7d4f2351befbcbef09ee6ffba640396af963f9fb3f1353d29dcb",
+      "software/sorter/backend/defs/events.py": "a0030b362b005079b8903f5839edb70b222abb4f52a199f7af248f82f2990bf1",
+      "software/sorter/backend/defs/known_object.py": "d288cb4c2ead70ceb3040d9e9ecf06ddf46f71673a206c799843bc248c07f537",
+      "software/sorter/backend/utils/event.py": "3e86749b80205fa486cdcee483d891f422b5ccd9cc33b0f75ce6e926e3f5b73b"
+    }
+  },
+  "limits": [
+    "No release replay after restart",
+    "No safe-cancel authority from track loss",
+    "No guarded unknown-material staging or recovery sweep",
+    "Inferred exit retains RELEASE_INTENT and capacity",
+    "No receiving completion; RB04 not started",
+    "No live sorter, real serial, hardware, firmware, deployment or physical qualification",
+    "P2C6B remains blocked"
+  ]
+}

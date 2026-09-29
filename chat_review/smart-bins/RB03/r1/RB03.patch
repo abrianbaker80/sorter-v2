@@ -1,0 +1,3558 @@
+diff --git a/software/sorter/backend/coordinator.py b/software/sorter/backend/coordinator.py
+index 0e0036a55dccdcb5572d9f3ca642edea21679ad5..0947599c06cbe6b46374c00af5209b3a3f1b00b7 100644
+--- a/software/sorter/backend/coordinator.py
++++ b/software/sorter/backend/coordinator.py
+@@ -44,6 +44,13 @@ class Coordinator:
+ 
+         self.transport = ClassificationChannelTransport()
+         self.shared.transport = self.transport
++        from subsystems.classification_channel.smart_bins_native_adapter import attach
++        adapter = attach(gc)
++        adapter.require_startup()
++        self.shared.native_custody = adapter if adapter.active else None
++        self.transport.native_adapter = self.shared.native_custody
++        if adapter.active:
++            self.shared.set_distribution_gate(False, reason="native_custody_not_armed")
+         self.distribution = DistributionStateMachine(
+             irl,
+             gc,
+@@ -118,6 +125,11 @@ class Coordinator:
+         return incident.get("source_kind") == "c4_stall_watchdog"
+ 
+     def step(self) -> None:
++        from smart_bins_native_custody import MOTION_LOCK
++        with MOTION_LOCK:
++            self._step_owned()
++
++    def _step_owned(self) -> None:
+         prof = self.gc.profiler
+         prof.hit("coordinator.step.calls")
+         prof.mark("coordinator.step.interval_ms")
+diff --git a/software/sorter/backend/hardware/sorter_interface.py b/software/sorter/backend/hardware/sorter_interface.py
+index 53bccc7ca8ca4a6e96c882f716254f2d67a9ec21..4ed4198875a06c552e73a939b86171106d3a250e 100644
+--- a/software/sorter/backend/hardware/sorter_interface.py
++++ b/software/sorter/backend/hardware/sorter_interface.py
+@@ -9,6 +9,9 @@ import os
+ import time
+ import json
+ from typing import Protocol
++from dataclasses import dataclass
++from smart_bins_native_custody import guard_motion
++import threading
+ from .bus import MCUDevice, BaseCommandCode
+ import struct
+ from global_config import GlobalConfig
+@@ -156,8 +159,21 @@ def _controlDataRecordCommand(payload: dict) -> None:
+         pass
+ 
+ 
++@dataclass(frozen=True)
++class FiniteMoveReceipt:
++    generation: int
++    requested_steps: int
++    outcome: str
++    encoder_present: bool = False
++    proves_piece_displacement: bool = False
++    detail: str | None = None
++
++
+ class StepperMotor:
+     def __init__(self, device: MCUDevice, channel: int, gc: GlobalConfig):
++        self._finite_generation = 0
++        self._finite_lock = threading.RLock()
++        self.last_finite_receipt: FiniteMoveReceipt | None = None
+         self._dev = device
+         self._channel = channel
+         self._steps_per_revolution = 200
+@@ -203,7 +219,26 @@ class StepperMotor:
+         steps = self.microsteps_for_degrees(degrees)
+         return self.move_steps(steps, acceleration=acceleration, force=force)
+ 
++    @guard_motion("finite", stop_value=True)
+     def move_steps(self, steps: int, *, acceleration: int | None = None, force: bool = False) -> bool:
++        with self._finite_lock:
++            self._finite_generation += 1
++            generation = self._finite_generation
++            self._finite_response_ambiguous = False
++            try:
++                accepted = self._execute_steps(steps, acceleration=acceleration, force=force)
++            except Exception as exc:
++                self.last_finite_receipt = FiniteMoveReceipt(generation, steps, "AMBIGUOUS", detail=str(exc))
++                raise
++            outcome = "ACCEPTED" if accepted else "REJECTED"
++            if self._finite_response_ambiguous:
++                outcome = "AMBIGUOUS"
++            if steps == 0 or (self.software_disabled and not force):
++                outcome = "NOT_DISPATCHED"
++            self.last_finite_receipt = FiniteMoveReceipt(generation, steps, outcome)
++            return accepted
++
++    def _execute_steps(self, steps: int, *, acceleration: int | None = None, force: bool = False) -> bool:
+         """Move the stepper by a given number of microsteps (positive or negative).
+ 
+         ``acceleration`` overrides the stepper's default for this move only; when
+@@ -224,7 +259,10 @@ class StepperMotor:
+         )
+         payload = struct.pack("<i", physical_steps) # 4 bytes, little-endian signed integer
+         res = self._dev.send_command(InterfaceCommandCode.STEPPER_MOVE_STEPS, self._channel, payload)
+-        success = len(res.payload) > 0 and bool(res.payload[0])
++        if len(res.payload) != 1 or res.payload[0] not in (0, 1):
++            self._finite_response_ambiguous = True
++            return False
++        success = bool(res.payload[0])
+         if success:
+             self._current_position_steps += steps
+         else:
+@@ -241,6 +279,20 @@ class StepperMotor:
+         )
+         return success
+     
++    def move_steps_receipt(self, steps: int, *, acceleration: int | None = None, force: bool = False) -> FiniteMoveReceipt:
++        """One finite command, no retry. Open-loop ACK is not piece evidence."""
++        from smart_bins_native_custody import MOTION_LOCK
++        with MOTION_LOCK, self._finite_lock:
++            before = self._finite_generation
++            try:
++                self.move_steps(steps, acceleration=acceleration, force=force)
++            except Exception as exc:
++                if self._finite_generation == before:
++                    self._finite_generation += 1
++                    self.last_finite_receipt = FiniteMoveReceipt(self._finite_generation, steps, "NOT_DISPATCHED", detail=str(exc))
++            return self.last_finite_receipt
++
++    @guard_motion("continuous", stop_value=True)
+     def move_at_speed(self, speed: int, *, acceleration: int | None = None, force: bool = False) -> bool:
+         """Move the stepper at a given speed in microsteps per second.
+ 
+@@ -275,6 +327,7 @@ class StepperMotor:
+         )
+         return success
+ 
++    @guard_motion("jitter", stop_value=False)
+     def jitter(self, amplitude_steps: int, cycles: int, speed: int, acceleration: int, *, force: bool = False) -> bool:
+         """Oscillate +-amplitude_steps microsteps for `cycles` full back-and-forths.
+ 
+@@ -409,6 +462,7 @@ class StepperMotor:
+         microsteps = int(round(steps * self._microsteps))
+         self.position = microsteps
+ 
++    @guard_motion("home", stop_value=False)
+     def home(self, home_speed: int, home_pin: DigitalInputPin | int, home_pin_active_high=True, *, force: bool = False):
+         """Home the stepper using the specified home pin and speed.
+ 
+@@ -451,6 +505,7 @@ class StepperMotor:
+         return self._enabled
+     
+     @enabled.setter
++    @guard_motion("enable", stop_value=True)
+     def enabled(self, value: bool):
+         """Enable or disable the stepper."""
+         self._enabled = bool(value)
+@@ -460,6 +515,7 @@ class StepperMotor:
+         payload = struct.pack("<?", self._enabled) # 1 byte, boolean
+         self._dev.send_command(InterfaceCommandCode.STEPPER_DRV_SET_ENABLED, self._channel, payload)
+ 
++    @guard_motion("enable", stop_value=True)
+     def enable_force(self, value: bool):
+         self._enabled = bool(value)
+         self._gc.logger.info(f"Stepper '{self._name}' ch{self._channel}: set_enabled={self._enabled} (force, software_disabled={self.software_disabled})")
+@@ -636,6 +692,12 @@ class ServoMotor:
+         # is. Set on every move_to / move_to_and_release (so it tracks open,
+         # close, jog, and homing) and surfaced anywhere the servo is reported.
+         self._current_angle: int | None = None
++        self._pending_angle: int | None = None
++        self._command_outcome = "NONE"
++        self._motion_stopped: bool | None = None
++        self._position_observed_at: float | None = None
++        self._motion_observed_at: float | None = None
++
+         # No factory defaults: a PWM servo must be calibrated (its open and
+         # closed angles locked in via the UI) before it is allowed to move.
+         # None means "uncalibrated" — open()/close()/toggle() no-op until both
+@@ -659,6 +721,7 @@ class ServoMotor:
+         return self._enabled
+ 
+     @enabled.setter
++    @guard_motion("enable", stop_value=True)
+     def enabled(self, value: bool):
+         bool_value = bool(value)
+         self._gc.logger.debug(f"Servo '{self._name}' ch{self._channel}: set_enabled={bool_value}")
+@@ -666,16 +729,33 @@ class ServoMotor:
+         self._dev.send_command(InterfaceCommandCode.SERVO_SET_ENABLED, self._channel, payload)
+         self._enabled = bool_value
+ 
++    @guard_motion("route", stop_value=False)
++    def _request_move(self, command: int, angle: int, payload: bytes) -> bool:
++        self._pending_angle = angle
++        self._motion_stopped = None
++        self._motion_observed_at = None
++        self._position_observed_at = None
++        try:
++            if not self._enabled:
++                self.enabled = True
++            res = self._dev.send_command(command, self._channel, payload)
++            if len(res.payload) != 1 or res.payload[0] not in (0, 1):
++                raise RuntimeError("Invalid servo move response; outcome ambiguous")
++        except Exception:
++            self._command_outcome = "AMBIGUOUS"
++            self._current_angle = None
++            raise
++        accepted = bool(res.payload[0])
++        self._command_outcome = "ACCEPTED" if accepted else "REJECTED"
++        return accepted
++
+     def move_to(self, angle: int) -> bool:
+         """Move the servo to a given angle in degrees (0-180)."""
+         if not 0 <= angle <= 180:
+             raise ValueError(f"Servo angle must be 0-180, got {angle}")
+-        if not self._enabled:
+-            self.enabled = True
+         self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: move_to {angle}° (from {self._current_angle}°)")
+         payload = struct.pack("<H", angle * 10)  # Convert degrees to 0.1° units, 2 bytes uint16
+-        res = self._dev.send_command(InterfaceCommandCode.SERVO_MOVE_TO, self._channel, payload)
+-        accepted = bool(res.payload[0])
++        accepted = self._request_move(InterfaceCommandCode.SERVO_MOVE_TO, angle, payload)
+         if not accepted:
+             # Firmware rejected the move (servo not idle or disabled). The flap
+             # physically stays put, which otherwise leaves no trace — a piece
+@@ -684,7 +764,6 @@ class ServoMotor:
+                 f"Servo '{self._name}' ch{self._channel}: move_to {angle}° REJECTED by firmware "
+                 f"(servo busy or disabled) — flap did not move"
+             )
+-        self._current_angle = angle
+         return accepted
+ 
+     def move_to_and_release(self, angle: int, max_duration_ms: int = 3500) -> bool:
+@@ -706,16 +785,13 @@ class ServoMotor:
+             raise ValueError(f"Servo angle must be 0-180, got {angle}")
+         if max_duration_ms <= 0:
+             max_duration_ms = 3500
+-        if not self._enabled:
+-            self.enabled = True
+         self._gc.logger.info(
+             f"Servo '{self._name}' ch{self._channel}: move_to_and_release {angle}° "
+             f"(from {self._current_angle}°), max_duration_ms={max_duration_ms}"
+         )
+         # Wire format: position (0.1°) + max duration in milliseconds
+         payload = struct.pack("<HH", angle * 10, max_duration_ms)
+-        res = self._dev.send_command(InterfaceCommandCode.SERVO_MOVE_TO_AND_RELEASE, self._channel, payload)
+-        accepted = bool(res.payload[0])
++        accepted = self._request_move(InterfaceCommandCode.SERVO_MOVE_TO_AND_RELEASE, angle, payload)
+         if not accepted:
+             # Firmware rejected the move (servo not idle or disabled). The flap
+             # physically stays put, which otherwise leaves no trace — a piece
+@@ -724,15 +800,24 @@ class ServoMotor:
+                 f"Servo '{self._name}' ch{self._channel}: move_to_and_release {angle}° REJECTED by firmware "
+                 f"(servo busy or disabled) — flap did not move"
+             )
+-        self._current_angle = angle
+         self._enabled = False  # Will be disabled once the move completes (or deadline hits)
+         return accepted
+ 
+     @property
+     def position(self) -> int:
+-        """Get the current position of the servo in tenths of degrees."""
+-        res = self._dev.send_command(InterfaceCommandCode.SERVO_GET_POSITION, self._channel, b'')
+-        return struct.unpack("<H", res.payload)[0] # 2 bytes, little-endian unsigned integer
++        """Fresh controller position in tenths of degrees (open-loop PWM)."""
++        try:
++            res = self._dev.send_command(InterfaceCommandCode.SERVO_GET_POSITION, self._channel, b'')
++            position = struct.unpack("<H", res.payload)[0]
++            if not 0 <= position <= 1800:
++                raise RuntimeError("Invalid servo position")
++        except Exception:
++            self._current_angle = None
++            self._position_observed_at = None
++            raise
++        self._current_angle = position / 10
++        self._position_observed_at = time.monotonic()
++        return position
+ 
+     def stop(self):
+         """Stop the servo and release it: no PWM signal at all.
+@@ -742,37 +827,57 @@ class ServoMotor:
+         it to 0° whether or not that is inside its calibrated range.
+         """
+         self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: stop and release (was at {self._current_angle}°)")
++        self._motion_stopped = None
++        self._motion_observed_at = None
++        self._position_observed_at = None
+         self.enabled = False
+ 
+     @property
+     def stopped(self) -> bool:
+-        """Check if the servo is stopped."""
+-        res = self._dev.send_command(InterfaceCommandCode.SERVO_IS_STOPPED, self._channel, b'')
+-        return bool(res.payload[0])
++        try:
++            res = self._dev.send_command(InterfaceCommandCode.SERVO_IS_STOPPED, self._channel, b'')
++            if len(res.payload) != 1 or res.payload[0] not in (0, 1):
++                raise RuntimeError("Invalid servo stopped response")
++            self._motion_stopped = bool(res.payload[0])
++            self._motion_observed_at = time.monotonic()
++            if self._motion_stopped:
++                self.position
++                if (self._command_outcome == "ACCEPTED" and self._pending_angle is not None
++                        and abs(self._current_angle - self._pending_angle) <= 0.1):
++                    self._pending_angle = None
++            else:
++                self._position_observed_at = None
++            return self._motion_stopped
++        except Exception:
++            self._motion_stopped = None
++            self._motion_observed_at = None
++            self._position_observed_at = None
++            self._current_angle = None
++            raise
+ 
+     @property
+     def available(self) -> bool:
+         return True
+ 
+-    def open(self, open_angle: int | None = None, max_duration_ms: int = 3500) -> None:
++    def open(self, open_angle: int | None = None, max_duration_ms: int = 3500) -> bool:
+         """Move servo to open position (with hard release deadline guarantee)."""
+         target = open_angle if open_angle is not None else self._open_angle
+         if target is None:
+             self._gc.logger.warning(
+                 f"Servo '{self._name}' ch{self._channel}: open() ignored — servo is not calibrated"
+             )
+-            return
+-        self.move_to_and_release(target, max_duration_ms=max_duration_ms)
++            return False
++        return self.move_to_and_release(target, max_duration_ms=max_duration_ms)
+ 
+-    def close(self, closed_angle: int | None = None, max_duration_ms: int = 3500) -> None:
++    def close(self, closed_angle: int | None = None, max_duration_ms: int = 3500) -> bool:
+         """Move servo to closed position (with hard release deadline guarantee)."""
+         target = closed_angle if closed_angle is not None else self._closed_angle
+         if target is None:
+             self._gc.logger.warning(
+                 f"Servo '{self._name}' ch{self._channel}: close() ignored — servo is not calibrated"
+             )
+-            return
+-        self.move_to_and_release(target, max_duration_ms=max_duration_ms)
++            return False
++        return self.move_to_and_release(target, max_duration_ms=max_duration_ms)
+ 
+     def toggle(self) -> None:
+         """Toggle between open and closed."""
+@@ -786,17 +891,39 @@ class ServoMotor:
+         else:
+             self.open()
+ 
++    def _at_angle(self, target: int | None) -> bool:
++        return (target is not None and self.is_calibrated and self._current_angle is not None
++                and self._position_observed_at is not None and self._motion_stopped is True
++                and self._pending_angle is None and self._command_outcome == "ACCEPTED"
++                and abs(self._current_angle - target) <= 0.1)
++
+     def isOpen(self) -> bool:
+-        """Check if servo is in open position."""
+-        if self._open_angle is None:
+-            return False
+-        return self._current_angle == self._open_angle
++        return self._at_angle(self._open_angle)
+ 
+     def isClosed(self) -> bool:
+-        """Check if servo is in closed position."""
+-        if self._closed_angle is None:
+-            return False
+-        return self._current_angle == self._closed_angle
++        return self._at_angle(self._closed_angle)
++
++    def feedback(self) -> dict:
++        error = None
++        try:
++            self.stopped
++        except Exception as exc:
++            error = str(exc)
++        return {
++            "available": self.available, "channel": self.channel,
++            "position": self._current_angle * 10 if self._position_observed_at is not None else None,
++            "angle": self._current_angle if self._position_observed_at is not None else None,
++            "pending_target": self._pending_angle,
++            "is_open": self.isOpen(), "is_closed": self.isClosed(),
++            "calibrated": self.is_calibrated, "stopped": self._motion_stopped,
++            "motion_state_valid": self._motion_observed_at is not None,
++            "position_valid": self._position_observed_at is not None,
++            "command_outcome": self._command_outcome,
++            "position_observed_at": self._position_observed_at,
++            "motion_observed_at": self._motion_observed_at,
++            "open_angle": self._open_angle, "closed_angle": self._closed_angle,
++            "error": error,
++        }
+ 
+     def set_speed_limits(self, min_speed: int, max_speed: int) -> None:
+         """Set the minimum and maximum speed for the servo in tenths of degrees per second."""
+diff --git a/software/sorter/backend/hardware/waveshare_bus_service.py b/software/sorter/backend/hardware/waveshare_bus_service.py
+index bf6e5a8dd58239d5e86b43448b16254079d77eb2..f0d35b7a34d996c6f56188db570bbfba035f78e0 100644
+--- a/software/sorter/backend/hardware/waveshare_bus_service.py
++++ b/software/sorter/backend/hardware/waveshare_bus_service.py
+@@ -6,6 +6,7 @@ import time
+ from typing import Any, Callable, TypeVar
+ 
+ from hardware.waveshare_servo import ScServoBus, calibrate_servo as calibrate_servo_impl
++from smart_bins_native_custody import guard_motion, motion_entry
+ 
+ T = TypeVar("T")
+ 
+@@ -83,20 +84,29 @@ class WaveshareBusService:
+         return self._execute(lambda bus: bus.set_pid(servo_id, p, d, i))
+ 
+     def set_torque(self, servo_id: int, enable: bool) -> bool:
++        if enable:
++            # Ownership always precedes the existing serial lock.
++            with motion_entry("enable", "route"):
++                return self._execute(lambda bus: bus.set_torque(servo_id, enable))
+         return self._execute(lambda bus: bus.set_torque(servo_id, enable))
+ 
++    @guard_motion("route")
+     def move_to(self, servo_id: int, position: int, time_ms: int = 500) -> bool:
+         return self._execute(lambda bus: bus.move_to(servo_id, position, time_ms))
+ 
+     def read_position(self, servo_id: int) -> int | None:
+         return self._execute(lambda bus: bus.read_position(servo_id))
+ 
++    def is_moving(self, servo_id: int) -> bool | None:
++        return self._execute(lambda bus: bus.is_moving(servo_id))
++
+     def read_load(self, servo_id: int) -> int | None:
+         return self._execute(lambda bus: bus.read_load(servo_id))
+ 
+     def set_id(self, old_id: int, new_id: int) -> bool:
+         return self._execute(lambda bus: bus.set_id(old_id, new_id))
+ 
++    @guard_motion("route")
+     def calibrate_servo(self, servo_id: int) -> tuple[int, int]:
+         return self._execute(lambda bus: calibrate_servo_impl(bus, servo_id))
+ 
+diff --git a/software/sorter/backend/hardware/waveshare_servo.py b/software/sorter/backend/hardware/waveshare_servo.py
+index 46f8de308466064fcaccfb24d3a1d045e0159cc6..679ab57d69eb6cf5a3d09ba2e4a0ffc75b90c97c 100644
+--- a/software/sorter/backend/hardware/waveshare_servo.py
++++ b/software/sorter/backend/hardware/waveshare_servo.py
+@@ -23,6 +23,8 @@ from typing import Any, Dict
+ 
+ import serial
+ 
++from smart_bins_native_custody import guard_motion
++
+ logger = logging.getLogger(__name__)
+ 
+ # ---------------------------------------------------------------------------
+@@ -175,8 +177,13 @@ class ScServoBus:
+         return found
+ 
+     def set_torque(self, servo_id: int, enable: bool) -> bool:
++        if enable:
++            from smart_bins_native_custody import motion_entry
++            with motion_entry("enable", "route"):
++                return self.write_byte(servo_id, _REG_TORQUE_ENABLE, 1)
+         return self.write_byte(servo_id, _REG_TORQUE_ENABLE, 1 if enable else 0)
+ 
++    @guard_motion("route")
+     def move_to(self, servo_id: int, position: int, time_ms: int = 500) -> bool:
+         position = max(0, min(1023, position))
+         pos_bytes = struct.pack(">H", position)
+@@ -202,11 +209,11 @@ class ScServoBus:
+             return -raw
+         return raw
+ 
+-    def is_moving(self, servo_id: int) -> bool:
++    def is_moving(self, servo_id: int) -> bool | None:
+         data = self.read_bytes(servo_id, _REG_MOVING, 1)
+-        if data is None:
+-            return False
+-        return data[0] != 0
++        if data is None or len(data) != 1 or data[0] not in (0, 1):
++            return None
++        return data[0] == 1
+ 
+     def read_angle_limits(self, servo_id: int) -> tuple[int, int] | None:
+         data = self.read_bytes(servo_id, _REG_MIN_ANGLE_L, 4)
+@@ -423,7 +430,14 @@ class WaveshareServoMotor:
+         self._invert = invert
+         self._name = f"waveshare_servo_{servo_id}"
+         self._enabled = False
+-        self._current_position: int = 0  # raw SC position 0-1023
++        self._confirmed_position: int | None = None  # raw SC units, never a target
++        self._pending_target: int | None = None
++        self._last_command_outcome = "NONE"
++        self._last_position_observed_at: float | None = None
++        self._last_motion_observed_at: float | None = None
++        self._moving: bool | None = None
++        self._calibrated = False
++        self._release_pending = False
+         self._min_limit: int = 0
+         self._max_limit: int = 1023
+         self._open_position: int = 0
+@@ -433,6 +447,8 @@ class WaveshareServoMotor:
+ 
+     def initialize(self) -> None:
+         """Read or auto-calibrate limits and apply good PID settings."""
++        self._calibrated = False
++        self._invalidate_observations()
+         # Set PID to avoid undershooting (factory default I=0 causes issues)
+         self._bus.set_pid(self._servo_id, 32, 32, 20)
+ 
+@@ -459,10 +475,11 @@ class WaveshareServoMotor:
+             self._open_position = min_lim
+             self._closed_position = max_lim
+ 
+-        # Read current position
+-        pos = self._bus.read_position(self._servo_id)
+-        if pos is not None:
+-            self._current_position = pos
++        self._calibrated = self._valid_limits(min_lim, max_lim)
++        self._pending_target = None
++        self._last_command_outcome = "NONE"
++        self._invalidate_observations()
++        self.position
+ 
+     def set_invert(self, invert: bool) -> None:
+         self._invert = invert
+@@ -474,15 +491,30 @@ class WaveshareServoMotor:
+             self._closed_position = self._max_limit
+ 
+     def recalibrate(self) -> tuple[int, int]:
++        self._calibrated = False
++        self._pending_target = None
++        self._last_command_outcome = "NONE"
++        self._invalidate_observations()
+         min_lim, max_lim = calibrate_servo(self._bus, self._servo_id)
+-        self._min_limit = min_lim
+-        self._max_limit = max_lim
++        self._min_limit, self._max_limit = min_lim, max_lim
+         self.set_invert(self._invert)
+-        pos = self._bus.read_position(self._servo_id)
+-        if pos is not None:
+-            self._current_position = pos
+-        else:
+-            self._current_position = (min_lim + max_lim) // 2
++        self._calibrated = self._valid_limits(min_lim, max_lim)
++        self.position
++        return min_lim, max_lim
++
++    @staticmethod
++    def _valid_limits(minimum: int, maximum: int) -> bool:
++        return 0 <= minimum < maximum <= 1023 and maximum - minimum >= 20 and (minimum, maximum) != (0, 1023)
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self._calibrated and self._valid_limits(self._min_limit, self._max_limit)
++
++    def _invalidate_observations(self) -> None:
++        self._confirmed_position = None
++        self._last_position_observed_at = None
++        self._last_motion_observed_at = None
++        self._moving = None
+ 
+     # -- ServoMotor-compatible interface ------------------------------------
+ 
+@@ -495,66 +527,118 @@ class WaveshareServoMotor:
+         self._enabled = bool(value)
+         self._bus.set_torque(self._servo_id, self._enabled)
+ 
+-    def move_to(self, angle: int) -> bool:
+-        """Move to angle (0-180). Maps linearly to calibrated range."""
+-        if not self._enabled:
+-            self.enabled = True
+-        position = self._angle_to_position(angle)
+-        self._move_duration = 0.3
++    @guard_motion("route")
++    def _move_raw(self, position: int, *, release: bool) -> bool:
++        self._pending_target = position
++        self._moving = None
++        self._last_motion_observed_at = None
++        self._last_position_observed_at = None
++        self._release_pending = release
++        self._move_duration = 0.3  # advisory only; never stopped evidence
+         self._move_started_at = time.monotonic()
+-        self._current_position = position
+-        return self._bus.move_to(self._servo_id, position, 300)
++        try:
++            if not self._enabled:
++                self.enabled = True
++            acknowledged = self._bus.move_to(self._servo_id, position, 300)
++        except Exception:
++            self._last_command_outcome = "AMBIGUOUS"
++            self._invalidate_observations()
++            if release:
++                try:
++                    self._release_torque()
++                except Exception:
++                    logger.warning("Waveshare ambiguous command torque release was not acknowledged")
++            raise
++        self._last_command_outcome = "ACCEPTED" if acknowledged else "AMBIGUOUS"
++        if not acknowledged:
++            self._invalidate_observations()
++            if release:
++                try:
++                    self._release_torque()
++                except Exception:
++                    logger.warning("Waveshare ambiguous command torque release was not acknowledged")
++        return bool(acknowledged)
++
++    def move_to(self, angle: int) -> bool:
++        """Request an angle; an ACK does not establish physical position."""
++        return self._move_raw(self._angle_to_position(angle), release=False)
+ 
+     def move_to_and_release(self, angle: int) -> bool:
+-        """Move to angle then disable torque."""
+-        result = self.move_to(angle)
+-        self._enabled = False  # will release after move
+-        return result
++        return self._move_raw(self._angle_to_position(angle), release=True)
+ 
+     @property
+-    def position(self) -> int:
+-        pos = self._bus.read_position(self._servo_id)
+-        return pos if pos is not None else self._current_position
++    def position(self) -> int | None:
++        try:
++            pos = self._bus.read_position(self._servo_id)
++        except Exception:
++            self._confirmed_position = None
++            self._last_position_observed_at = None
++            raise
++        if not isinstance(pos, int) or isinstance(pos, bool) or not 0 <= pos <= 1023:
++            self._confirmed_position = None
++            self._last_position_observed_at = None
++            return None
++        self._confirmed_position = pos
++        self._last_position_observed_at = time.monotonic()
++        return pos
+ 
+     def stop(self):
+-        self._bus.set_torque(self._servo_id, False)
++        self._invalidate_observations()
++        self._pending_target = None
++        self._last_command_outcome = "NONE"
++        self._release_torque()
++
++    def _release_torque(self) -> None:
++        # A failed release remains pending so the next normal poll can release.
++        if not self._bus.set_torque(self._servo_id, False):
++            raise RuntimeError("Waveshare torque release was not acknowledged")
+         self._enabled = False
++        self._release_pending = False
+ 
+     @property
+     def stopped(self) -> bool:
+-        # Use time-based estimate since polling is_moving is slow on the bus
+-        if self._move_started_at == 0:
+-            return True
+-        elapsed = time.monotonic() - self._move_started_at
+-        if elapsed >= self._move_duration + 0.1:
+-            # Auto-release torque if move_to_and_release was used
+-            if not self._enabled:
+-                self._bus.set_torque(self._servo_id, False)
+-            self._move_started_at = 0
+-            return True
+-        return False
++        try:
++            moving = self._bus.is_moving(self._servo_id)
++            self._moving = moving if isinstance(moving, bool) else None
++            self._last_motion_observed_at = time.monotonic() if self._moving is not None else None
++            if self._moving is False:
++                pos = self.position
++                if (pos is not None and self._pending_target is not None
++                        and self._last_command_outcome == "ACCEPTED"
++                        and abs(pos - self._pending_target) <= self.POSITION_TOLERANCE):
++                    self._pending_target = None
++                if self._release_pending:
++                    self._release_torque()
++                return True
++            # Last observed position cannot qualify a flap while moving/unknown.
++            self._confirmed_position = None
++            self._last_position_observed_at = None
++            if self._release_pending and time.monotonic() - self._move_started_at >= 3.5:
++                # Protective release on timeout is NOT stopped/target evidence.
++                self._release_torque()
++            return False
++        except Exception:
++            self._invalidate_observations()
++            if self._release_pending and time.monotonic() - self._move_started_at >= 3.5:
++                try:
++                    self._release_torque()
++                except Exception:
++                    logger.warning("Waveshare protective torque release was not acknowledged")
++            raise
+ 
+     @property
+     def available(self) -> bool:
+         return True
+ 
+-    def open(self, open_angle: int | None = None) -> None:
+-        if not self._enabled:
+-            self.enabled = True
+-        self._move_duration = 0.3
+-        self._move_started_at = time.monotonic()
+-        self._current_position = self._open_position
+-        self._bus.move_to(self._servo_id, self._open_position, 300)
+-        self._enabled = False  # release after move
+-
+-    def close(self, closed_angle: int | None = None) -> None:
+-        if not self._enabled:
+-            self.enabled = True
+-        self._move_duration = 0.3
+-        self._move_started_at = time.monotonic()
+-        self._current_position = self._closed_position
+-        self._bus.move_to(self._servo_id, self._closed_position, 300)
+-        self._enabled = False  # release after move
++    def open(self, open_angle: int | None = None) -> bool:
++        if not self.is_calibrated:
++            return False
++        return self._move_raw(self._open_position, release=True)
++
++    def close(self, closed_angle: int | None = None) -> bool:
++        if not self.is_calibrated:
++            return False
++        return self._move_raw(self._closed_position, release=True)
+ 
+     def toggle(self) -> None:
+         if self.isOpen():
+@@ -562,11 +646,23 @@ class WaveshareServoMotor:
+         else:
+             self.open()
+ 
++    # Native calibration used <10 raw counts for a reached target. Keep the
++    # tolerance below that bound (SC has 1024 raw positions), without rounding.
++    POSITION_TOLERANCE = 9
++
++    def _at_position(self, target: int) -> bool:
++        return (self.is_calibrated and self._confirmed_position is not None
++                and self._last_position_observed_at is not None
++                and self._moving is False and self._last_motion_observed_at is not None
++                and self._pending_target is None
++                and self._last_command_outcome != "AMBIGUOUS"
++                and abs(self._confirmed_position - target) <= self.POSITION_TOLERANCE)
++
+     def isOpen(self) -> bool:
+-        return abs(self._current_position - self._open_position) < abs(self._current_position - self._closed_position)
++        return self._at_position(self._open_position)
+ 
+     def isClosed(self) -> bool:
+-        return not self.isOpen()
++        return self._at_position(self._closed_position)
+ 
+     def set_speed_limits(self, min_speed: int, max_speed: int) -> None:
+         pass  # SC servos use time-based moves, speed is implicit
+@@ -586,25 +682,43 @@ class WaveshareServoMotor:
+         pass
+ 
+     @property
+-    def angle(self) -> int:
+-        return self._position_to_angle(self._current_position)
++    def angle(self) -> int | None:
++        pos = self._confirmed_position
++        return self._position_to_angle(pos) if pos is not None else None
+ 
+     @property
+     def channel(self) -> int:
+         return self._servo_id
+ 
+     def feedback(self) -> Dict[str, Any]:
+-        position = self.position
++        error = None
++        try:
++            self.stopped  # one moving read; one position read when stopped
++        except Exception as exc:
++            error = str(exc)
++        position = self._confirmed_position
+         return {
++            "available": self.available,
+             "channel": self._servo_id,
+             "position": position,
+-            "angle": self._position_to_angle(position),
++            "angle": self._position_to_angle(position) if position is not None else None,
++            "pending_target": self._pending_target,
+             "open_position": self._open_position,
+             "closed_position": self._closed_position,
+             "min_limit": self._min_limit,
+             "max_limit": self._max_limit,
+-            "is_open": abs(position - self._open_position) < abs(position - self._closed_position),
++            "is_open": self.isOpen(),
++            "is_closed": self.isClosed(),
++            "calibrated": self.is_calibrated,
++            "moving": self._moving,
++            "stopped": not self._moving if self._moving is not None else None,
++            "motion_state_valid": self._last_motion_observed_at is not None,
++            "position_valid": position is not None and self._last_position_observed_at is not None,
++            "command_outcome": self._last_command_outcome,
++            "position_observed_at": self._last_position_observed_at,
++            "motion_observed_at": self._last_motion_observed_at,
+             "invert": self._invert,
++            "error": error,
+         }
+ 
+     # -- internal -----------------------------------------------------------
+diff --git a/software/sorter/backend/main.py b/software/sorter/backend/main.py
+index 03223bbfba0820dccc6b5936a9fd68eda963cae4..37f640726dfb0d4c2913c1bddeeac9fcf195e4c2 100644
+--- a/software/sorter/backend/main.py
++++ b/software/sorter/backend/main.py
+@@ -401,6 +401,8 @@ def main() -> None:
+         sys.exit(1)
+ 
+     gc = mkGlobalConfig()
++    from subsystems.classification_channel.smart_bins_native_adapter import attach
++    attach(gc)
+     gc.run_recorder = RunRecorder(gc)
+     gc.lifetime_stats = LifetimeStatsTracker(gc)
+     setGlobalConfig(gc)
+@@ -621,6 +623,8 @@ def main() -> None:
+ 
+         shared_state.setHardwareStatus(homing_step="Discovering hardware...")
+         gc.logger.info("Starting hardware initialization...")
++        from subsystems.classification_channel.smart_bins_native_adapter import attach
++        attach(gc).require_startup()
+         real_irl = mkIRLInterface(irl_config, gc)
+         _replace_irl(real_irl)
+         setHardwareRuntimeIRL(irl)
+@@ -724,6 +728,8 @@ def main() -> None:
+ 
+         shared_state.setHardwareStatus(homing_step="Discovering hardware...")
+         gc.logger.info("Initializing hardware (no homing)...")
++        from subsystems.classification_channel.smart_bins_native_adapter import attach
++        attach(gc).require_startup()
+         real_irl = mkIRLInterface(irl_config, gc)
+         _replace_irl(real_irl)
+         setHardwareRuntimeIRL(irl)
+diff --git a/software/sorter/backend/piece_transport.py b/software/sorter/backend/piece_transport.py
+index 121c1dff9ee5fa3d94f85b2be7404053be4dcbf1..719e29434f8e7a0c7e94e4864b7f827657ee36a2 100644
+--- a/software/sorter/backend/piece_transport.py
++++ b/software/sorter/backend/piece_transport.py
+@@ -14,10 +14,14 @@ class ClassificationChannelTransport:
+     """
+ 
+     def __init__(self) -> None:
++        self.native_head_generation = 0
++        self.native_adapter = None
+         self._wait_piece: KnownObject | None = None
+         self._exit_piece: KnownObject | None = None
+ 
+     def advanceTransport(self) -> None:
++        if self.native_adapter is not None:
++            self.native_adapter.observation("SOFTWARE_SLOT_PROMOTION")
+         self._exit_piece = self._wait_piece
+         self._wait_piece = None
+ 
+@@ -25,6 +29,8 @@ class ClassificationChannelTransport:
+         """Stage the classified piece in the positioning slot so distribution
+         aims the chute for it; ``advanceTransport()`` (issued when the piece is
+         flung into the chute) promotes it to the drop slot."""
++        if self._wait_piece is not obj:
++            self.native_head_generation += 1
+         self._wait_piece = obj
+ 
+     def clearPieceForDistribution(self, obj: KnownObject | None = None) -> bool:
+@@ -36,6 +42,8 @@ class ClassificationChannelTransport:
+             return False
+         if obj is not None and self._wait_piece is not obj:
+             return False
++        if self.native_adapter is not None:
++            self.native_adapter.observation("TRACK_LOST_REIDENTIFIED", uncertain=True)
+         self._wait_piece = None
+         return True
+ 
+diff --git a/software/sorter/backend/server/routers/hardware.py b/software/sorter/backend/server/routers/hardware.py
+index 32cb1c3b16f17d17a1e9c83f36b9e9fcc8bb34e2..0425e7a1ae586eb7d4e334a419a995cc4bdce1db 100644
+--- a/software/sorter/backend/server/routers/hardware.py
++++ b/software/sorter/backend/server/routers/hardware.py
+@@ -55,7 +55,7 @@ from local_state import (
+     list_bin_snapshots,
+ )
+ from server import shared_state
+-from server.routers.steppers import _stepper_mapping, _halt_stepper
++from server.routers.steppers import _stepper_mapping, _halt_stepper, _guard_route_configuration
+ from server.waveshare_inventory import get_waveshare_inventory_manager
+ from machine_platform.control_board import discover_control_boards
+ 
+@@ -69,6 +69,12 @@ def _active_irl() -> Any | None:
+ 
+ 
+ def _ensure_not_homing(action: str) -> None:
++    from smart_bins_native_custody import motion_entry, CustodyRefused
++    try:
++        with motion_entry("manual", "route"):
++            pass
++    except CustodyRefused as exc:
++        raise HTTPException(status_code=409,detail=f"Cannot {action}: {exc}") from exc
+     worker = shared_state.hardware_worker_thread
+     if (
+         (worker is not None and worker.is_alive())
+@@ -1030,6 +1036,7 @@ def get_live_servo_feedback() -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/hardware-config/servo")
++@_guard_route_configuration
+ def save_servo_hardware_config(
+     payload: ServoHardwareSettingsPayload,
+ ) -> Dict[str, Any]:
+@@ -1184,6 +1191,7 @@ class ServoSpeedSettingsPayload(BaseModel):
+ 
+ 
+ @router.post("/api/hardware-config/servo/speeds")
++@_guard_route_configuration
+ def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
+     _SPEED_RANGE = (1, 2000)
+ 
+@@ -1437,6 +1445,7 @@ def _servo_calibration_state(servo: Any) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/hardware-config/servo/layers/{layer_index}/lock")
++@_guard_route_configuration
+ def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> Dict[str, Any]:
+     _ensure_not_homing("lock a servo angle")
+     if payload.which not in {"open", "closed"}:
+@@ -1598,6 +1607,7 @@ def get_waveshare_servos(port: str | None = None) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/hardware-config/waveshare/servos/{servo_id}/set-id")
++@_guard_route_configuration
+ def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[str, Any]:
+     """Change a servo's ID on the bus."""
+     _ensure_not_homing("change a Waveshare servo ID")
+@@ -1810,6 +1820,7 @@ def get_chute_hardware_config() -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/hardware-config/chute")
++@_guard_route_configuration
+ def save_chute_hardware_config(
+     payload: ChuteHardwareSettingsPayload,
+ ) -> Dict[str, Any]:
+@@ -2090,6 +2101,7 @@ def _persist_and_apply_chute_aiming(
+ 
+ 
+ @router.post("/api/hardware-config/chute/aiming")
++@_guard_route_configuration
+ def save_chute_aiming_config(payload: ChuteAimingSettingsPayload) -> Dict[str, Any]:
+     num_sections = int(payload.num_sections)
+     if num_sections < 1:
+@@ -2303,6 +2315,7 @@ def delete_chute_calibration(calibration_id: str) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/hardware-config/storage-layers")
++@_guard_route_configuration
+ def save_storage_layer_hardware_config(
+     payload: StorageLayerSettingsPayload,
+ ) -> Dict[str, Any]:
+@@ -2526,6 +2539,7 @@ def _apply_and_persist_not_in_inventory(flags: list[list[list[bool]]]) -> None:
+     setNotInInventoryBins(flags)
+ 
+ 
++@_guard_route_configuration
+ def set_not_in_inventory_mode(
+     *, scope: str, layer_index: int | None, section_index: int | None,
+     bin_index: int | None, enabled: bool,
+@@ -3025,6 +3039,7 @@ def get_bins_settings() -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/bins/settings")
++@_guard_route_configuration
+ def set_bins_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+     from toml_config import setBinAssignmentConfig
+ 
+@@ -3119,6 +3134,7 @@ def move_to_section(payload: MoveToSectionPayload) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/bins/sections/enabled")
++@_guard_route_configuration
+ def set_section_enabled(payload: SectionEnabledPayload) -> Dict[str, Any]:
+     """Enable/disable sections: a single section, a whole column (same section
+     index across every layer), or every section on the machine."""
+@@ -3196,6 +3212,7 @@ def auto_assign_bins_route(payload: AutoAssignBinsPayload) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/bins/not-in-inventory/set")
++@_guard_route_configuration
+ def set_bins_not_in_inventory(payload: NotInInventoryModePayload) -> Dict[str, Any]:
+     return set_not_in_inventory_mode(
+         scope=payload.scope,
+@@ -3217,6 +3234,7 @@ def clear_bins_contents(payload: ClearBinContentsPayload) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/bins/reset/layer/{layer_index}")
++@_guard_route_configuration
+ def reset_bins_layer(layer_index: int) -> Dict[str, Any]:
+     # Full reset of one layer: drop its category assignments and empty its bins
+     # in a single server-side call, then hand back the fresh layout + contents so
+@@ -3228,6 +3246,7 @@ def reset_bins_layer(layer_index: int) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/bins/reset/machine")
++@_guard_route_configuration
+ def reset_bins_machine() -> Dict[str, Any]:
+     # Full machine reset: drop every assignment and empty every bin in one call,
+     # returning the fresh layout + (now empty) contents.
+diff --git a/software/sorter/backend/server/routers/steppers.py b/software/sorter/backend/server/routers/steppers.py
+index a4eaa2cd9df707119d6e3880a78a297c2ff3395b..e863a9e80ad3aef24229605aa49c99dc48f4f03e 100644
+--- a/software/sorter/backend/server/routers/steppers.py
++++ b/software/sorter/backend/server/routers/steppers.py
+@@ -7,6 +7,8 @@ import os
+ import random
+ import threading
+ import time
++from functools import wraps
++from inspect import signature
+ from typing import Any, Dict, List, Optional
+ 
+ import stepper_telemetry
+@@ -119,6 +121,20 @@ class TmcSettingsRequest(BaseModel):
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _guard_route_configuration(fn):
++    """Keep route interpretation fixed while native custody is held."""
++    @wraps(fn)
++    def guarded(*args, **kwargs):
++        from smart_bins_native_custody import CustodyRefused, motion_entry
++        try:
++            with motion_entry("configuration", "route"):
++                return fn(*args, **kwargs)
++        except CustodyRefused as exc:
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++    # Resolve annotations in the original router's namespace for FastAPI.
++    guarded.__signature__ = signature(fn, eval_str=True)
++    return guarded
++
+ def _stepper_mapping() -> Dict[str, Any]:
+     irl = shared_state.getActiveIRL()
+     if irl is None:
+@@ -190,6 +206,12 @@ def _ensure_no_blocking_fault(action: str) -> None:
+ 
+ 
+ def _ensure_manual_motion_allowed(action: str) -> None:
++    from smart_bins_native_custody import motion_entry, CustodyRefused
++    try:
++        with motion_entry("manual", "route"):
++            pass
++    except CustodyRefused as exc:
++        raise HTTPException(status_code=409,detail=f"Cannot {action}: {exc}") from exc
+     from subsystems.power_stress import getActivePowerStressRunner
+ 
+     power_runner = getActivePowerStressRunner()
+@@ -1037,6 +1059,7 @@ def get_tmc_settings(name: str) -> Dict[str, Any]:
+ 
+ 
+ @router.post("/api/stepper/{name}/tmc")
++@_guard_route_configuration
+ def set_tmc_settings(name: str, body: TmcSettingsRequest) -> Dict[str, Any]:
+     stepper = _resolve_stepper(name)
+ 
+@@ -1634,6 +1657,7 @@ def _persist_stepper_stallguard(api_name: str, sgthrs: int, tcoolthrs: int, enab
+ 
+ 
+ @router.post("/stepper/{stepper}/stallguard-config", response_model=StallGuardConfigResponse)
++@_guard_route_configuration
+ def set_stallguard_config(stepper: str, body: StallGuardConfigBody) -> StallGuardConfigResponse:
+     target = _resolve_stepper(stepper)
+     toml_name = _STEPPER_API_TO_TOML_NAME.get(stepper, stepper)
+diff --git a/software/sorter/backend/smart_bins_native_custody.py b/software/sorter/backend/smart_bins_native_custody.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9586b0da31f8eeb89ac5517b7a961dd8556f4428
+--- /dev/null
++++ b/software/sorter/backend/smart_bins_native_custody.py
+@@ -0,0 +1,482 @@
++"""Versioned native custody only. No motion, receiving credit, or implicit DDL."""
++
++from __future__ import annotations
++
++from contextlib import contextmanager
++from dataclasses import dataclass
++from pathlib import Path
++import json
++import sqlite3
++import threading
++import time
++import uuid
++
++from local_state import local_state_db_path
++from smart_bins_storage import critical_transaction, check_schema_version
++
++SCHEMA_VERSION = 1
++HELD = ("RESERVED", "RELEASE_INTENT", "EXIT_CONFIRMED", "UNCERTAIN")
++EVIDENCE_TYPES = frozenset(
++    {
++        "ROUTE_VERIFIED",
++        "ROUTE_UNCERTAIN",
++        "MOTOR_ACCEPTED",
++        "MOTOR_REJECTED",
++        "MOTOR_AMBIGUOUS",
++        "INFERRED_EXIT",
++        "EJECT_TIMEOUT_VISIBLE",
++        "TRACK_LOST_REIDENTIFIED",
++        "SOFTWARE_SLOT_PROMOTION",
++        "STALL_PRE_CLEAR_PROMOTION",
++        "CHANNEL_CLEAR_OBSERVED",
++        "UNKNOWN_MATERIAL",
++        "RELEASE_INTENT",
++        "DISPATCH_CONSUMED",
++    }
++)
++
++
++class CustodyRefused(RuntimeError):
++    pass
++
++
++@dataclass(frozen=True)
++class NativeIdentity:
++    machine_id: str
++    piece_uuid: str
++    reservation_id: str
++    incarnation: str
++    head_generation: int
++    route_revision: int
++    attempt_id: str
++
++
++_DDL = (
++    "CREATE TABLE smart_bin_native_versions(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)",
++    "CREATE TABLE smart_bin_native_settings(machine_id TEXT PRIMARY KEY, policy_id TEXT NOT NULL, namespace TEXT NOT NULL, routing_revision INTEGER NOT NULL, FOREIGN KEY(machine_id,policy_id) REFERENCES smart_bin_policy_revisions(machine_id,id))",
++    "CREATE TABLE smart_bin_native_claims(reservation_id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, piece_uuid TEXT NOT NULL, incarnation TEXT NOT NULL, head_generation INTEGER NOT NULL CHECK(head_generation>=0), route_revision INTEGER NOT NULL CHECK(route_revision>=0), config_digest TEXT NOT NULL, attempt_id TEXT UNIQUE, status TEXT NOT NULL CHECK(status IN ('RESERVED','RELEASE_INTENT','DISPATCH_CONSUMED','ACCEPTED','REJECTED','UNCERTAIN')), revision INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL, FOREIGN KEY(machine_id,reservation_id) REFERENCES smart_bin_reservations(machine_id,id))",
++    "CREATE TABLE smart_bin_native_evidence(id TEXT PRIMARY KEY, reservation_id TEXT, machine_id TEXT NOT NULL, attempt_id TEXT, incarnation TEXT NOT NULL, head_generation INTEGER, kind TEXT NOT NULL, details_json TEXT NOT NULL, observed_at REAL NOT NULL, FOREIGN KEY(reservation_id) REFERENCES smart_bin_native_claims(reservation_id))",
++    "CREATE TABLE smart_bin_native_holds(id TEXT PRIMARY KEY, machine_id TEXT NOT NULL, kind TEXT NOT NULL, details_json TEXT NOT NULL, created_at REAL NOT NULL, resolved_at REAL)",
++    "CREATE INDEX smart_bin_native_current_reservations ON smart_bin_reservations(machine_id,state,id)",
++    "CREATE INDEX smart_bin_native_current_holds ON smart_bin_native_holds(machine_id) WHERE resolved_at IS NULL",
++    "CREATE INDEX smart_bin_native_current_discrepancies ON smart_bin_discrepancies(machine_id) WHERE resolved_at IS NULL",
++    "CREATE INDEX smart_bin_native_piece_evidence ON smart_bin_native_evidence(reservation_id,observed_at)",
++    "CREATE TRIGGER smart_bin_native_evidence_no_update BEFORE UPDATE ON smart_bin_native_evidence BEGIN SELECT RAISE(ABORT,'native evidence is immutable'); END",
++    "CREATE TRIGGER smart_bin_native_evidence_no_delete BEFORE DELETE ON smart_bin_native_evidence BEGIN SELECT RAISE(ABORT,'native evidence is immutable'); END",
++    "CREATE TRIGGER smart_bin_native_claim_no_delete BEFORE DELETE ON smart_bin_native_claims BEGIN SELECT RAISE(ABORT,'native custody is retained'); END",
++    "CREATE TRIGGER smart_bin_native_status_forward BEFORE UPDATE OF status ON smart_bin_native_claims WHEN NOT (NEW.status=OLD.status OR NEW.status='UNCERTAIN' OR (OLD.status='RESERVED' AND NEW.status='RELEASE_INTENT') OR (OLD.status='RELEASE_INTENT' AND NEW.status='DISPATCH_CONSUMED') OR (OLD.status='DISPATCH_CONSUMED' AND NEW.status IN ('ACCEPTED','REJECTED'))) BEGIN SELECT RAISE(ABORT,'native release cannot be replayed'); END",
++    "CREATE TRIGGER smart_bin_native_identity_immutable BEFORE UPDATE OF reservation_id,machine_id,piece_uuid,incarnation,head_generation,route_revision,config_digest ON smart_bin_native_claims BEGIN SELECT RAISE(ABORT,'native custody identity immutable'); END",
++    "CREATE TRIGGER smart_bin_native_attempt_immutable BEFORE UPDATE OF attempt_id ON smart_bin_native_claims WHEN OLD.attempt_id IS NOT NULL AND NEW.attempt_id IS NOT OLD.attempt_id BEGIN SELECT RAISE(ABORT,'native attempt immutable'); END",
++)
++
++
++def _tables(conn):
++    return {
++        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
++    }
++
++
++def _check(conn):
++    check_schema_version(conn)
++    try:
++        rows = conn.execute(
++            "SELECT singleton,version FROM smart_bin_native_versions"
++        ).fetchall()
++        if [tuple(r) for r in rows] != [(1, SCHEMA_VERSION)]:
++            raise CustodyRefused("Unsupported native custody version")
++        objects = {
++            (r[0], r[1]) for r in conn.execute("SELECT type,name FROM sqlite_master")
++        }
++        required = {
++            (sql.split()[1].lower(), sql.split()[2].split("(")[0]) for sql in _DDL
++        }
++        if not required <= objects:
++            raise CustodyRefused("Incomplete native custody extension")
++    except sqlite3.Error as exc:
++        raise CustodyRefused("Native custody extension unavailable") from exc
++
++
++def initialize_native_schema(
++    machine_id: str, policy_id: str, namespace: str, routing_revision: int
++) -> int:
++    """Explicit opt-in after RB02 initialization; never called by startup."""
++    if (
++        not machine_id
++        or not policy_id
++        or not namespace
++        or type(routing_revision) is not int
++        or routing_revision < 0
++    ):
++        raise ValueError("Invalid native configuration")
++    with critical_transaction() as conn:
++        from smart_bins_service import _check_service_schema
++
++        _check_service_schema(conn)
++        if "smart_bin_native_versions" not in _tables(conn):
++            for sql in _DDL:
++                conn.execute(sql)
++            conn.execute(
++                "INSERT INTO smart_bin_native_versions VALUES(1,?)", (SCHEMA_VERSION,)
++            )
++        _check(conn)
++        row = conn.execute(
++            "SELECT policy_id,namespace,routing_revision FROM smart_bin_native_settings WHERE machine_id=?",
++            (machine_id,),
++        ).fetchone()
++        if row is not None and tuple(row) != (policy_id, namespace, routing_revision):
++            raise CustodyRefused(
++                "Native configuration already bound; explicit reconciliation required"
++            )
++        conn.execute(
++            "INSERT OR IGNORE INTO smart_bin_native_settings VALUES(?,?,?,?)",
++            (machine_id, policy_id, namespace, routing_revision),
++        )
++        conn.commit()
++    return SCHEMA_VERSION
++
++
++@contextmanager
++def read_only(path: Path | None = None):
++    path = Path(path or local_state_db_path()).resolve()
++    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
++    conn.row_factory = sqlite3.Row
++    try:
++        yield conn
++    finally:
++        conn.close()
++
++
++def startup_state(machine_id: str) -> dict:
++    """One startup inspection; does not create a missing file or any schema."""
++    if not local_state_db_path().exists():
++        return {"active": False, "blocked": False}
++    with read_only() as conn:
++        tables = _tables(conn)
++        if not any(t.startswith("smart_bin_") for t in tables):
++            return {"active": False, "blocked": False}
++        check_schema_version(conn)
++        held = (
++            conn.execute(
++                "SELECT id FROM smart_bin_reservations WHERE machine_id=? AND state IN (?,?,?,?) LIMIT 1",
++                (machine_id, *HELD),
++            ).fetchone()
++            is not None
++        )
++        discrepancy = (
++            conn.execute(
++                "SELECT 1 FROM smart_bin_discrepancies WHERE machine_id=? AND resolved_at IS NULL LIMIT 1",
++                (machine_id,),
++            ).fetchone()
++            is not None
++        )
++        followup = False
++        if "smart_bin_completion_followups" in tables:
++            followup = (
++                conn.execute(
++                    "SELECT 1 FROM smart_bin_completion_followups WHERE machine_id=? AND state<>'CLOSED' LIMIT 1",
++                    (machine_id,),
++                ).fetchone()
++                is not None
++            )
++        if "smart_bin_native_versions" not in tables:
++            return {"active": False, "blocked": held or discrepancy or followup}
++        _check(conn)
++        settings = conn.execute(
++            "SELECT * FROM smart_bin_native_settings WHERE machine_id=?", (machine_id,)
++        ).fetchone()
++        native_hold = (
++            conn.execute(
++                "SELECT 1 FROM smart_bin_native_holds WHERE machine_id=? AND resolved_at IS NULL LIMIT 1",
++                (machine_id,),
++            ).fetchone()
++            is not None
++        )
++        return {
++            "active": settings is not None,
++            "blocked": held or discrepancy or followup or native_hold,
++            "settings": dict(settings) if settings else None,
++        }
++
++
++def has_blocker(conn, machine_id, except_reservation=None):
++    if conn.execute(
++        "SELECT 1 FROM smart_bin_native_holds WHERE machine_id=? AND resolved_at IS NULL LIMIT 1",
++        (machine_id,),
++    ).fetchone():
++        return True
++    if conn.execute(
++        "SELECT 1 FROM smart_bin_discrepancies WHERE machine_id=? AND resolved_at IS NULL LIMIT 1",
++        (machine_id,),
++    ).fetchone():
++        return True
++    return (
++        conn.execute(
++            "SELECT 1 FROM smart_bin_reservations WHERE machine_id=? AND state IN (?,?,?,?) AND id IS NOT ? LIMIT 1",
++            (machine_id, *HELD, except_reservation),
++        ).fetchone()
++        is not None
++    )
++
++
++def _event(conn, identity, kind, details):
++    if kind not in EVIDENCE_TYPES:
++        raise ValueError("Unknown native evidence type")
++    conn.execute(
++        "INSERT INTO smart_bin_native_evidence VALUES(?,?,?,?,?,?,?,?,?)",
++        (
++            str(uuid.uuid4()),
++            identity.reservation_id,
++            identity.machine_id,
++            identity.attempt_id or None,
++            identity.incarnation,
++            identity.head_generation,
++            kind,
++            json.dumps(details, sort_keys=True, allow_nan=False),
++            time.time(),
++        ),
++    )
++
++
++def _current(conn, identity):
++    _check(conn)
++    row = conn.execute(
++        "SELECT n.*,r.state AS reservation_state,r.row_revision,r.routing_revision FROM smart_bin_native_claims n JOIN smart_bin_reservations r ON r.id=n.reservation_id WHERE n.reservation_id=? AND n.machine_id=?",
++        (identity.reservation_id, identity.machine_id),
++    ).fetchone()
++    if (
++        row is None
++        or row["reservation_state"] not in HELD
++        or any(
++            row[k] != getattr(identity, k)
++            for k in ("piece_uuid", "incarnation", "head_generation", "route_revision")
++        )
++        or row["routing_revision"] != identity.route_revision
++    ):
++        raise CustodyRefused("Stale native owner, head or route")
++    return row
++
++
++def bind_reservation(identity: NativeIdentity, config_digest: str):
++    with critical_transaction() as conn:
++        _check(conn)
++        row = conn.execute(
++            "SELECT * FROM smart_bin_reservations WHERE machine_id=? AND id=?",
++            (identity.machine_id, identity.reservation_id),
++        ).fetchone()
++        if (
++            row is None
++            or row["state"] != "RESERVED"
++            or row["piece_uuid"] != identity.piece_uuid
++            or row["routing_revision"] != identity.route_revision
++        ):
++            raise CustodyRefused("Reservation cannot bind native custody")
++        now = time.time()
++        conn.execute(
++            "INSERT INTO smart_bin_native_claims VALUES(?,?,?,?,?,?,?,NULL,'RESERVED',0,?,?)",
++            (
++                identity.reservation_id,
++                identity.machine_id,
++                identity.piece_uuid,
++                identity.incarnation,
++                identity.head_generation,
++                identity.route_revision,
++                config_digest,
++                now,
++                now,
++            ),
++        )
++        conn.commit()
++
++
++def _transition_reservation(conn, row, state):
++    conn.execute(
++        "UPDATE smart_bin_reservations SET state=?,row_revision=row_revision+1,updated_at=? WHERE id=?",
++        (state, time.time(), row["reservation_id"]),
++    )
++    conn.execute(
++        "UPDATE smart_bin_machines SET state_revision=state_revision+1 WHERE machine_id=?",
++        (row["machine_id"],),
++    )
++
++
++def arm(identity: NativeIdentity, config_digest: str, route_evidence: dict):
++    """Commit intent before READY; no permit may be reconstructed by replay."""
++    with critical_transaction() as conn:
++        row = _current(conn, identity)
++        if not identity.attempt_id:
++            raise ValueError("Release attempt identity is required")
++        if (
++            row["status"] != "RESERVED"
++            or row["reservation_state"] != "RESERVED"
++            or row["row_revision"] != 0
++            or row["attempt_id"] is not None
++        ):
++            raise CustodyRefused("Release intent already exists; never replay motion")
++        if (
++            has_blocker(conn, identity.machine_id, identity.reservation_id)
++            or row["config_digest"] != config_digest
++        ):
++            raise CustodyRefused("Route changed or custody blocker exists")
++        _event(conn, identity, "ROUTE_VERIFIED", route_evidence)
++        _event(conn, identity, "RELEASE_INTENT", {})
++        conn.execute(
++            "INSERT INTO smart_bin_release_attempts VALUES(?,?,?,?,?)",
++            (
++                identity.attempt_id,
++                identity.reservation_id,
++                identity.incarnation,
++                f"native:{identity.head_generation}:{identity.attempt_id}",
++                time.time(),
++            ),
++        )
++        conn.execute(
++            "UPDATE smart_bin_native_claims SET attempt_id=?,status='RELEASE_INTENT',revision=revision+1,updated_at=? WHERE reservation_id=?",
++            (identity.attempt_id, time.time(), identity.reservation_id),
++        )
++        _transition_reservation(conn, row, "RELEASE_INTENT")
++        conn.commit()
++
++
++def consume(identity: NativeIdentity, config_digest: str):
++    with critical_transaction() as conn:
++        row = _current(conn, identity)
++        if (
++            row["status"] != "RELEASE_INTENT"
++            or row["reservation_state"] != "RELEASE_INTENT"
++            or row["row_revision"] != 1
++            or row["attempt_id"] != identity.attempt_id
++            or row["config_digest"] != config_digest
++            or has_blocker(conn, identity.machine_id, identity.reservation_id)
++        ):
++            raise CustodyRefused("Dispatch permit is stale or consumed")
++        conn.execute(
++            "UPDATE smart_bin_native_claims SET status='DISPATCH_CONSUMED',revision=revision+1,updated_at=? WHERE reservation_id=?",
++            (time.time(), identity.reservation_id),
++        )
++        _event(conn, identity, "DISPATCH_CONSUMED", {})
++        conn.commit()
++
++
++def observe(identity: NativeIdentity, kind: str, details: dict, *, uncertain=False):
++    with critical_transaction() as conn:
++        row = _current(conn, identity)
++        if row["attempt_id"] is not None and row["attempt_id"] != identity.attempt_id:
++            raise CustodyRefused("Observation belongs to another release attempt")
++        if kind == "INFERRED_EXIT" and row["status"] != "ACCEPTED":
++            raise CustodyRefused("Inferred exit requires accepted owned release")
++        _event(conn, identity, kind, details)
++        status = {
++            "MOTOR_ACCEPTED": "ACCEPTED",
++            "MOTOR_REJECTED": "REJECTED",
++            "MOTOR_AMBIGUOUS": "UNCERTAIN",
++        }.get(kind)
++        if kind.startswith("MOTOR_") and row["status"] != "DISPATCH_CONSUMED":
++            raise CustodyRefused("Command outcome without unique consumed dispatch")
++        if uncertain:
++            status = "UNCERTAIN"
++            _transition_reservation(conn, row, "UNCERTAIN")
++        if status:
++            conn.execute(
++                "UPDATE smart_bin_native_claims SET status=?,revision=revision+1,updated_at=? WHERE reservation_id=?",
++                (status, time.time(), identity.reservation_id),
++            )
++        conn.commit()
++
++
++def hold(machine_id, kind, details):
++    with critical_transaction() as conn:
++        _check(conn)
++        affected = [
++            dict(r)
++            for r in conn.execute(
++                "SELECT id AS reservation_id,machine_id,piece_uuid,state,intended_kind,intended_slot_id,intended_cycle_id,row_revision "
++                "FROM smart_bin_reservations WHERE machine_id=? AND state IN (?,?,?,?)",
++                (machine_id, *HELD),
++            )
++        ]
++        snapshot = {**details, "affected_reservations": affected}
++        conn.execute(
++            "INSERT INTO smart_bin_native_holds VALUES(?,?,?,?,?,NULL)",
++            (
++                str(uuid.uuid4()),
++                machine_id,
++                kind,
++                json.dumps(snapshot, sort_keys=True),
++                time.time(),
++            ),
++        )
++        for row in affected:
++            _transition_reservation(conn, row, "UNCERTAIN")
++            conn.execute(
++                "UPDATE smart_bin_native_claims SET status='UNCERTAIN',revision=revision+1,updated_at=? WHERE reservation_id=?",
++                (time.time(), row["reservation_id"]),
++            )
++        conn.commit()
++
++
++def machine_observation(machine_id, incarnation, kind, details):
++    if kind not in EVIDENCE_TYPES:
++        raise ValueError("Unknown native observation")
++    with critical_transaction() as conn:
++        _check(conn)
++        conn.execute(
++            "INSERT INTO smart_bin_native_evidence VALUES(?,NULL,?,NULL,?,NULL,?,?,?)",
++            (
++                str(uuid.uuid4()),
++                machine_id,
++                incarnation,
++                kind,
++                json.dumps(details, sort_keys=True, allow_nan=False),
++                time.time(),
++            ),
++        )
++        conn.commit()
++
++
++# All native/manual/startup motion shares this lock. No SQLite transaction spans
++# the yielded physical side effect. No controller or hardware is imported here.
++MOTION_LOCK = threading.RLock()
++_installed = None
++_scope = threading.local()
++
++
++def install(adapter):
++    global _installed
++    with MOTION_LOCK:
++        _installed = adapter
++
++
++@contextmanager
++def motion_entry(kind: str, role: str = ""):
++    with MOTION_LOCK:
++        if _installed is not None:
++            _installed.check_motion(kind, role, getattr(_scope, "value", None))
++        yield
++
++
++@contextmanager
++def owned_scope(value):
++    with MOTION_LOCK:
++        old = getattr(_scope, "value", None)
++        _scope.value = value
++        try:
++            yield
++        finally:
++            _scope.value = old
++
++
++def guard_motion(kind, *, stop_value=False):
++    """Driver entry fence shared by native code and background/manual callers."""
++    from functools import wraps
++
++    def decorate(fn):
++        @wraps(fn)
++        def guarded(self, *args, **kwargs):
++            if stop_value and args and not args[0]:
++                return fn(self, *args, **kwargs)
++            with motion_entry(kind, getattr(self, "_name", "route")):
++                return fn(self, *args, **kwargs)
++
++        return guarded
++
++    return decorate
+diff --git a/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf6f02987fcdddac862638ca96f1611739fe1686
+--- /dev/null
++++ b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+@@ -0,0 +1,366 @@
++"""Native v0.3.0 custody adapter. Never issues a hardware/transport command."""
++
++from __future__ import annotations
++
++from contextlib import contextmanager
++from dataclasses import replace
++import uuid
++
++import smart_bins_native_custody as custody
++import smart_bins_service as service
++
++
++class NativeCustodyAdapter:
++    def __init__(self, machine_id: str):
++        self.machine_id = machine_id
++        self.incarnation = str(uuid.uuid4())
++        state = custody.startup_state(machine_id)
++        self.active = state["active"]
++        self.blocked = state["blocked"]
++        self.settings = state.get("settings")
++        self.current = None
++        self.permit = None
++        self.route = None
++        self.transport = None
++        self._fault = None
++
++    def require_startup(self):
++        if self.blocked or self._fault:
++            raise custody.CustodyRefused(
++                "Unresolved Smart Bin custody blocks startup motion"
++            )
++        if self.active:
++            with custody.read_only() as conn:
++                if custody.has_blocker(conn, self.machine_id):
++                    raise custody.CustodyRefused("Durable claims block startup motion")
++
++    def check_motion(self, kind, role, scope):
++        # C1/C2 do not query Smart Bin state. C3 admission is separate from release.
++        if role in ("c_channel_1_rotor", "c_channel_2_rotor"):
++            return
++        if not self.active:
++            self.require_startup()
++            return
++        if self._fault or self.blocked:
++            raise custody.CustodyRefused("Smart Bin custody requires reconciliation")
++        if scope and scope.get("adapter") is self and scope.get("kind") == "dispatch":
++            if kind == "finite" and role in (
++                "carousel",
++                "classification_channel_rotor",
++                "c_channel_4_rotor",
++            ):
++                if scope.get("remaining") != 1:
++                    raise custody.CustodyRefused("One-shot dispatch already consumed")
++                scope["remaining"] = 0
++                return
++            if kind == "enable":
++                return
++            raise custody.CustodyRefused(
++                "Dispatch permit does not authorize another motion"
++            )
++        with custody.read_only() as conn:
++            except_id = None
++            if (
++                scope
++                and scope.get("adapter") is self
++                and scope.get("kind") == "route"
++                and self.current
++            ):
++                row = custody._current(conn, self.current)
++                if (
++                    row["status"] != "RESERVED"
++                    or row["reservation_state"] != "RESERVED"
++                ):
++                    raise custody.CustodyRefused(
++                        "Intended route is frozen after release intent"
++                    )
++                except_id = self.current.reservation_id
++            if custody.has_blocker(conn, self.machine_id, except_id):
++                raise custody.CustodyRefused(
++                    "Unresolved Smart Bin claim blocks release, admission and route motion"
++                )
++
++    def admission_allowed(self):
++        try:
++            with custody.motion_entry("admission", "c_channel_3_rotor"):
++                return True
++        except custody.CustodyRefused:
++            return False
++
++    def reserve_route(self, piece, category, profile, layout, chute, transport):
++        """RB02 alone selects destination. All kinematic reads precede DB writes."""
++        with custody.MOTION_LOCK:
++            if self.blocked or self._fault:
++                raise custody.CustodyRefused("Native custody is blocked")
++            if self.current:
++                if (
++                    self.current.piece_uuid != piece.uuid
++                    or self.current.head_generation != transport.native_head_generation
++                ):
++                    raise custody.CustodyRefused(
++                        "Previous native owner remains unresolved"
++                    )
++                return self.route
++            with custody.read_only() as conn:
++                custody._check(conn)
++                if custody.has_blocker(conn, self.machine_id):
++                    raise custody.CustodyRefused(
++                        "Existing durable custody blocks reservation"
++                    )
++                settings = conn.execute(
++                    "SELECT * FROM smart_bin_native_settings WHERE machine_id=?",
++                    (self.machine_id,),
++                ).fetchone()
++                policy = conn.execute(
++                    "SELECT * FROM smart_bin_policy_revisions WHERE machine_id=? AND id=?",
++                    (self.machine_id, settings["policy_id"]),
++                ).fetchone()
++                groups = conn.execute(
++                    "SELECT id FROM smart_bin_group_keys WHERE kind='category' AND namespace=? AND part_id=? AND provenance='known'",
++                    (settings["namespace"], category),
++                ).fetchall()
++                sessions = conn.execute(
++                    "SELECT id FROM sorting_sessions WHERE machine_id=? AND status='active'",
++                    (self.machine_id,),
++                ).fetchall()
++                machine_rev = conn.execute(
++                    "SELECT state_revision FROM smart_bin_machines WHERE machine_id=?",
++                    (self.machine_id,),
++                ).fetchone()[0]
++                slots = [
++                    dict(r)
++                    for r in conn.execute(
++                        "SELECT s.*,c.id AS cycle_id,c.provenance FROM smart_bin_slots s JOIN smart_bin_cycles c ON c.slot_id=s.id AND c.machine_id=s.machine_id WHERE s.machine_id=? AND c.closed_at IS NULL",
++                        (self.machine_id,),
++                    )
++                ]
++                config_digest = service.configuration_digest_on_connection(conn)
++            if (
++                policy is None
++                or policy["compiled_artifact_hash"] != profile.artifact_hash
++                or len(groups) != 1
++                or len(sessions) != 1
++            ):
++                raise custody.CustodyRefused(
++                    "Native policy, category or active session is not uniquely qualified"
++                )
++            from subsystems.distribution.chute import BinAddress
++
++            qualified = []
++            for slot in slots:
++                li, si, bi = (
++                    slot[k] for k in ("layer_index", "section_index", "bin_index")
++                )
++                try:
++                    layer = layout.layers[li]
++                    section = layer.sections[si]
++                    bin_ = section.bins[bi]
++                except (IndexError, AttributeError):
++                    raise custody.CustodyRefused(
++                        "Native layout disagrees with qualified slots"
++                    ) from None
++                qualified.append(
++                    service.SlotQualification(
++                        slot["id"],
++                        slot["cycle_id"],
++                        slot["layout_revision"],
++                        bool(layer.enabled and section.enabled),
++                        bool(chute.isBinReachable(BinAddress(li, si, bi))),
++                        bool(bin_.not_in_inventory),
++                        layer.max_pieces_per_bin,
++                        layer.max_dimension_mm,
++                        "native-cycle:" + slot["cycle_id"],
++                    )
++                )
++            qualification = service.RoutingQualification(
++                self.machine_id,
++                settings["policy_id"],
++                profile.artifact_hash,
++                settings["routing_revision"],
++                machine_rev,
++                config_digest,
++                "native:" + self.incarnation,
++                False,
++                tuple(qualified),
++            )
++            request = service.ReservationRequest(
++                piece.uuid,
++                f"{self.incarnation}:{transport.native_head_generation}",
++                sessions[0][0],
++                groups[0][0],
++                not_in_inventory=piece.not_in_inventory is True,
++                max_dimension_mm=piece.max_dimension_mm,
++                too_big=piece.too_big,
++            )
++            result = service.reserve(
++                request,
++                qualification,
++                expected_state_revision=machine_rev,
++                expected_qualification_hash=service.qualification_digest(qualification),
++                request_key="native-reserve:" + request.route_attempt,
++            )
++            if result["code"] != "OK":
++                raise custody.CustodyRefused(
++                    "Native reservation refused: " + result["code"]
++                )
++            identity = custody.NativeIdentity(
++                self.machine_id,
++                piece.uuid,
++                result["reservation_id"],
++                self.incarnation,
++                transport.native_head_generation,
++                settings["routing_revision"],
++                "",
++            )
++            try:
++                custody.bind_reservation(identity, config_digest)
++            except Exception:
++                self._fault = "Reservation committed but native custody binding failed"
++                raise
++            self.current = identity
++            self.transport = transport
++            selected = next((s for s in slots if s["id"] == result["slot_id"]), None)
++            self.route = {
++                "reservation_id": identity.reservation_id,
++                "kind": result["destination_kind"],
++                "address": BinAddress(
++                    selected["layer_index"],
++                    selected["section_index"],
++                    selected["bin_index"],
++                )
++                if selected
++                else None,
++                "config_digest": config_digest,
++            }
++            return self.route
++
++    @contextmanager
++    def route_scope(self):
++        with custody.owned_scope({"adapter": self, "kind": "route"}):
++            yield
++
++    def arm_ready(self, positioned_uuid, evidence):
++        with custody.MOTION_LOCK:
++            if self.blocked or self._fault:
++                raise custody.CustodyRefused("Native custody is blocked")
++            if not self.current or not self.transport:
++                raise custody.CustodyRefused("No reserved native head")
++            self._verify_head(positioned_uuid)
++            if self.permit is not None:
++                raise custody.CustodyRefused("READY cannot create another permit")
++            identity = replace(self.current, attempt_id=str(uuid.uuid4()))
++            digest = service.configuration_digest()
++            custody.arm(identity, digest, evidence)
++            self.current = identity
++            self.permit = identity
++
++    def _verify_head(self, positioned_uuid):
++        piece = self.transport.getPieceForDistributionPositioning()
++        if (
++            piece is None
++            or piece.uuid != positioned_uuid
++            or positioned_uuid != self.current.piece_uuid
++            or self.transport.native_head_generation != self.current.head_generation
++        ):
++            raise custody.CustodyRefused("Native head changed before dispatch")
++
++    @contextmanager
++    def dispatch(self, piece_uuid):
++        with custody.MOTION_LOCK:
++            if self.blocked or self._fault:
++                raise custody.CustodyRefused("Native custody is blocked")
++            if self.permit is None or self.current != self.permit:
++                raise custody.CustodyRefused("No live one-shot dispatch permit")
++            self._verify_head(piece_uuid)
++            permit = self.permit
++            self.permit = None  # failures never make permission replayable
++            try:
++                custody.consume(permit, service.configuration_digest())
++            except Exception:
++                self._fault = "Dispatch persistence failed"
++                raise
++            with custody.owned_scope(
++                {"adapter": self, "kind": "dispatch", "remaining": 1}
++            ):
++                yield permit
++
++    def command_outcome(self, receipt):
++        outcome = receipt.outcome
++        kind = {"ACCEPTED": "MOTOR_ACCEPTED", "REJECTED": "MOTOR_REJECTED"}.get(
++            outcome, "MOTOR_AMBIGUOUS"
++        )
++        try:
++            custody.observe(
++                self.current,
++                kind,
++                {
++                    "command_generation": receipt.generation,
++                    "requested_steps": receipt.requested_steps,
++                    "encoder_present": False,
++                    "proves_piece_displacement": False,
++                },
++                uncertain=kind == "MOTOR_AMBIGUOUS",
++            )
++            if kind == "MOTOR_AMBIGUOUS":
++                self.blocked = True
++        except Exception:
++            self._fault = (
++                "Command outcome persistence failed; release remains unresolved"
++            )
++            raise
++
++    def observation(self, kind, details=None, *, uncertain=False):
++        if not self.active or self.current is None:
++            return
++        try:
++            custody.observe(self.current, kind, details or {}, uncertain=uncertain)
++            if uncertain:
++                self.blocked = True
++        except Exception:
++            self._fault = "Native observation persistence failed"
++            raise
++
++    def observed_clear(self):
++        if self.active:
++            custody.machine_observation(
++                self.machine_id,
++                self.incarnation,
++                "CHANNEL_CLEAR_OBSERVED",
++                {
++                    "exact_piece_identity": None,
++                    "quantity": None,
++                    "actual_destination": None,
++                    "receiving_evidence": False,
++                },
++            )
++
++    def refuse_unqualified_motion(self, kind, details):
++        """Unknown quantity is a durable hold, never an invented one-piece claim."""
++        if not self.active:
++            return
++        if self.blocked or self._fault:
++            raise custody.CustodyRefused(
++                "Existing custody hold requires reconciliation"
++            )
++        try:
++            custody.hold(self.machine_id, kind, details)
++            if self.current:
++                self.observation(
++                    kind if kind in custody.EVIDENCE_TYPES else "ROUTE_UNCERTAIN",
++                    details,
++                    uncertain=True,
++                )
++        finally:
++            self.blocked = True
++        raise custody.CustodyRefused(
++            "Unknown/resident custody requires explicit reconciliation"
++        )
++
++
++def attach(gc):
++    adapter = getattr(gc, "smart_bins_native_adapter", None)
++    if adapter is None:
++        adapter = NativeCustodyAdapter(gc.machine_id)
++        gc.smart_bins_native_adapter = adapter
++    custody.install(adapter if adapter.active or adapter.blocked else None)
++    return adapter
+diff --git a/software/sorter/backend/subsystems/classification_channel/two_piece/base.py b/software/sorter/backend/subsystems/classification_channel/two_piece/base.py
+index 6194c6cf7daef1e54bc660f276d06c03c459db56..3f6c678dc7ee2a870649456b5335960f118dac5c 100644
+--- a/software/sorter/backend/subsystems/classification_channel/two_piece/base.py
++++ b/software/sorter/backend/subsystems/classification_channel/two_piece/base.py
+@@ -122,6 +122,26 @@ class Rev01BaseState(BaseState):
+         return ok
+ 
+     def startOutputMove(self, output_degrees: float, speed_usteps_per_s: int) -> bool:
++        adapter = getattr(self.shared,"native_custody",None)
++        if adapter is not None:
++            target = getattr(self,"_eject_target",None)
++            obj = getattr(target,"known_object",None)
++            try:
++                if obj is None:
++                    adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"entry":"staging","quantity":None})
++                stepper = self.irl.carousel_stepper
++                platter = C4FiveSectorPlatter.from_irl_config(self.irl_config)
++                steps = platter.output_degrees_to_motor_microsteps(output_degrees)
++                with adapter.dispatch(obj.uuid):
++                    stepper.set_speed_limits(16,max(16,speed_usteps_per_s))
++                    receipt = stepper.move_steps_receipt(int(steps))
++                    adapter.command_outcome(receipt)
++                self._native_release_observed_after = time.time()
++                return receipt.outcome == "ACCEPTED"
++            except Exception as exc:
++                self.setClassificationReady(False,"native_custody_refused")
++                self.logger.warning(f"Native C4 movement refused: {exc}")
++                return False
+         stepper = getattr(self.irl, "carousel_stepper", None)
+         if stepper is None:
+             self.logger.error(f"{LOG_TAG} carousel_stepper missing — cannot move")
+diff --git a/software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py b/software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py
+index da90c0b98267cbe5147e9be83cc1a6a4829bf8f1..24f2f4d1a50204bcbeb2c5ec5e537c07f586369a 100644
+--- a/software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py
++++ b/software/sorter/backend/subsystems/classification_channel/two_piece/channel_clear.py
+@@ -51,7 +51,13 @@ def channelOccupied(gc: Any) -> Optional[bool]:
+     perception_service = getattr(gc, "perception_service", None)
+     if perception_service is not None:
+         try:
+-            return int(perception_service.read_state(4).n_pieces) > 0
++            state = perception_service.read_state(4)
++            adapter = getattr(gc,"smart_bins_native_adapter",None)
++            if adapter is not None and adapter.active:
++                ts = getattr(state,"ts",None)
++                if not isinstance(ts,(int,float)) or not 0 <= time.time()-ts <= 0.5:
++                    return None
++            return int(state.n_pieces) > 0
+         except Exception:
+             pass
+     return None
+@@ -132,7 +138,21 @@ def clearChannelByAdvancing(
+     label: str = LOG_TAG,
+ ) -> ChannelClearResult:
+     occupied = channelOccupied(gc)
++    adapter = getattr(gc,"smart_bins_native_adapter",None)
++    if adapter is not None and (adapter.active or adapter.blocked):
++        try:
++            adapter.require_startup()
++            if occupied is not False:
++                adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL",{"entry":"channel_clear","quantity":None})
++        except Exception as exc:
++            return ChannelClearResult(False,bool(occupied),0.0,f"native_custody_refused: {exc}")
+     if occupied is False:
++        if adapter is not None and adapter.active:
++            try:
++                adapter.observed_clear()
++            except Exception as exc:
++                adapter._fault = str(exc)
++                return ChannelClearResult(False,False,0.0,"native_clear_evidence_failed")
+         gc.logger.info(f"{label} channel clear: already empty, nothing to advance")
+         return ChannelClearResult(True, False, 0.0, "already_clear")
+ 
+diff --git a/software/sorter/backend/subsystems/classification_channel/two_piece/flow.py b/software/sorter/backend/subsystems/classification_channel/two_piece/flow.py
+index 53a459390e79d0be74b3fa87c688a930c6b6f3b5..935958bede2bdce7c8ab9dbf6e3131212dc32210 100644
+--- a/software/sorter/backend/subsystems/classification_channel/two_piece/flow.py
++++ b/software/sorter/backend/subsystems/classification_channel/two_piece/flow.py
+@@ -244,6 +244,14 @@ class TwoPieceClassificationChannel(Rev01BaseState):
+         rotation already performed), but its bin is cleared so the record says
+         where it actually went. The rest have their in-flight objects abandoned,
+         and anything still in distribution's slot is withdrawn."""
++        adapter = getattr(self.shared,"native_custody",None)
++        if adapter is not None:
++            try:
++                adapter.refuse_unqualified_motion("STALL_PRE_CLEAR_PROMOTION", {
++                    "known_piece_uuids":[tp.known_object.uuid for tp in self._pieces.values() if tp.known_object],
++                    "quantity":None,"entry":"stall_auto_clear"})
++            except Exception as exc:
++                return ChannelClearResult(False,True,0.0,f"native_custody_refused: {exc}")
+         placed = self._pendingPlacedPiece()
+         if placed is not None and self._headReady(placed):
+             obj = placed.known_object
+@@ -647,6 +655,23 @@ class TwoPieceClassificationChannel(Rev01BaseState):
+         gone_for = now - target.last_seen
+         timed_out = (now - self._phase_started_at) > _EJECT_TIMEOUT_S
+         if gone_for >= _EJECT_GONE_CONFIRM_S or timed_out:
++            adapter = getattr(self.shared,"native_custody",None)
++            if adapter is not None:
++                after = getattr(self,"_native_release_observed_after",None)
++                frame_ts = getattr(state,"ts",None)
++                # Capture timestamps are wall-clock. A stale/never-written frame
++                # cannot turn track absence into owned exit evidence.
++                fresh = (isinstance(frame_ts,(int,float)) and after is not None
++                         and after < frame_ts <= time.time() and time.time()-frame_ts <= 0.5)
++                absent = all(getattr(po,"sv_bt_track_id",None) != target.track_id for po in getattr(state,"pieces",()))
++                kind = "EJECT_TIMEOUT_VISIBLE" if timed_out and not absent else (
++                    "INFERRED_EXIT" if fresh and absent else "TRACK_LOST_REIDENTIFIED")
++                try:
++                    adapter.observation(kind,{"track_id":target.track_id,"frame_ts":frame_ts,
++                        "fresh":fresh,"receiving_evidence":False},uncertain=kind!="INFERRED_EXIT")
++                except Exception as exc:
++                    self.logger.warning(f"Native exit evidence refused: {exc}")
++                    return
+             # Track id gone (debounced) == the piece dropped off the fall-off ==
+             # ejected. Commit it to distribution; the chute was already aimed.
+             self.transport.advanceTransport()
+diff --git a/software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py b/software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py
+index d87ccf7d8f86e3578204446cfdbad530cf7c093f..7327c39139fb4dda9d8458e267f8b02974c789a1 100644
+--- a/software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py
++++ b/software/sorter/backend/subsystems/classification_channel/two_piece/spoke_home.py
+@@ -442,14 +442,14 @@ def clearPiecesFromChannel(
+     gc: Any,
+     irl: Any,
+     irl_config: Any,
+-) -> None:
++):
+     # Closed-loop pre-home purge: advance the carousel forward (same travel
+     # direction as the normal classification flow) until the channel reads clear,
+     # using the shared routine the C4 stuck-incident auto-resolve also uses so
+     # both agree on direction and on when the channel is actually empty.
+     from .channel_clear import clearChannelByAdvancing
+ 
+-    clearChannelByAdvancing(
++    return clearChannelByAdvancing(
+         gc, irl, irl_config, label="C4 rev01 spoke home pre-purge"
+     )
+ 
+@@ -460,7 +460,10 @@ def maybeRunSpokeHome(
+     irl_config: Any,
+     vision: Any,
+ ) -> bool:
+-    clearPiecesFromChannel(gc, irl, irl_config)
++    clear_result = clearPiecesFromChannel(gc, irl, irl_config)
++    if clear_result is None or not clear_result.cleared:
++        gc.logger.warning("C4 spoke alignment refused: purge did not establish channel clear")
++        return False
+ 
+     capture = None
+     if hasattr(vision, "getCaptureThreadForRole"):
+diff --git a/software/sorter/backend/subsystems/distribution/flap_path.py b/software/sorter/backend/subsystems/distribution/flap_path.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..000350a9795ac6b998a6c6c48ef5d083fc211560
+--- /dev/null
++++ b/software/sorter/backend/subsystems/distribution/flap_path.py
+@@ -0,0 +1,49 @@
++"""Full route qualification from fresh driver evidence; never receiving proof."""
++
++from __future__ import annotations
++
++from smart_bins_native_custody import CustodyRefused
++
++
++def qualify(
++    servos, *, layer_count: int, target_layer: int | None, commands: dict
++) -> dict:
++    if layer_count <= 0 or len(servos) < layer_count:
++        raise CustodyRefused("Required route flap is missing")
++    if target_layer is not None and not 0 <= target_layer < layer_count:
++        raise CustodyRefused("Invalid intended route layer")
++    observations = []
++    for index in range(layer_count):
++        servo = servos[index]
++        if not getattr(servo, "available", False) or not getattr(
++            servo, "is_calibrated", False
++        ):
++            raise CustodyRefused(f"Layer {index} flap unavailable or uncalibrated")
++        if commands.get(index) is not True:
++            raise CustodyRefused(f"Layer {index} flap command not acknowledged")
++        evidence = servo.feedback()
++        expected = "is_closed" if index == target_layer else "is_open"
++        if (
++            evidence.get("command_outcome") != "ACCEPTED"
++            or evidence.get("motion_state_valid") is not True
++            or evidence.get("stopped") is not True
++            or evidence.get("position_valid") is not True
++            or evidence.get(expected) is not True
++            or evidence.get("pending_target") is not None
++        ):
++            raise CustodyRefused(f"Layer {index} flap route is unconfirmed")
++        observations.append(
++            {
++                "layer": index,
++                "expected": expected,
++                "position": evidence["position"],
++                "motion_observed_at": evidence["motion_observed_at"],
++                "position_observed_at": evidence["position_observed_at"],
++                "command_outcome": "ACCEPTED",
++            }
++        )
++    return {
++        "target_layer": target_layer,
++        "flaps": observations,
++        "receiving_evidence": False,
++    }
+diff --git a/software/sorter/backend/subsystems/distribution/positioning.py b/software/sorter/backend/subsystems/distribution/positioning.py
+index b55a3f62c8a50ac13c7f0a5fbd21602f893346ca..d33fa77368c173d1f3127011a0240dc8e3734d87 100644
+--- a/software/sorter/backend/subsystems/distribution/positioning.py
++++ b/software/sorter/backend/subsystems/distribution/positioning.py
+@@ -98,6 +98,7 @@ class Positioning(BaseState):
+         self._jam_ignored_logged: bool = False
+         self._servo_bus_pause_enqueued: bool = False
+         self._chute_move_estimated_ms: int = 0
++        self._native_flaps_released = False
+ 
+     def _setOccupancyState(self, state_name: str) -> None:
+         if self._occupancy_state == state_name:
+@@ -111,6 +112,11 @@ class Positioning(BaseState):
+         )
+ 
+     def step(self) -> Optional[DistributionState]:
++        adapter = getattr(self.shared, "native_custody", None)
++        if adapter is not None:
++            from smart_bins_native_custody import MOTION_LOCK
++            with MOTION_LOCK:
++                return self._nativeCustodyStep(adapter)
+         now = time.monotonic()
+ 
+         if self._phase == "init":
+@@ -392,6 +398,90 @@ class Positioning(BaseState):
+ 
+         return None
+ 
++    def _nativeCustodyStep(self, adapter) -> Optional[DistributionState]:
++        from smart_bins_native_custody import CustodyRefused
++        from .flap_path import qualify
++        if adapter.blocked or adapter._fault:
++            self.shared.set_distribution_gate(False,reason="native_custody_held")
++            if not self._native_flaps_released:
++                released = True
++                for servo in self.irl.servos:
++                    try:
++                        servo.stop()
++                    except Exception as exc:
++                        released = False
++                        self.logger.warning(f"Native custody flap release failed: {exc}")
++                self._native_flaps_released = released
++            return None
++        try:
++            if self._phase == "init":
++                piece = self.shared.transport.getPieceForDistributionPositioning()
++                if piece is None:
++                    return DistributionState.IDLE
++                # A manual command issued before reservation may still be in
++                # flight. Serialize inspection with reservation and require the
++                # native C4/C3 actors stopped before accepting physical custody.
++                for role in ("carousel_stepper", "c_channel_3_rotor_stepper"):
++                    motor = getattr(self.irl,role,None)
++                    if motor is None or getattr(motor,"software_disabled",False) or motor.stopped is not True:
++                        raise CustodyRefused(f"{role} has not established stopped state")
++                if getattr(self.shared, "bucket_passthrough_hold", False):
++                    adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"reason":"multi-drop bucket hold","quantity":None})
++                category = self.sorting_profile.getCategoryIdForPart(piece.part_id,piece.color_id) if piece.part_id else MISC_CATEGORY
++                override = self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
++                if override is not None:
++                    category = override
++                if piece.too_big or getattr(self.shared,"sample_collection_mode",False):
++                    category = MISC_CATEGORY
++                route = adapter.reserve_route(piece,category,self.sorting_profile,self.layout,self.chute,self.shared.transport)
++                self.shared.distribution_positioned_uuid = piece.uuid
++                self._piece = piece
++                self._target_address = route['address']
++                self.shared.native_route_layer = route['address'].layer_index if route['address'] else None
++                self.shared.native_flap_commands = {}
++                with adapter.route_scope():
++                    if route['address'] is None:
++                        self._openAllDoorsForPassthrough()
++                    else:
++                        self._selectDoor(route['address'].layer_index)
++                        self._startChuteMove()
++                if any(self.shared.native_flap_commands.get(i) is not True for i in range(len(self.layout.layers))):
++                    adapter.observation("ROUTE_UNCERTAIN",{"reason":"flap command unavailable or unconfirmed"},uncertain=True)
++                    raise CustodyRefused("Route flap command unconfirmed")
++                self._phase = "native_wait"
++                piece.stage = PieceStage.distributing
++                piece.distributing_at = time.time()
++                piece.distribution_target_selected_at = piece.distributing_at
++                piece.category_id = category
++                # Preserve native intended routing metadata; never create actual Smart Bin destination.
++                piece.destination_bin = ((route['address'].layer_index,route['address'].section_index,route['address'].bin_index) if route['address'] else None)
++                piece.updated_at = time.time()
++                self.event_queue.put(knownObjectToEvent(piece))
++                return None
++            if self._phase == "native_wait":
++                if self._target_address is not None:
++                    if self.gc.disable_chute or not self.chute.homed or not self.chute.stepper.stopped:
++                        return None
++                    receipt = self.chute.stepper.last_finite_receipt
++                    if receipt is None or receipt.outcome not in ('ACCEPTED','NOT_DISPATCHED'):
++                        raise CustodyRefused("Chute command unconfirmed")
++                    expected = self.chute.getAngleForBin(self._target_address)
++                    if expected is None or abs(self.chute.current_angle-expected) > 0.1:
++                        raise CustodyRefused("Chute controller position disagrees with intended route")
++                qualify(self.irl.servos,layer_count=len(self.layout.layers),target_layer=self.shared.native_route_layer,commands=self.shared.native_flap_commands)
++                self.shared.set_chute_motion(False,target_bin=self._target_address)
++                self._piece.distribution_positioned_at = time.time()
++                return DistributionState.READY
++        except CustodyRefused as exc:
++            self.shared.set_distribution_gate(False,reason="native_custody_refused")
++            self._setOccupancyState("positioning.native_custody_refused")
++            self.logger.warning(f"Native custody: {exc}")
++        except Exception as exc:
++            adapter._fault = str(exc)
++            self.shared.set_distribution_gate(False,reason="native_custody_error")
++            self.logger.error(f"Native custody route failed: {exc}")
++        return None
++
+     def _startChuteMove(self) -> None:
+         assert self._target_address is not None
+         self.shared.set_chute_motion(True, target_bin=self._target_address)
+@@ -780,7 +870,9 @@ class Positioning(BaseState):
+             try:
+                 if hasattr(servo, "apply_open_speed"):
+                     servo.apply_open_speed()
+-                servo.open()
++                accepted = servo.open()
++                if getattr(self.shared, "native_custody", None) is not None:
++                    self.shared.native_flap_commands[i] = accepted is True
+             except Exception as exc:
+                 self._markLayerUnavailable(
+                     i,
+@@ -810,7 +902,9 @@ class Positioning(BaseState):
+             try:
+                 if hasattr(servo, "apply_open_speed"):
+                     servo.apply_open_speed()
+-                servo.open()
++                accepted = servo.open()
++                if getattr(self.shared, "native_custody", None) is not None:
++                    self.shared.native_flap_commands[i] = accepted is True
+                 opened_layers.append(i)
+             except Exception as exc:
+                 self._markLayerUnavailable(
+@@ -821,7 +915,9 @@ class Positioning(BaseState):
+         try:
+             if hasattr(target_servo, "apply_close_speed"):
+                 target_servo.apply_close_speed()
+-            target_servo.close()
++            accepted = target_servo.close()
++            if getattr(self.shared, "native_custody", None) is not None:
++                self.shared.native_flap_commands[target_layer_index] = accepted is True
+         except Exception as exc:
+             self._markLayerUnavailable(
+                 target_layer_index,
+diff --git a/software/sorter/backend/subsystems/distribution/ready.py b/software/sorter/backend/subsystems/distribution/ready.py
+index 92b59acd0808b0c6c72f0e804eba9a5f3c25fa7b..ce1620492c3485a89ee6b555f6fd4433469e2193 100644
+--- a/software/sorter/backend/subsystems/distribution/ready.py
++++ b/software/sorter/backend/subsystems/distribution/ready.py
+@@ -18,6 +18,17 @@ class Ready(BaseState):
+     def step(self) -> Optional[DistributionState]:
+         transport = self.shared.transport
+         if not self.signaled:
++            adapter = getattr(self.shared,"native_custody",None)
++            if adapter is not None:
++                from .flap_path import qualify
++                try:
++                    evidence = qualify(self.irl.servos,layer_count=len(self.irl.distribution_layout.layers),
++                        target_layer=self.shared.native_route_layer,commands=self.shared.native_flap_commands)
++                    adapter.arm_ready(self.shared.distribution_positioned_uuid,evidence)
++                except Exception as exc:
++                    self.shared.set_distribution_gate(False,reason="native_release_intent_refused")
++                    self.logger.warning(f"Native READY refused: {exc}")
++                    return None
+             self.logger.info("Ready: distribution positioned, signaling ready")
+             self.shared.set_distribution_gate(True, reason="ready_chute_aimed")
+             self.signaled = True
+diff --git a/software/sorter/backend/subsystems/feeder/pulse_perception/flow.py b/software/sorter/backend/subsystems/feeder/pulse_perception/flow.py
+index 5ed037298ab15c0a4481cb1b289a6a91817dd239..02d3a6258e51e360c978d1531861d9bbcdaa3414 100644
+--- a/software/sorter/backend/subsystems/feeder/pulse_perception/flow.py
++++ b/software/sorter/backend/subsystems/feeder/pulse_perception/flow.py
+@@ -128,6 +128,9 @@ class PulsePerceptionFeeding(BaseState):
+     ) -> bool:
+         if self._busy(stepper):
+             return False
++        adapter = getattr(self.shared,"native_custody",None)
++        if channel == 3 and adapter is not None and not adapter.admission_allowed():
++            return False
+         speed = channelMoveSpeed(cfg, channel)
+         output_deg = abs(output_deg)
+         if enforce_min:
+diff --git a/software/sorter/backend/subsystems/shared_variables.py b/software/sorter/backend/subsystems/shared_variables.py
+index 3aba9b91b4e95be13b88721b4dd2a7e839f5f7cf..9c2ae47875e11461e6dc0f6a17a741ba1c27ed64 100644
+--- a/software/sorter/backend/subsystems/shared_variables.py
++++ b/software/sorter/backend/subsystems/shared_variables.py
+@@ -24,6 +24,9 @@ class SharedVariables:
+         gc: "GlobalConfig" | None = None,
+         bus: "TickBus" | None = None,
+     ):
++        self.native_custody = None
++        self.native_flap_commands = {}
++        self.native_route_layer = None
+         self._gc = gc
+         self._bus = bus
+         self._classification_ready: bool = False
+@@ -114,6 +117,10 @@ class SharedVariables:
+         reason: str | None = None,
+     ) -> None:
+         next_value = bool(open)
++        adapter = self.native_custody
++        if next_value and adapter is not None and (adapter.permit is None or adapter._fault or adapter.blocked):
++            next_value = False
++            reason = "native_custody_not_armed"
+         if self._distribution_ready == next_value and not self._bus_enabled():
+             return
+         prev = self._distribution_ready
+diff --git a/software/sorter/backend/tests/test_native_motion_truth.py b/software/sorter/backend/tests/test_native_motion_truth.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a5bb2d432eb941333ae740857583396904995d1
+--- /dev/null
++++ b/software/sorter/backend/tests/test_native_motion_truth.py
+@@ -0,0 +1,195 @@
++"""PCA command truth, finite receipts, and cross-backend flap paths."""
++
++from types import SimpleNamespace
++from unittest.mock import Mock
++import struct
++
++import pytest
++
++from hardware.sorter_interface import (
++    ServoMotor,
++    StepperMotor,
++    InterfaceCommandCode as C,
++)
++from hardware.waveshare_servo import WaveshareServoMotor
++from subsystems.distribution.flap_path import qualify
++from smart_bins_native_custody import CustodyRefused, install
++
++
++@pytest.fixture(autouse=True)
++def reset_fence():
++    install(None)
++    yield
++    install(None)
++
++
++class Device:
++    def __init__(self):
++        self.outcome = b"\x01"
++        self.moves = []
++        self.moving = False
++        self.position = 900
++        self.error = None
++
++    def send_command(self, command, channel, payload):
++        if command in (
++            C.SERVO_MOVE_TO,
++            C.SERVO_MOVE_TO_AND_RELEASE,
++            C.STEPPER_MOVE_STEPS,
++        ):
++            self.moves.append((command, channel, payload))
++            if self.error:
++                raise self.error
++            return SimpleNamespace(payload=self.outcome)
++        if command == C.SERVO_IS_STOPPED:
++            return SimpleNamespace(payload=bytes([not self.moving]))
++        if command == C.SERVO_GET_POSITION:
++            return SimpleNamespace(payload=struct.pack("<H", self.position))
++        return SimpleNamespace(payload=b"\x01")
++
++
++def pca():
++    dev = Device()
++    servo = ServoMotor(dev, 0, SimpleNamespace(logger=Mock()))
++    servo.set_preset_angles(90, 0)
++    return servo, dev
++
++
++def test_rejection_does_not_become_confirmed_target():
++    servo, dev = pca()
++    dev.outcome = b"\x00"
++    assert servo.open() is False
++    assert servo._current_angle is None
++    assert not servo.isOpen()
++    assert servo.feedback()["command_outcome"] == "REJECTED"
++    assert not servo.isOpen()
++
++
++def test_receipt_takes_ownership_before_finite_lock():
++    from smart_bins_native_custody import MOTION_LOCK
++
++    motor = StepperMotor(Device(), 0, SimpleNamespace(logger=Mock()))
++
++    # Nested move_steps also uses the local lock, so provide a reusable context.
++    class Lock:
++        def __enter__(self):
++            assert MOTION_LOCK._is_owned()
++
++        def __exit__(self, *args):
++            pass
++
++    motor._finite_lock = Lock()
++    assert motor.move_steps_receipt(100).outcome == "ACCEPTED"
++
++
++def test_pca_accepted_pending_then_controller_confirmation():
++    servo, dev = pca()
++    assert servo.open()
++    assert servo._current_angle is None and not servo.isOpen()
++    dev.moving = True
++    assert not servo.stopped and not servo.isOpen()
++    dev.moving = False
++    assert servo.stopped and servo.isOpen()
++    assert not servo.isClosed()
++
++
++def test_pca_ambiguity_invalidates_prior_confirmation():
++    servo, dev = pca()
++    servo.open()
++    assert servo.stopped and servo.isOpen()
++    dev.error = OSError("unknown write outcome")
++    with pytest.raises(OSError):
++        servo.close()
++    assert servo._current_angle is None
++    assert not servo.isOpen() and not servo.isClosed()
++    assert servo._command_outcome == "AMBIGUOUS"
++
++
++@pytest.mark.parametrize(
++    "payload,outcome",
++    [
++        (b"\x01", "ACCEPTED"),
++        (b"\x00", "REJECTED"),
++        (b"", "AMBIGUOUS"),
++        (b"\x02", "AMBIGUOUS"),
++    ],
++)
++def test_stepper_receipt_generation_and_bool_compatibility(payload, outcome):
++    dev = Device()
++    stepper = StepperMotor(dev, 0, SimpleNamespace(logger=Mock()))
++    dev.outcome = payload
++    first = stepper.move_steps_receipt(100)
++    second = stepper.move_steps_receipt(200)
++    assert second.generation == first.generation + 1
++    assert first.outcome == outcome and second.outcome == outcome
++    assert first.encoder_present is False and first.proves_piece_displacement is False
++    assert len(dev.moves) == 2
++    if outcome != "AMBIGUOUS":
++        assert stepper.move_steps(10) is (outcome == "ACCEPTED")
++
++
++def test_stepper_io_exception_is_one_attempt():
++    dev = Device()
++    dev.error = OSError("ambiguous")
++    stepper = StepperMotor(dev, 0, SimpleNamespace(logger=Mock()))
++    assert stepper.move_steps_receipt(100).outcome == "AMBIGUOUS"
++    assert len(dev.moves) == 1
++
++
++def test_full_path_both_backends():
++    servo, dev = pca()
++    servo.close()
++    dev.position = 0
++    bus = Mock()
++    bus.read_angle_limits.return_value = (100, 900)
++    bus.read_position.return_value = 100
++    bus.is_moving.return_value = False
++    bus.move_to.return_value = True
++    bus.set_torque.return_value = True
++    wave = WaveshareServoMotor(bus, 2)
++    wave.initialize()
++    wave.open()
++    result = qualify(
++        [servo, wave], layer_count=2, target_layer=0, commands={0: True, 1: True}
++    )
++    assert len(result["flaps"]) == 2 and result["receiving_evidence"] is False
++
++
++@pytest.mark.parametrize(
++    "failure",
++    [
++        "missing",
++        "offline",
++        "uncalibrated",
++        "rejected",
++        "ambiguous",
++        "moving",
++        "wrong_position",
++        "feedback",
++    ],
++)
++def test_full_path_fails_closed(failure):
++    servo, dev = pca()
++    servo.open()
++    commands = {0: True}
++    if failure == "missing":
++        servos = []
++    else:
++        servos = [servo]
++    if failure == "offline":
++        servo = Mock(available=False)
++        servos = [servo]
++    if failure == "uncalibrated":
++        servo.set_preset_angles(None, None)
++    if failure == "rejected":
++        commands[0] = False
++    if failure == "ambiguous":
++        servo._command_outcome = "AMBIGUOUS"
++    if failure == "moving":
++        dev.moving = True
++    if failure == "wrong_position":
++        dev.position = 500
++    if failure == "feedback":
++        servo.feedback = lambda: {"position_valid": False}
++    with pytest.raises(CustodyRefused):
++        qualify(servos, layer_count=1, target_layer=None, commands=commands)
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_custody.py b/software/sorter/backend/tests/test_smart_bins_native_custody.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..507e0b1b373618f5e3aff11bb448553ea3b68d37
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_custody.py
+@@ -0,0 +1,290 @@
++"""Explicit native custody persistence; fake identities and isolated SQLite only."""
++
++from dataclasses import replace
++from contextlib import contextmanager
++import sqlite3
++
++import pytest
++
++import smart_bins_native_custody as native
++import smart_bins_service as service
++from subsystems.classification_channel.smart_bins_native_adapter import (
++    NativeCustodyAdapter,
++)
++from test_smart_bins_reservations import (
++    prepared as prepared,
++    claim,
++    request,
++    qualification,
++    connect,
++)
++
++
++@pytest.fixture(autouse=True)
++def reset_fence():
++    native.install(None)
++    yield
++    native.install(None)
++
++
++@pytest.fixture
++def bound(prepared):
++    native.initialize_native_schema("m", "p", "sorter", 0)
++    result = claim(request(custody=False), qualification(), "native-reserve")
++    identity = native.NativeIdentity(
++        "m", "one", result["reservation_id"], "incarnation", 7, 0, "attempt"
++    )
++    digest = service.configuration_digest()
++    native.bind_reservation(identity, digest)
++    return prepared, identity, digest
++
++
++def test_absent_does_not_create_file(tmp_path, monkeypatch):
++    path = tmp_path / "missing.sqlite"
++    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(path))
++    assert native.startup_state("m") == {"active": False, "blocked": False}
++    assert not path.exists()
++
++
++def test_ordinary_initialized_without_smart_schemas(prepared):
++    # RB02 alone is dormant when there are no claims; no native schema appears.
++    assert native.startup_state("m") == {"active": False, "blocked": False}
++    with connect(prepared) as conn:
++        assert not conn.execute(
++            "SELECT 1 FROM sqlite_master WHERE name='smart_bin_native_versions'"
++        ).fetchone()
++
++
++def test_missing_extension_with_held_claim_fails_closed(prepared):
++    claim(request(custody=False), qualification(), "held")
++    adapter = NativeCustodyAdapter("m")
++    with pytest.raises(native.CustodyRefused):
++        adapter.require_startup()
++    assert not adapter.active
++
++
++def test_explicit_initialization_is_idempotent(prepared):
++    assert native.initialize_native_schema("m", "p", "sorter", 0) == 1
++    assert native.initialize_native_schema("m", "p", "sorter", 0) == 1
++    assert native.startup_state("m")["active"]
++    assert not native.startup_state("m")["blocked"]
++
++
++def test_intent_and_consume_are_single_use(bound):
++    path, identity, digest = bound
++    native.arm(identity, digest, {"receiving_evidence": False})
++    with connect(path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "RELEASE_INTENT"
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_release_attempts").fetchone()[
++                0
++            ]
++            == 1
++        )
++    native.consume(identity, digest)
++    with pytest.raises(native.CustodyRefused):
++        native.consume(identity, digest)
++    with pytest.raises(native.CustodyRefused):
++        native.arm(identity, digest, {})
++
++
++@pytest.mark.parametrize(
++    "field,value",
++    [
++        ("piece_uuid", "other"),
++        ("incarnation", "restart"),
++        ("head_generation", 8),
++        ("route_revision", 1),
++        ("attempt_id", "other-attempt"),
++    ],
++)
++def test_stale_permit_refused(bound, field, value):
++    _, identity, digest = bound
++    native.arm(identity, digest, {})
++    with pytest.raises(native.CustodyRefused):
++        native.consume(replace(identity, **{field: value}), digest)
++
++
++def test_restart_does_not_recreate_permit(bound):
++    _, identity, digest = bound
++    native.arm(identity, digest, {})
++    restarted = NativeCustodyAdapter("m")
++    assert restarted.permit is None
++    with pytest.raises(native.CustodyRefused):
++        restarted.require_startup()
++
++
++def test_failed_commit_rolls_back_intent(bound, monkeypatch):
++    path, identity, digest = bound
++    real = native.critical_transaction
++
++    class FailCommit:
++        def __init__(self, conn):
++            self.conn = conn
++
++        def __getattr__(self, key):
++            return getattr(self.conn, key)
++
++        def commit(self):
++            raise sqlite3.OperationalError("injected commit failure")
++
++    @contextmanager
++    def failure():
++        with real() as conn:
++            yield FailCommit(conn)
++
++    monkeypatch.setattr(native, "critical_transaction", failure)
++    with pytest.raises(sqlite3.OperationalError):
++        native.arm(identity, digest, {})
++    with connect(path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "RESERVED"
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_release_attempts").fetchone()[
++                0
++            ]
++            == 0
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_native_evidence").fetchone()[0]
++            == 0
++        )
++
++
++@pytest.mark.parametrize(
++    "outcome,state",
++    [
++        ("ACCEPTED", "RELEASE_INTENT"),
++        ("REJECTED", "RELEASE_INTENT"),
++        ("AMBIGUOUS", "UNCERTAIN"),
++    ],
++)
++def test_outcomes_never_create_receiving_credit(bound, outcome, state):
++    path, identity, digest = bound
++    native.arm(identity, digest, {})
++    native.consume(identity, digest)
++    native.observe(
++        identity,
++        "MOTOR_" + outcome,
++        {"encoder_present": False},
++        uncertain=outcome == "AMBIGUOUS",
++    )
++    with connect(path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == state
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        )
++        assert (
++            conn.execute("SELECT pocket_index FROM smart_bin_reservations").fetchone()[
++                0
++            ]
++            is None
++        )
++    assert native.startup_state("m")["blocked"]
++
++
++def test_inferred_exit_requires_owned_accepted_command(bound):
++    path, identity, digest = bound
++    native.arm(identity, digest, {})
++    with pytest.raises(native.CustodyRefused):
++        native.observe(identity, "INFERRED_EXIT", {})
++    native.consume(identity, digest)
++    native.observe(identity, "MOTOR_ACCEPTED", {})
++    native.observe(identity, "INFERRED_EXIT", {"receiving_evidence": False})
++    with connect(path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "RELEASE_INTENT"
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        )
++
++
++def test_timeout_retains_capacity_and_blocks_all_motion(bound):
++    _, identity, digest = bound
++    native.arm(identity, digest, {})
++    native.consume(identity, digest)
++    native.observe(identity, "MOTOR_ACCEPTED", {})
++    native.observe(identity, "EJECT_TIMEOUT_VISIBLE", {}, uncertain=True)
++    adapter = NativeCustodyAdapter("m")
++    native.install(adapter)
++    for kind in ("finite", "route", "manual", "home", "admission"):
++        with pytest.raises(native.CustodyRefused):
++            with native.motion_entry(kind, "carousel"):
++                pytest.fail("hardware must not be called")
++    with native.motion_entry("finite", "c_channel_1_rotor"):
++        pass
++    with native.motion_entry("finite", "c_channel_2_rotor"):
++        pass
++
++
++def test_no_db_writer_during_owned_hardware_scope(bound):
++    path, identity, digest = bound
++    native.arm(identity, digest, {})
++    native.consume(identity, digest)
++    with native.owned_scope({"kind": "dispatch"}):
++        other = sqlite3.connect(path, timeout=0)
++        try:
++            other.execute("BEGIN IMMEDIATE")
++            other.rollback()
++        finally:
++            other.close()
++
++
++def test_unknown_material_hold_does_not_fabricate_quantity(prepared):
++    native.initialize_native_schema("m", "p", "sorter", 0)
++    adapter = NativeCustodyAdapter("m")
++    with pytest.raises(native.CustodyRefused):
++        adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"quantity": None})
++    with connect(prepared) as conn:
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_reservations").fetchone()[0]
++            == 0
++        )
++        assert (
++            "null"
++            in conn.execute(
++                "SELECT details_json FROM smart_bin_native_holds"
++            ).fetchone()[0]
++        )
++
++
++def test_native_evidence_and_consumed_state_cannot_be_rewritten(bound):
++    path, identity, digest = bound
++    native.arm(identity, digest, {})
++    native.consume(identity, digest)
++    with connect(path) as conn:
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("UPDATE smart_bin_native_evidence SET kind='INFERRED_EXIT'")
++        with pytest.raises(sqlite3.IntegrityError):
++            conn.execute("UPDATE smart_bin_native_claims SET status='RELEASE_INTENT'")
++
++
++def test_partial_native_schema_fails_closed(bound):
++    path, _, _ = bound
++    with connect(path) as conn:
++        conn.execute("DROP TRIGGER smart_bin_native_status_forward")
++    with pytest.raises(native.CustodyRefused):
++        native.startup_state("m")
++
++
++def test_hold_is_not_rewritten_every_motion_tick(prepared):
++    native.initialize_native_schema("m", "p", "sorter", 0)
++    adapter = NativeCustodyAdapter("m")
++    for _ in range(3):
++        with pytest.raises(native.CustodyRefused):
++            adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"quantity": None})
++    with connect(prepared) as conn:
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_native_holds").fetchone()[0]
++            == 1
++        )
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_runtime.py b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..28de3fd2982763997284b31199763db035790fbb
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+@@ -0,0 +1,481 @@
++"""Native runtime boundaries with actual SQLite, fake actuators and controlled state."""
++
++from contextlib import contextmanager
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import Mock
++import ast
++import queue
++import sqlite3
++import time
++
++import pytest
++from fastapi import HTTPException
++
++import smart_bins_native_custody as native
++from subsystems.classification_channel.smart_bins_native_adapter import (
++    NativeCustodyAdapter,
++)
++from subsystems.distribution.positioning import Positioning
++from subsystems.distribution.ready import Ready
++from subsystems.distribution.states import DistributionState
++from subsystems.classification_channel.two_piece import spoke_home
++from subsystems.classification_channel.two_piece.channel_clear import (
++    ChannelClearResult,
++    clearChannelByAdvancing,
++)
++from subsystems.classification_channel.two_piece.base import C4FiveSectorPlatter
++from subsystems.classification_channel.two_piece.flow import _Phase
++from subsystems.feeder.pulse_perception.flow import PulsePerceptionFeeding
++from hardware.sorter_interface import StepperMotor, FiniteMoveReceipt
++from defs.known_object import KnownObject
++from irl.bin_layout import DistributionLayout, Layer, BinSection, Bin, BinSize
++from piece_transport import ClassificationChannelTransport
++from subsystems.shared_variables import SharedVariables
++from test_smart_bins_reservations import prepared as prepared, connect
++from test_native_motion_truth import pca, Device
++from test_c4_distribution_handoff import _mkGc, _mkChannel, _addPiece
++
++
++@pytest.fixture(autouse=True)
++def reset_fence():
++    native.install(None)
++    yield
++    native.install(None)
++
++
++@pytest.fixture
++def world(prepared):
++    native.initialize_native_schema("m", "p", "sorter", 0)
++    gc = _mkGc()
++    gc.machine_id = "m"
++    gc.disable_chute = False
++    adapter = NativeCustodyAdapter("m")
++    native.install(adapter)
++    gc.smart_bins_native_adapter = adapter
++    shared = SharedVariables()
++    shared.native_custody = adapter
++    transport = ClassificationChannelTransport()
++    transport.native_adapter = adapter
++    shared.transport = transport
++    shared.set_distribution_gate(False)
++    piece = KnownObject(part_id="3001", color_id="1")
++    transport.placePieceForDistribution(piece)
++    layout = DistributionLayout(
++        [
++            Layer(
++                [BinSection([Bin(BinSize.MEDIUM), Bin(BinSize.MEDIUM)])],
++                max_pieces_per_bin=2,
++            )
++        ]
++    )
++    servo, servo_device = pca()
++    servo_device.position = 0
++    trace = []
++
++    def move_bin(address):
++        with connect(prepared) as conn:
++            row = conn.execute("SELECT state FROM smart_bin_reservations").fetchone()
++            assert row is not None and row[0] == "RESERVED"
++        trace.append("route_after_reservation")
++        chute.stepper.last_finite_receipt = FiniteMoveReceipt(1, 100, "ACCEPTED")
++        return 1
++
++    chute = SimpleNamespace(
++        isBinReachable=lambda a: True,
++        moveToBin=move_bin,
++        homed=True,
++        current_angle=0.0,
++        getAngleForBin=lambda a: 0.0,
++        stepper=SimpleNamespace(stopped=True, last_finite_receipt=None),
++    )
++    irl = SimpleNamespace(
++        servos=[servo],
++        distribution_layout=layout,
++        chute=chute,
++        carousel_stepper=SimpleNamespace(stopped=True),
++        c_channel_3_rotor_stepper=SimpleNamespace(stopped=True),
++    )
++    profile = SimpleNamespace(
++        artifact_hash="artifact",
++        getCategoryIdForPart=lambda *a: "A",
++        highValueCategoryId=lambda p: None,
++    )
++    positioning = Positioning(irl, gc, shared, chute, layout, profile, queue.Queue())
++    ready = Ready(irl, gc, shared)
++    return SimpleNamespace(
++        path=prepared,
++        gc=gc,
++        adapter=adapter,
++        shared=shared,
++        transport=transport,
++        piece=piece,
++        positioning=positioning,
++        ready=ready,
++        irl=irl,
++        trace=trace,
++        servo_device=servo_device,
++    )
++
++
++def positioned(world):
++    assert world.positioning.step() is None
++    assert world.trace == ["route_after_reservation"]
++    assert world.positioning.step() == DistributionState.READY
++    assert not world.shared.distribution_ready
++
++
++def armed(world):
++    positioned(world)
++    assert world.ready.step() is None
++    assert world.shared.distribution_ready
++
++
++def channel(world, monkeypatch):
++    ch = _mkChannel(world.transport, world.shared)
++    ch.gc = world.gc
++    device = Device()
++    stepper = StepperMotor(device, 0, world.gc)
++    stepper.set_name("carousel")
++    ch.irl = SimpleNamespace(carousel_stepper=stepper)
++    ch.ctx.config = SimpleNamespace(
++        discharge_center_tolerance_deg=1,
++        discharge_max_move_output_deg=10,
++        discharge_speed_usteps_per_s=1000,
++        precise_converge_speed_usteps_per_s=1000,
++        precise_center_tolerance_deg=1,
++    )
++    ch._eject_target = _addPiece(ch, 7, gap_to_exit=2, obj=world.piece, placed=True)
++    ch._phase = _Phase.EJECTING
++    monkeypatch.setattr(
++        C4FiveSectorPlatter,
++        "from_irl_config",
++        lambda _: SimpleNamespace(output_degrees_to_motor_microsteps=lambda deg: 100),
++    )
++    return ch, device
++
++
++def test_reservation_precedes_route_and_intent_precedes_ready(world, monkeypatch):
++    positioned(world)
++    original = world.shared.set_distribution_gate
++
++    def gate(value, **kwargs):
++        if value:
++            with connect(world.path) as conn:
++                assert (
++                    conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[
++                        0
++                    ]
++                    == "RELEASE_INTENT"
++                )
++        original(value, **kwargs)
++
++    monkeypatch.setattr(world.shared, "set_distribution_gate", gate)
++    world.ready.step()
++    assert world.shared.distribution_ready
++    assert world.shared.distribution_positioned_uuid == world.piece.uuid
++
++
++def test_commit_failure_keeps_ready_closed(world, monkeypatch):
++    positioned(world)
++    real = native.critical_transaction
++
++    class Fail:
++        def __init__(self, conn):
++            self.conn = conn
++
++        def __getattr__(self, key):
++            return getattr(self.conn, key)
++
++        def commit(self):
++            raise sqlite3.OperationalError("commit failed")
++
++    @contextmanager
++    def failing():
++        with real() as conn:
++            yield Fail(conn)
++
++    monkeypatch.setattr(native, "critical_transaction", failing)
++    world.ready.step()
++    assert not world.shared.distribution_ready
++    assert world.adapter.permit is None
++
++
++@pytest.mark.parametrize("outcome", [b"\x01", b"\x00", "ambiguous"])
++def test_exactly_one_native_dispatch(world, monkeypatch, outcome):
++    armed(world)
++    ch, dev = channel(world, monkeypatch)
++    if outcome == "ambiguous":
++        dev.error = OSError("write completed; response lost")
++    else:
++        dev.outcome = outcome
++    expected = outcome == b"\x01"
++    assert ch.startOutputMove(10, 1000) is expected
++    assert len(dev.moves) == 1
++    assert not ch.startOutputMove(10, 1000)
++    assert len(dev.moves) == 1
++    with connect(world.path) as conn:
++        kinds = [
++            r[0] for r in conn.execute("SELECT kind FROM smart_bin_native_evidence")
++        ]
++        assert (
++            "MOTOR_ACCEPTED"
++            if expected
++            else "MOTOR_REJECTED"
++            if outcome == b"\x00"
++            else "MOTOR_AMBIGUOUS"
++        ) in kinds
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        )
++
++
++def test_fresh_absence_is_inferred_and_preserves_drop_identity(world, monkeypatch):
++    armed(world)
++    ch, dev = channel(world, monkeypatch)
++    assert ch.startOutputMove(10, 1000)
++    ch._native_release_observed_after = time.time() - 1
++    ch._eject_target.last_seen = time.monotonic() - 1
++    ch._ejecting(SimpleNamespace(ts=time.time(), pieces=()), True, time.monotonic())
++    assert world.transport.getPieceForDistributionDrop() is world.piece
++    with connect(world.path) as conn:
++        kinds = [
++            r[0] for r in conn.execute("SELECT kind FROM smart_bin_native_evidence")
++        ]
++        assert "INFERRED_EXIT" in kinds and "SOFTWARE_SLOT_PROMOTION" in kinds
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "RELEASE_INTENT"
++        )
++    assert len(dev.moves) == 1
++
++
++def test_timeout_visible_retains_uncertainty_and_stops_staging(world, monkeypatch):
++    armed(world)
++    ch, dev = channel(world, monkeypatch)
++    assert ch.startOutputMove(10, 1000)
++    now = time.monotonic()
++    ch._phase_started_at = now - 16
++    ch._eject_target.last_seen = now
++    ch._ejecting(
++        SimpleNamespace(ts=time.time(), pieces=(SimpleNamespace(sv_bt_track_id=7),)),
++        True,
++        now,
++    )
++    assert not ch.startOutputMove(10, 1000)
++    assert len(dev.moves) == 1
++    with connect(world.path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "UNCERTAIN"
++        )
++        assert conn.execute(
++            "SELECT 1 FROM smart_bin_native_evidence WHERE kind='EJECT_TIMEOUT_VISIBLE'"
++        ).fetchone()
++
++
++def test_lost_placed_piece_withdraws_without_cancellation(world):
++    positioned(world)
++    assert world.transport.clearPieceForDistribution(world.piece)
++    assert world.transport.getPieceForDistributionPositioning() is None
++    with connect(world.path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "UNCERTAIN"
++        )
++
++
++def test_stall_snapshot_failure_prevents_promotion_and_motion(world, monkeypatch):
++    armed(world)
++    ch, dev = channel(world, monkeypatch)
++    monkeypatch.setattr(
++        native, "hold", Mock(side_effect=sqlite3.OperationalError("disk full"))
++    )
++    result = ch.attemptStallAutoClear(max_output_deg=720)
++    assert not result.cleared
++    assert world.transport.getPieceForDistributionPositioning() is world.piece
++    assert not dev.moves
++
++
++def test_initial_staging_unqualified_material_is_held(world, monkeypatch):
++    ch, dev = channel(world, monkeypatch)
++    ch._eject_target = None
++    assert not ch.startOutputMove(10, 1000)
++    assert not dev.moves
++    assert world.adapter.blocked
++
++
++def test_multidrop_hold_preserved_no_quantity_invention(world):
++    world.shared.bucket_passthrough_hold = True
++    assert world.positioning.step() is None
++    assert world.shared.bucket_passthrough_hold
++    assert not world.trace
++    with connect(world.path) as conn:
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_reservations").fetchone()[0]
++            == 0
++        )
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_native_holds").fetchone()[0]
++            == 1
++        )
++
++
++@pytest.mark.parametrize("cleared", [False, None])
++def test_failed_or_unknown_purge_prevents_alignment(monkeypatch, cleared):
++    result = ChannelClearResult(False, True, 0, "failed") if cleared is False else None
++    monkeypatch.setattr(spoke_home, "clearPiecesFromChannel", lambda *a: result)
++    vision = Mock()
++    stepper = Mock()
++    assert not spoke_home.maybeRunSpokeHome(
++        SimpleNamespace(logger=Mock()),
++        SimpleNamespace(carousel_stepper=stepper),
++        None,
++        vision,
++    )
++    vision.getCaptureThreadForRole.assert_not_called()
++    stepper.move_steps.assert_not_called()
++
++
++def test_startup_held_claim_prevents_doors_and_sweep(world):
++    positioned(world)
++    servos = [Mock()]
++    stepper = Mock()
++    world.gc.perception_service = SimpleNamespace(
++        read_state=lambda _: SimpleNamespace(n_pieces=1)
++    )
++    result = clearChannelByAdvancing(
++        world.gc, SimpleNamespace(servos=servos, carousel_stepper=stepper), None
++    )
++    assert not result.cleared
++    servos[0].open.assert_not_called()
++    stepper.move_steps.assert_not_called()
++
++
++def test_main_checks_before_discovery_and_server_start():
++    source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
++    tree = ast.parse(source)
++    main = next(
++        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"
++    )
++    for name in ("_home_hardware", "_initialize_hardware"):
++        fn = next(
++            n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == name
++        )
++        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
++        inspect = next(
++            n
++            for n in calls
++            if isinstance(n.func, ast.Attribute) and n.func.attr == "require_startup"
++        )
++        discovery = next(
++            n
++            for n in calls
++            if isinstance(n.func, ast.Name) and n.func.id == "mkIRLInterface"
++        )
++        assert inspect.lineno < discovery.lineno
++
++
++def test_manual_refusal_is_409_before_driver(world):
++    positioned(world)
++    from server.routers import steppers, hardware
++
++    for check in (steppers._ensure_manual_motion_allowed, hardware._ensure_not_homing):
++        with pytest.raises(HTTPException) as raised:
++            check("move")
++        assert raised.value.status_code == 409
++    with native.motion_entry("finite", "c_channel_1_rotor"):
++        pass
++    assert not world.adapter.admission_allowed()
++
++
++def test_c3_admission_refused_before_speed_or_move(world):
++    positioned(world)
++    feeder = object.__new__(PulsePerceptionFeeding)
++    feeder.shared = world.shared
++    feeder._busy = lambda _: False
++    motor = Mock()
++    assert not feeder._move("C3", 3, motor, 10, 0, None)
++    motor.set_speed_limits.assert_not_called()
++    motor.move_degrees.assert_not_called()
++
++
++def test_route_configuration_is_frozen_before_endpoint_side_effects(world):
++    positioned(world)
++    from server.routers import hardware, steppers
++
++    for endpoint in (
++        hardware.save_servo_hardware_config,
++        hardware.save_chute_aiming_config,
++        hardware.save_storage_layer_hardware_config,
++        hardware.set_section_enabled,
++    ):
++        with pytest.raises(HTTPException) as raised:
++            endpoint(None)
++        assert raised.value.status_code == 409
++    with pytest.raises(HTTPException) as raised:
++        steppers.set_tmc_settings("carousel", None)
++    assert raised.value.status_code == 409
++
++
++def test_native_ambiguity_is_one_wire_write_through_rb01(world, monkeypatch):
++    from test_hardware_bus import _Serial, _bus
++    from hardware.sorter_interface import InterfaceCommandCode
++
++    armed(world)
++    ch, device = channel(world, monkeypatch)
++    port = _Serial()
++    bus = _bus(port)
++    original = device.send_command
++
++    def send(command, channel, payload):
++        if command == InterfaceCommandCode.STEPPER_MOVE_STEPS:
++            return bus.send_command(0, command, channel, payload, retries=99)
++        return original(command, channel, payload)
++
++    device.send_command = send
++    assert not ch.startOutputMove(10, 1000)
++    assert len(port.writes) == 1
++    assert not ch.startOutputMove(10, 1000)
++    assert len(port.writes) == 1
++    assert bus._unresolved_addresses == {0}
++    with connect(world.path) as conn:
++        assert (
++            conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0]
++            == "UNCERTAIN"
++        )
++
++
++def test_manual_move_already_running_prevents_reservation(world):
++    world.irl.carousel_stepper.stopped = False
++    world.positioning.step()
++    assert not world.trace
++    with connect(world.path) as conn:
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_reservations").fetchone()[0]
++            == 0
++        )
++
++
++def test_observed_channel_clear_is_not_receiving_evidence(world):
++    world.gc.perception_service = SimpleNamespace(
++        read_state=lambda _: SimpleNamespace(n_pieces=0, ts=time.time())
++    )
++    result = clearChannelByAdvancing(world.gc, world.irl, None)
++    assert result.cleared and result.output_deg_moved == 0
++    with connect(world.path) as conn:
++        row = conn.execute(
++            "SELECT details_json FROM smart_bin_native_evidence WHERE kind='CHANNEL_CLEAR_OBSERVED'"
++        ).fetchone()
++        assert row and '"actual_destination": null' in row[0]
++        assert (
++            conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        )
++
++
++def test_stale_channel_empty_does_not_authorize_startup_purge(world):
++    world.gc.perception_service = SimpleNamespace(
++        read_state=lambda _: SimpleNamespace(n_pieces=0, ts=time.time() - 10)
++    )
++    result = clearChannelByAdvancing(world.gc, world.irl, None)
++    assert not result.cleared and result.output_deg_moved == 0
+diff --git a/software/sorter/backend/tests/test_waveshare_servo_truth.py b/software/sorter/backend/tests/test_waveshare_servo_truth.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a4c901d187891be4a3ce01d1c66c4cf1cb11c58
+--- /dev/null
++++ b/software/sorter/backend/tests/test_waveshare_servo_truth.py
+@@ -0,0 +1,246 @@
++"""Waveshare physical-state truth with fake bus and controlled time."""
++
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++
++from hardware.waveshare_servo import ScServoBus, WaveshareServoMotor
++from hardware.waveshare_bus_service import WaveshareBusService
++
++
++@pytest.fixture
++def servo(monkeypatch):
++    clock = SimpleNamespace(now=10.0)
++    monkeypatch.setattr(
++        "hardware.waveshare_servo.time", SimpleNamespace(monotonic=lambda: clock.now)
++    )
++    bus = Mock()
++    bus.read_angle_limits.return_value = (100, 900)
++    bus.read_position.return_value = 500
++    bus.set_torque.return_value = True
++    bus.move_to.return_value = True
++    bus.is_moving.return_value = False
++    result = WaveshareServoMotor(bus, 3)
++    result.initialize()
++    return result, bus, clock
++
++
++@pytest.mark.parametrize(
++    "raw,expected",
++    [(b"\x01", True), (b"\x00", False), (None, None), (b"", None), (b"\x02", None)],
++)
++def test_moving_register_preserves_unknown(raw, expected):
++    bus = object.__new__(ScServoBus)
++    bus.read_bytes = Mock(return_value=raw)
++    assert bus.is_moving(3) is expected
++    bus.read_bytes.assert_called_once_with(3, 66, 1)
++
++
++@pytest.mark.parametrize("value", [True, False, None])
++def test_service_moving_uses_serialized_execute(value):
++    service = WaveshareBusService("fake")
++    bus = Mock()
++    bus.is_moving.return_value = value
++    service._execute = Mock(side_effect=lambda fn: fn(bus))
++    assert service.is_moving(3) is value
++    service._execute.assert_called_once()
++    bus.is_moving.assert_called_once_with(3)
++
++
++@pytest.mark.parametrize(
++    "method,args",
++    [("move_to", (3, 400)), ("set_torque", (3, True)), ("calibrate_servo", (3,))],
++)
++def test_service_refuses_motion_before_serial_lock_or_recovery(method, args):
++    from smart_bins_native_custody import install, CustodyRefused
++
++    adapter = Mock()
++    adapter.check_motion.side_effect = CustodyRefused("held claim")
++    service = WaveshareBusService("fake")
++    service._execute = Mock()
++    install(adapter)
++    try:
++        with pytest.raises(CustodyRefused):
++            getattr(service, method)(*args)
++        service._execute.assert_not_called()
++        assert service.consecutive_failures == 0
++        assert service.recovery_attempts == 0
++    finally:
++        install(None)
++
++
++def test_accepted_target_is_pending_not_confirmed(servo):
++    motor, bus, _ = servo
++    assert motor.move_to(180)
++    assert motor._pending_target == 900
++    assert motor._confirmed_position == 500
++    assert motor._last_command_outcome == "ACCEPTED"
++    assert not motor.isClosed()
++    bus.move_to.assert_called_once_with(3, 900, 300)
++
++
++@pytest.mark.parametrize("method", ["open", "close", "move_to"])
++def test_unconfirmed_command_invalidates_truth(servo, method):
++    motor, bus, _ = servo
++    bus.move_to.return_value = False
++    args = (180,) if method == "move_to" else ()
++    assert getattr(motor, method)(*args) is False
++    assert motor._last_command_outcome == "AMBIGUOUS"
++    assert motor._confirmed_position is None
++    assert not motor.isOpen() and not motor.isClosed()
++    if method in ("open", "close"):
++        assert not motor._release_pending
++        assert bus.set_torque.call_args.args == (3, False)
++
++
++def test_command_exception_keeps_original_error(servo):
++    motor, bus, _ = servo
++    error = OSError("write outcome unknown")
++    bus.move_to.side_effect = error
++    with pytest.raises(OSError) as raised:
++        motor.open()
++    assert raised.value is error
++    assert motor._last_command_outcome == "AMBIGUOUS"
++    assert motor._confirmed_position is None
++
++
++def test_live_position_and_missing_position(servo):
++    motor, bus, _ = servo
++    bus.read_position.return_value = 750
++    assert motor.position == 750
++    assert motor._confirmed_position == 750
++    bus.read_position.return_value = None
++    assert motor.position is None
++    assert motor._confirmed_position is None
++    assert not motor.isClosed() and not motor.isOpen()
++
++
++@pytest.mark.parametrize(
++    "moving,expected", [(True, False), (False, True), (None, False)]
++)
++def test_stopped_requires_controller_feedback(servo, moving, expected):
++    motor, bus, clock = servo
++    motor.close()
++    bus.is_moving.return_value = moving
++    bus.read_position.return_value = 900
++    clock.now += 100
++    assert motor.stopped is expected
++    assert motor.isClosed() is (moving is False)
++
++
++def test_wrong_stopped_position_keeps_pending(servo):
++    motor, bus, _ = servo
++    motor.close()
++    bus.read_position.return_value = 700
++    assert motor.stopped
++    assert motor._confirmed_position == 700
++    assert motor._pending_target == 900
++    assert not motor.isOpen() and not motor.isClosed()
++
++
++@pytest.mark.parametrize(
++    "method,target,opened", [("open", 100, True), ("close", 900, False)]
++)
++def test_confirmed_route_feedback(servo, method, target, opened):
++    motor, bus, _ = servo
++    assert getattr(motor, method)()
++    bus.read_position.return_value = target
++    feedback = motor.feedback()
++    assert feedback["position"] == target
++    assert feedback["is_open"] is opened
++    assert feedback["is_closed"] is (not opened)
++    assert feedback["position_valid"] and feedback["motion_state_valid"]
++    assert feedback["stopped"] and feedback["command_outcome"] == "ACCEPTED"
++    assert feedback["pending_target"] is None
++
++
++def test_feedback_failure_is_unknown(servo):
++    motor, bus, _ = servo
++    motor.close()
++    bus.read_position.return_value = None
++    feedback = motor.feedback()
++    assert feedback["position"] is None and feedback["angle"] is None
++    assert not feedback["position_valid"]
++    assert not feedback["is_open"] and not feedback["is_closed"]
++    assert feedback["available"]
++
++
++def test_release_on_observed_stop(servo):
++    motor, bus, clock = servo
++    assert motor.move_to_and_release(180)
++    bus.set_torque.reset_mock()
++    bus.is_moving.return_value = None
++    clock.now += 1
++    assert not motor.stopped
++    bus.set_torque.assert_not_called()
++    bus.is_moving.return_value = False
++    bus.read_position.return_value = 900
++    assert motor.stopped
++    bus.set_torque.assert_called_once_with(3, False)
++
++
++def test_protective_timeout_release_does_not_claim_stopped(servo):
++    motor, bus, clock = servo
++    motor.open()
++    bus.set_torque.reset_mock()
++    bus.is_moving.return_value = None
++    clock.now += 10
++    assert not motor.stopped
++    bus.set_torque.assert_called_once_with(3, False)
++    assert not motor.isOpen() and not motor.isClosed()
++
++
++def test_calibration_and_inversion_preserve_raw_observation(servo):
++    motor, bus, _ = servo
++    assert motor.is_calibrated
++    motor.open()
++    bus.read_position.return_value = 100
++    assert motor.stopped and motor.isOpen()
++    motor.set_invert(True)
++    assert motor._confirmed_position == 100
++    assert motor.isClosed() and not motor.isOpen()
++    assert motor.open()
++    bus.move_to.assert_called_with(3, 900, 300)
++
++
++def test_failed_initialization_never_calibrated(servo):
++    motor, bus, _ = servo
++    bus.read_angle_limits.return_value = None
++    with pytest.raises(RuntimeError):
++        motor.initialize()
++    assert not motor.is_calibrated
++    assert not motor.open()
++
++
++def test_recalibration_does_not_invent_center(monkeypatch, servo):
++    motor, bus, _ = servo
++    monkeypatch.setattr(
++        "hardware.waveshare_servo.calibrate_servo", lambda *a: (200, 800)
++    )
++    bus.read_position.return_value = None
++    assert motor.recalibrate() == (200, 800)
++    assert motor.is_calibrated
++    assert motor._confirmed_position is None
++    assert not motor.isOpen() and not motor.isClosed()
++
++
++def test_initial_position_missing_stays_unknown(servo):
++    motor, bus, _ = servo
++    bus.read_position.return_value = None
++    motor.initialize()
++    assert motor._confirmed_position is None
++    assert motor._pending_target is None
++
++
++def test_ack_then_unknown_feedback_cannot_reuse_previous_success(servo):
++    motor, bus, _ = servo
++    motor.open()
++    bus.read_position.return_value = 100
++    assert motor.stopped and motor.isOpen()
++    bus.is_moving.return_value = None
++    feedback = motor.feedback()
++    assert not feedback["motion_state_valid"]
++    assert not feedback["position_valid"]
++    assert feedback["stopped"] is None
++    assert not feedback["is_open"]
