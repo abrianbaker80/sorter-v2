@@ -1,0 +1,338 @@
+{
+  "package": "P2C6P-C02",
+  "revision": "r1",
+  "implementation_commit_created": false,
+  "candidate": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true
+  },
+  "accepted_P2C6A": {
+    "package_commit": "2952a9ac4d52ec9b5f0becd580c97f9512ce3853",
+    "package": "chat_review/smart-bins/P2C6A/r1",
+    "result_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22",
+    "verified_accepted_paths": 38
+  },
+  "accepted_C01": {
+    "package_commit": "d774c93b44d67be15d65d90bbe515ef8e593cbea",
+    "package": "chat_review/smart-bins/P2C6P-C01/r1",
+    "result_tree": "b604851c01253880d331525884d0dc280a478485"
+  },
+  "accepted_P2C6P_A": {
+    "commit": "bc15b9a8007173b8ec49cccada7c992a85637def",
+    "package": "chat_review/smart-bins/P2C6P-A/r1"
+  },
+  "live_golden": {
+    "commit": "2c8269843c16282659c9edbfbf03e7c7042a15ce",
+    "tag": "sorter/stable/v0.2.9",
+    "firmware": "firmware/v0.8.1",
+    "firmware_commit": "8d560d26",
+    "variant": "distribution-v1-2",
+    "accessed_this_task": false,
+    "physical_measurements": "Task-supplied protected context; no remeasurement"
+  },
+  "upstream_v0_3_0": {
+    "commit": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "tag": "sorter/stable/v0.3.0",
+    "bus_materially_different": false
+  },
+  "upstream_bus_fix": "94622df04d046f1de2191bba99887fc4cc67ff18",
+  "four_way_bus_sources": {
+    "candidate_c01": {
+      "ref": "b604851c01253880d331525884d0dc280a478485",
+      "blob": "d9978846ae360c7b26bca098ab96d0895db8a8e2",
+      "sha256": "d864f4bd5987b62a90c76cc28cd71cf61d2de44907cbe54f6bfe6dfd18425d4c"
+    },
+    "v0.2.9": {
+      "ref": "2c8269843c16282659c9edbfbf03e7c7042a15ce",
+      "blob": "0f62ffdf8b1d96738ea8e90c606614612ac38379",
+      "sha256": "cb85690ca36035f42d0d0812ad76ab997025064d30174dbf935b46b0792b3466"
+    },
+    "v0.3.0": {
+      "ref": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+      "blob": "0f62ffdf8b1d96738ea8e90c606614612ac38379",
+      "sha256": "cb85690ca36035f42d0d0812ad76ab997025064d30174dbf935b46b0792b3466"
+    },
+    "upstream_fix": {
+      "ref": "94622df04d046f1de2191bba99887fc4cc67ff18",
+      "blob": "0f62ffdf8b1d96738ea8e90c606614612ac38379",
+      "sha256": "cb85690ca36035f42d0d0812ad76ab997025064d30174dbf935b46b0792b3466"
+    }
+  },
+  "predecessor_chain": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch",
+      "patch_sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48",
+      "result_tree": "24f74a41bf8186a69562ad48b22cc244c3c8a5c7"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch",
+      "patch_sha256": "c5fa8560d32b35ddcff00c667d9155ef863c64dac83d932f5e630859fde544cf",
+      "result_tree": "0038a45ec140ae34ae05feda254480bd01ec1d45"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch",
+      "patch_sha256": "66c10674daf771cd6150cb00875f0adbc8528d03bd9e06e651e3bb906d437ca9",
+      "result_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2",
+      "patch": "P2B.patch",
+      "patch_sha256": "bb52252e81fc121cd791c62178107caee12ed2d4c30eecaebad77b49e7dd618d",
+      "result_tree": "33f4b7e6b15709fda640a660ef65475c661a96fe"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2",
+      "patch": "P2C1.patch",
+      "patch_sha256": "5a05f90c31d6b90a1d477fd373de506aee56ed5755d4d0e94f020731cc283773",
+      "result_tree": "43640dfac3e75774be73785084fc6debdedd4bb9"
+    },
+    {
+      "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+      "package": "chat_review/smart-bins/P2C2/r2",
+      "patch": "P2C2.patch",
+      "patch_sha256": "a70b1a768e3dd72efc414f4cdbff249d61cb9e069c83029056cf7460bcc6a4a8",
+      "result_tree": "884171860aa224fc123a3783c3c7363fad70013d"
+    },
+    {
+      "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+      "package": "chat_review/smart-bins/P2C3/r3",
+      "patch": "P2C3.patch",
+      "patch_sha256": "78f8a5fb42bcaa905ade1bd2807ad248c5cb07fee87d2fcddc6571d713420d39",
+      "result_tree": "14c8a136f98136e55f2b982b386ce452e24a1252"
+    },
+    {
+      "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+      "package": "chat_review/smart-bins/P2C4/r3",
+      "patch": "P2C4.patch",
+      "patch_sha256": "e047a4ca5a27772479f1a651305bca412cc5563ce933ddf5e699f6e673cabc5f",
+      "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187"
+    },
+    {
+      "commit": "63c2ca9842e0f3ad461d558ce20513b131504044",
+      "package": "chat_review/smart-bins/P2C5A/r1",
+      "patch": "P2C5A.patch",
+      "patch_sha256": "f50ed2a8b35c970c619a2d83625c7bfb6307c477fbc5094e086fd2788a349b68",
+      "result_tree": "06db1f4e13695b4b45a5fbb295584e82b3f2f2d3"
+    },
+    {
+      "commit": "a798d9c7a9225f69aabf77fed599515d6edea791",
+      "package": "chat_review/smart-bins/P2C5B/r2",
+      "patch": "P2C5B.patch",
+      "patch_sha256": "4a972e256cb60ac352be30a308bcbc941389b53f0a0c60ae7805c9f2393e3dac",
+      "result_tree": "9d8f68b33790d98c7f34584ade99be7b5a164b9a"
+    },
+    {
+      "commit": "2952a9ac4d52ec9b5f0becd580c97f9512ce3853",
+      "package": "chat_review/smart-bins/P2C6A/r1",
+      "patch": "P2C6A.patch",
+      "patch_sha256": "c083fa3ed2134a1710b9deac924c2a780750e678af90384794034c5b6d808659",
+      "result_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22"
+    }
+  ],
+  "accepted_chain_reconstructed": true,
+  "accepted_changed_paths_verified": 41,
+  "patches": {
+    "P2C6P-C02.patch": {
+      "base_tree": "b604851c01253880d331525884d0dc280a478485",
+      "result_tree": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf",
+      "sha256": "8592dec6c2373772fcb30ea0be851a191a4617d8adad470fe275948b542afdfb",
+      "paths": [
+        "software/sorter/backend/hardware/bus.py",
+        "software/sorter/backend/tests/test_hardware_bus.py",
+        "software/sorter/backend/tests/test_mcu_bus_read.py"
+      ],
+      "isolated_reconstruction_verified": true
+    }
+  },
+  "source_files": {
+    "software/sorter/backend/hardware/bus.py": {
+      "before_sha256": "d864f4bd5987b62a90c76cc28cd71cf61d2de44907cbe54f6bfe6dfd18425d4c",
+      "after_sha256": "df8d2592d1b01c92111b2932e69d56cb3ca2f15c361ceaa2a3db4abd8a98a817",
+      "after_blob": "8809e37a60b9dd50a01c599a958964cf033c2f04"
+    },
+    "software/sorter/backend/tests/test_hardware_bus.py": {
+      "before_sha256": "b2ec0f727cd3811fc4ff7c0770d8eec7ec7ba55ccfb071f27922d5a5320db0ba",
+      "after_sha256": "d8800821290352c029600ea8d8bc69dbe8a3ca448001c8153e986658add34a0f",
+      "after_blob": "4bb28dcbd843cad0356d8b42ee40a4de7918a706"
+    },
+    "software/sorter/backend/tests/test_mcu_bus_read.py": {
+      "before_sha256": null,
+      "after_sha256": "121cc0ffeb587bb3a193679882086b168c8da6c9d3510213f979b48c8c80308d",
+      "after_blob": "bba0fde6ebcd6eb44d74d44dcd1b1eb19d33f8f2"
+    }
+  },
+  "reader": {
+    "max_frame_size": 254,
+    "max_frame_read_s": 1.0,
+    "deadline_semantics": "No new read after deadline; final in-flight read retains configured serial timeout",
+    "read_until_used": false,
+    "persistent_receive_buffer": false,
+    "resends": false
+  },
+  "validation": {
+    "python": "3.12.12",
+    "ruff": "0.15.21",
+    "frozen": true,
+    "offline_tests": true,
+    "pre_fix": {
+      "source_tree": "b604851c01253880d331525884d0dc280a478485",
+      "reply_bytes": 11,
+      "read_until_calls": 1,
+      "read_requested_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "writes": 1,
+      "business_result": "valid response",
+      "deterministic_shape_reproduced": true
+    },
+    "post_fix": {
+      "read_until_calls": 0,
+      "read_requested_sizes": [
+        11
+      ],
+      "writes": 1
+    },
+    "focused": {
+      "passed": 24,
+      "failed": 0
+    },
+    "affected": {
+      "passed": 56,
+      "failed": 0
+    },
+    "existing_hardware_bus_cases_passed": 32,
+    "ruff_result": "All checks passed",
+    "whole_suite_run": false,
+    "nonreader_AST_unchanged_after_constant_expansion": [
+      "MCUBus.__init__",
+      "MCUBus.port",
+      "MCUBus.is_open",
+      "MCUBus.close",
+      "MCUBus.send_command_no_response",
+      "MCUBus.send_command",
+      "MCUBus.enumerate_buses",
+      "MCUBus.scan_devices",
+      "MCUDevice.__init__",
+      "MCUDevice.send_command",
+      "MCUDevice.ping",
+      "MCUDevice.detect",
+      "MCUDevice.get_version"
+    ],
+    "independent_review": {
+      "result": "approved",
+      "actionable_findings": 0,
+      "tests_rerun": false
+    },
+    "isolation": "Fake serial, virtual reader time; actual serial constructors, network, subprocess and non-temporary database access blocked before imports; temporary local state/config paths",
+    "logs_sha256": {
+      "focused.log": "32dc6e8ee0133897bfed24aa14ff11414a0d1d11144a05be2e620bdf7cac8cde",
+      "affected.log": "612c619f50c6a1b3f494a13ea3ae953cf44ce0bf96d57a64f92e7d61a15250e3"
+    }
+  },
+  "preservation": {
+    "original_inventory_count": 868,
+    "unrelated_byte_identical": 866,
+    "changed_existing_paths": [
+      "software/sorter/backend/hardware/bus.py",
+      "software/sorter/backend/tests/test_hardware_bus.py"
+    ],
+    "new_paths": [
+      "software/sorter/backend/tests/test_mcu_bus_read.py"
+    ],
+    "protected_inventory_digest_sha256": "e3f1c2b5ac973b19d71dc976f0a192e435ed83803e2bff3b088aaa0e13eb79e2",
+    "implementation_index_sha256": "f9b14e028a87a6722fb563af357225d867cb8b5cf701d77603f113e9d94dc7d6",
+    "head_branch_index_unchanged": true,
+    "unrelated_status_unchanged": true,
+    "prior_dirty_untracked_inventory": [
+      " M software/sorter/backend/channel_crop_store.py",
+      " M software/sorter/backend/defs/events.py",
+      " M software/sorter/backend/defs/known_object.py",
+      " M software/sorter/backend/local_state.py",
+      " M software/sorter/backend/piece_image_store.py",
+      " M software/sorter/backend/piece_records.py",
+      " M software/sorter/backend/project_harvest_projects.py",
+      " M software/sorter/backend/run_recorder.py",
+      " M software/sorter/backend/runtime_stats.py",
+      " M software/sorter/backend/subsystems/classification_channel/marker_positioner.py",
+      " M software/sorter/backend/subsystems/classification_channel/physical_distribution.py",
+      " M software/sorter/backend/subsystems/classification_channel/physical_runtime.py",
+      " M software/sorter/backend/subsystems/distribution/positioning.py",
+      " M software/sorter/backend/subsystems/distribution/sending.py",
+      " M software/sorter/backend/subsystems/distribution/state_machine.py",
+      " M software/sorter/backend/tests/test_local_state.py",
+      " M software/sorter/backend/utils/event.py",
+      "?? software/sorter/backend/harvest_integration_storage.py",
+      "?? software/sorter/backend/smart_bins_completion_recovery.py",
+      "?? software/sorter/backend/smart_bins_delivery.py",
+      "?? software/sorter/backend/smart_bins_eligibility.py",
+      "?? software/sorter/backend/smart_bins_followup_reconciliation.py",
+      "?? software/sorter/backend/smart_bins_harvest_integration.py",
+      "?? software/sorter/backend/smart_bins_migration.py",
+      "?? software/sorter/backend/smart_bins_native_completion.py",
+      "?? software/sorter/backend/smart_bins_reconciliation.py",
+      "?? software/sorter/backend/smart_bins_service.py",
+      "?? software/sorter/backend/smart_bins_storage.py",
+      "?? software/sorter/backend/subsystems/classification_channel/smart_bins_physical_bridge.py",
+      "?? software/sorter/backend/tests/test_bin_eligibility.py",
+      "?? software/sorter/backend/tests/test_retention_sweep_locking.py",
+      "?? software/sorter/backend/tests/test_smart_bins_completion_recovery.py",
+      "?? software/sorter/backend/tests/test_smart_bins_delivery.py",
+      "?? software/sorter/backend/tests/test_smart_bins_followup_reconciliation.py",
+      "?? software/sorter/backend/tests/test_smart_bins_harvest_integration.py",
+      "?? software/sorter/backend/tests/test_smart_bins_migration.py",
+      "?? software/sorter/backend/tests/test_smart_bins_physical_bridge.py",
+      "?? software/sorter/backend/tests/test_smart_bins_reconciliation.py",
+      "?? software/sorter/backend/tests/test_smart_bins_reservations.py",
+      "?? software/sorter/backend/tests/test_smart_bins_sending.py",
+      "?? software/sorter/backend/tests/test_smart_bins_storage.py"
+    ],
+    "blocked_old_indexes": "not accessed",
+    "operational_databases": "not accessed or hashed"
+  },
+  "qualification": {
+    "level": "source/test only",
+    "P2C6B": "BLOCKED",
+    "old_C03_C13_sequence": "superseded",
+    "deployment": false,
+    "services": false,
+    "firmware_operations": false,
+    "hardware": false,
+    "live_sorter_access": false,
+    "physical_benchmark": false,
+    "Harvest_runtime_integration": false
+  },
+  "publication": {
+    "branch": "chat-review",
+    "expected_parent": "d774c93b44d67be15d65d90bbe515ef8e593cbea",
+    "allowlist": [
+      "chat_review/smart-bins/P2C6P-C02/r1/REVIEW.md",
+      "chat_review/smart-bins/P2C6P-C02/r1/P2C6P-C02.patch",
+      "chat_review/smart-bins/P2C6P-C02/r1/manifest.json"
+    ],
+    "normal_fast_forward_only": true,
+    "readback": "Verify remote ref, exact parent/path list and all package bytes; retain separate private receipt"
+  },
+  "packaged_file_sha256": {
+    "REVIEW.md": "e050d7164c1be80f234b1bb27a76306aad0f0faad24a8687ae470cdd778fe7e3",
+    "P2C6P-C02.patch": "8592dec6c2373772fcb30ea0be851a191a4617d8adad470fe275948b542afdfb"
+  }
+}
