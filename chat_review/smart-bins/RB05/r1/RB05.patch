@@ -1,0 +1,278 @@
+diff --git a/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+index 8ad8d036a032771d9c329ea4e9101856b6e33409..db83fb6425860cbf77ee2cc9e6765342d7b14204 100644
+--- a/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
++++ b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+@@ -2,7 +2,7 @@
+ 
+ from __future__ import annotations
+ 
+-from contextlib import contextmanager
++from contextlib import contextmanager, nullcontext
+ from dataclasses import replace
+ import uuid
+ 
+@@ -34,6 +34,19 @@ class NativeCustodyAdapter:
+         self.route = None
+         self.transport = None
+         self._fault = None
++        self.profiler = None
++
++    def _timed(self, name):
++        profiler = self.profiler
++        return profiler.timer(name) if profiler is not None and profiler.enabled else nullcontext()
++
++    def _current_blocker(self, conn=None, except_reservation=None):
++        with self._timed("smart_bins.current_authorization_ms"):
++            if conn is None:
++                return completion.current_blocker(self.machine_id, except_reservation)
++            return completion.current_blocker_on_connection(
++                conn, self.machine_id, except_reservation
++            )
+ 
+     def require_startup(self):
+         if self.blocked or self._fault:
+@@ -61,9 +74,7 @@ class NativeCustodyAdapter:
+                     and scope.get("kind") in ("route", "dispatch"))
+                 else None
+             )
+-            if completion.current_blocker_on_connection(
+-                conn, self.machine_id, except_id
+-            ):
++            if self._current_blocker(conn, except_id):
+                 raise custody.CustodyRefused(
+                     "Current Smart Bin completion obligation blocks motion"
+                 )
+@@ -131,7 +142,7 @@ class NativeCustodyAdapter:
+                     raise custody.CustodyRefused(
+                         "Existing durable custody blocks reservation"
+                     )
+-                if completion.current_blocker_on_connection(conn, self.machine_id):
++                if self._current_blocker(conn):
+                     raise custody.CustodyRefused(
+                         "Current completion obligation blocks reservation"
+                     )
+@@ -220,13 +231,14 @@ class NativeCustodyAdapter:
+                 max_dimension_mm=piece.max_dimension_mm,
+                 too_big=piece.too_big,
+             )
+-            result = service.reserve(
+-                request,
+-                qualification,
+-                expected_state_revision=machine_rev,
+-                expected_qualification_hash=service.qualification_digest(qualification),
+-                request_key="native-reserve:" + request.route_attempt,
+-            )
++            with self._timed("smart_bins.reserve_ms"):
++                result = service.reserve(
++                    request,
++                    qualification,
++                    expected_state_revision=machine_rev,
++                    expected_qualification_hash=service.qualification_digest(qualification),
++                    request_key="native-reserve:" + request.route_attempt,
++                )
+             if result["code"] != "OK":
+                 raise custody.CustodyRefused(
+                     "Native reservation refused: " + result["code"]
+@@ -282,13 +294,14 @@ class NativeCustodyAdapter:
+             self._verify_head(positioned_uuid)
+             if self.permit is not None:
+                 raise custody.CustodyRefused("READY cannot create another permit")
+-            if completion.current_blocker(
+-                self.machine_id, except_reservation=self.current.reservation_id
++            if self._current_blocker(
++                except_reservation=self.current.reservation_id
+             ):
+                 raise custody.CustodyRefused("Current completion obligation blocks READY")
+             identity = replace(self.current, attempt_id=str(uuid.uuid4()))
+             digest = service.configuration_digest()
+-            custody.arm(identity, digest, evidence)
++            with self._timed("smart_bins.release_intent_ms"):
++                custody.arm(identity, digest, evidence)
+             self.current = identity
+             self.permit = identity
+ 
+@@ -313,7 +326,8 @@ class NativeCustodyAdapter:
+             permit = self.permit
+             self.permit = None  # failures never make permission replayable
+             try:
+-                custody.consume(permit, service.configuration_digest())
++                with self._timed("smart_bins.dispatch_consume_ms"):
++                    custody.consume(permit, service.configuration_digest())
+             except Exception:
+                 self._fault = "Dispatch persistence failed"
+                 raise
+@@ -406,9 +420,7 @@ class NativeCustodyAdapter:
+                 if completion.effect_phase(self.machine_id, reservation_id,
+                                            piece_uuid, delivery_id, effect) != "SUCCEEDED":
+                     raise custody.CustodyRefused("Completion effect is unfinished")
+-            if completion.current_blocker(
+-                self.machine_id, except_reservation=reservation_id
+-            ):
++            if self._current_blocker(except_reservation=reservation_id):
+                 raise custody.CustodyRefused("Current same-machine blocker remains")
+             self.current = None
+             self.permit = None
+@@ -421,5 +433,6 @@ def attach(gc):
+     if adapter is None:
+         adapter = NativeCustodyAdapter(gc.machine_id)
+         gc.smart_bins_native_adapter = adapter
++    adapter.profiler = getattr(gc, "profiler", None)
+     custody.install(adapter if adapter.active or adapter.blocked else None)
+     return adapter
+diff --git a/software/sorter/backend/tests/test_machine_toml.py b/software/sorter/backend/tests/test_machine_toml.py
+index b8babcc9fbb793d09017d29cf3c3f6629020d25a..74e541f0b6941a584015b97f59cbac04069c5a60 100644
+--- a/software/sorter/backend/tests/test_machine_toml.py
++++ b/software/sorter/backend/tests/test_machine_toml.py
+@@ -35,8 +35,9 @@ class MachineTomlPathTests(unittest.TestCase):
+             os.chdir(here)
+ 
+     def test_an_absolute_value_is_used_as_it_is(self) -> None:
+-        with mock.patch.dict(os.environ, {machine_toml.ENV_VAR: "/srv/sorter/machine.toml"}):
+-            self.assertEqual(machine_toml.machine_toml_path(), Path("/srv/sorter/machine.toml"))
++        absolute = BACKEND / "synthetic-machine.toml"
++        with mock.patch.dict(os.environ, {machine_toml.ENV_VAR: str(absolute)}):
++            self.assertEqual(machine_toml.machine_toml_path(), absolute)
+ 
+     def test_nothing_else_reads_the_variable(self) -> None:
+         # A dozen readers with a fallback each is how settings saved in the UI
+diff --git a/software/sorter/backend/tests/test_rb05_configuration_isolation.py b/software/sorter/backend/tests/test_rb05_configuration_isolation.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e100af2643e3d8d75aa0130f31d84a9a0dce7b9
+--- /dev/null
++++ b/software/sorter/backend/tests/test_rb05_configuration_isolation.py
+@@ -0,0 +1,74 @@
++"""Synthetic live-style configuration and ordinary import boundaries for RB05."""
++
++import tomllib
++
++from irl.config import (
++    CLASSIFICATION_CHANNEL_FLOW,
++    FEEDER_FLOW,
++    MACHINE_SETUP,
++    mkIRLConfig,
++)
++from test_irl_import_boundary import run_isolated
++from toml_config import getPulsePerceptionConfig
++
++
++def test_legacy_selection_and_feeder_sections_cannot_change_native_flow(tmp_path, monkeypatch):
++    path = tmp_path / "synthetic.toml"
++    path.write_text(
++        '[machine_setup]\n'
++        'type = "go_to_angle"\n'
++        'feeder = "constant_movement"\n'
++        '[feeder_go_to_angle]\n'
++        'move_speed_usteps_per_s = 1\n'
++        '[feeder_constant_movement]\n'
++        'move_speed_usteps_per_s = 2\n'
++        '[feeder_pulse_perception]\n'
++        'move_speed_usteps_per_s = 2600\n'
++        'max_move_output_deg = 80.0\n'
++        'ch2_move_speed_usteps_per_s = 900\n'
++        'ch3_max_move_output_deg = 30.0\n'
++        '[cameras]\n'
++        'c_channel_2 = 0\n'
++        'c_channel_3 = 1\n'
++        'carousel = 2\n',
++        encoding="utf-8",
++    )
++    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(path))
++    assert (MACHINE_SETUP, FEEDER_FLOW, CLASSIFICATION_CHANNEL_FLOW) == (
++        "classification_channel", "pulse_perception_rev01", "two_piece_state_machine_rev01"
++    )
++    config = mkIRLConfig()
++    assert [config.c_channel_2_camera.device_index,
++            config.c_channel_3_camera.device_index,
++            config.carousel_camera.device_index] == [0, 1, 2]
++    assert config.c_channel_4_rotor_stepper is config.carousel_stepper
++    pulse = getPulsePerceptionConfig()
++    assert [pulse[f"ch{n}_move_speed_usteps_per_s"] for n in (1, 2, 3)] == [2600, 900, 2600]
++    assert [pulse[f"ch{n}_max_move_output_deg"] for n in (1, 2, 3)] == [80.0, 80.0, 30.0]
++    assert "move_speed_usteps_per_s" not in pulse
++    assert "max_move_output_deg" not in pulse
++
++
++def test_camera_alias_conflict_is_visible_and_canonical_wins(tmp_path, monkeypatch):
++    path = tmp_path / "synthetic.toml"
++    path.write_text('[cameras]\nclassification_channel = 3\ncarousel = 7\n', encoding="utf-8")
++    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(path))
++    raw = tomllib.loads(path.read_text(encoding="utf-8"))
++    assert raw["cameras"]["classification_channel"] != raw["cameras"]["carousel"]
++    assert mkIRLConfig().carousel_camera.device_index == 3
++
++
++def test_ordinary_native_adapter_import_and_absent_construction_exclude_harvest(tmp_path):
++    run_isolated('''
++import importlib.abc
++class NoHarvest(importlib.abc.MetaPathFinder):
++    def find_spec(self, fullname, path=None, target=None):
++        if fullname.startswith('project_harvest_') or fullname in (
++            'harvest_integration_storage', 'smart_bins_harvest_integration'):
++            raise AssertionError('Harvest application side imported: ' + fullname)
++sys.meta_path.insert(0, NoHarvest())
++from subsystems.classification_channel.smart_bins_native_adapter import NativeCustodyAdapter
++adapter = NativeCustodyAdapter('synthetic-machine')
++assert not adapter.active and not adapter.blocked
++assert not any(name.startswith('project_harvest_') for name in sys.modules)
++''', tmp_path)
+diff --git a/software/sorter/backend/tests/test_setup_wizard.py b/software/sorter/backend/tests/test_setup_wizard.py
+index 42079b6a3c19fc215fd6c40e3ea29ee4aae6c56f..f3a66f203d3e4756630313ed4d0fe514d63889c7 100644
+--- a/software/sorter/backend/tests/test_setup_wizard.py
++++ b/software/sorter/backend/tests/test_setup_wizard.py
+@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
+ 
+ from server.api import app
+ from server.routers import cameras, setup
++import local_state
+ 
+ 
+ class SetupWizardConfigTests(unittest.TestCase):
+@@ -24,6 +25,11 @@ class SetupWizardConfigTests(unittest.TestCase):
+         os.environ["LOCAL_STATE_DB_PATH"] = str(self.local_state_db_path)
+ 
+     def tearDown(self) -> None:
++        # The process-lifetime WAL keeper otherwise pins this disposable DB on Windows.
++        with local_state._KEEPER_LOCK:
++            if local_state._keeper_conn is not None:
++                local_state._keeper_conn.close()
++                local_state._keeper_conn = None
+         if self._old_machine_params is None:
+             os.environ.pop("MACHINE_SPECIFIC_PARAMS_PATH", None)
+         else:
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_runtime.py b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+index fc2002df419c69650c7323e3739d91b8adaacfaf..378ab938a6257cd5029dbd1ec955a522857a773b 100644
+--- a/software/sorter/backend/tests/test_smart_bins_native_runtime.py
++++ b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+@@ -32,6 +32,7 @@ from hardware.sorter_interface import StepperMotor, FiniteMoveReceipt
+ from defs.known_object import KnownObject
+ from irl.bin_layout import DistributionLayout, Layer, BinSection, Bin, BinSize
+ from piece_transport import ClassificationChannelTransport
++from profiler import Profiler
+ from subsystems.shared_variables import SharedVariables
+ from test_smart_bins_reservations import prepared as prepared, connect
+ from test_native_motion_truth import pca, Device
+@@ -178,6 +179,24 @@ def test_reservation_precedes_route_and_intent_precedes_ready(world, monkeypatch
+     assert world.shared.distribution_positioned_uuid == world.piece.uuid
+ 
+ 
++@pytest.mark.parametrize("enabled", [False, True])
++def test_native_timing_uses_bounded_existing_profiler(world, monkeypatch, enabled):
++    profiler = Profiler(enabled)
++    world.adapter.profiler = profiler
++    armed(world)
++    ch, dev = channel(world, monkeypatch)
++    dev.outcome = b"\x01"
++    assert ch.startOutputMove(10, 1000)
++    names = {row["metric_name"] for row in profiler.snapshotRows()}
++    expected = {
++        "smart_bins.reserve_ms",
++        "smart_bins.release_intent_ms",
++        "smart_bins.dispatch_consume_ms",
++        "smart_bins.current_authorization_ms",
++    }
++    assert names == (expected if enabled else set())
++
++
+ def test_commit_failure_keeps_ready_closed(world, monkeypatch):
+     positioned(world)
+     real = native.critical_transaction

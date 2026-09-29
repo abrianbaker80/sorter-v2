@@ -1,0 +1,190 @@
+{
+  "package": "RB05/r1",
+  "base": {
+    "v030_commit": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "v030_tree": "21e805b60da575ff7468fcc3570a517d80f01cd0",
+    "RB01": {
+      "review": "8c83a0ceb261f2e071b0b4dccff6765b0fb12e1f",
+      "result_tree": "ab7e7461a69efc1db74faac2c8e8f3318ca10341"
+    },
+    "RB02": {
+      "review": "688778a6f11222207e64a419a2dd64322b74b061",
+      "result_tree": "df609a4d5c953f253737a927432ab3598647765e"
+    },
+    "RB03": {
+      "review": "95c0c2150aa8efd5f5cf95f690933b99c4cad494",
+      "result_tree": "b4cf20bd92855e2ccdb22748fcf952f19b169738"
+    },
+    "RB04": {
+      "review": "84ed5b61f861e6bca0cc5a30de755ed78a2c0fc2",
+      "result_tree": "f388c5b91945e01a141100039f41f55d728a7331"
+    },
+    "architecture_reference": {
+      "name": "P2C6P-B r1",
+      "review": "d451afdb5a93d3e3b7bc8d84c57a15f005b23f7b"
+    },
+    "chain_reconstruction_exact": true,
+    "initial_working_files_compared": 1605,
+    "initial_working_byte_mismatches": 0
+  },
+  "patch": {
+    "base_tree": "f388c5b91945e01a141100039f41f55d728a7331",
+    "result_tree": "c8c43b0261c1d581575fcd65785140b416dc6d44",
+    "production_changes": true,
+    "changed_paths": [
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py",
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py",
+      "software/sorter/backend/tests/test_rb05_configuration_isolation.py",
+      "software/sorter/backend/tests/test_machine_toml.py",
+      "software/sorter/backend/tests/test_setup_wizard.py"
+    ],
+    "path_hashes": {
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py": {
+        "before_sha256": "e78c42ee8ebf4d438646de7328f3d2006295fe6314005603046fb378f547b68a",
+        "after_sha256": "353989916f02dfb74eaf65a5a6c0c87789dc20195f7202488c26685b59ab8e39",
+        "after_bytes": 18842
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py": {
+        "before_sha256": "1ab13b2265255ab3c2cd8d216508f60b502f60e8c29bde9c3d9821d19b0fa320",
+        "after_sha256": "8205ab58edcafdd92b1d0095b7835b61cc8b7fe0e89349a8ec3140a55017b78f",
+        "after_bytes": 17338
+      },
+      "software/sorter/backend/tests/test_rb05_configuration_isolation.py": {
+        "before_sha256": null,
+        "after_sha256": "6c8f88f91bea95be73a6baf52fbb23665648063c18a25e3aa9b2c9612880d9e5",
+        "after_bytes": 3167
+      },
+      "software/sorter/backend/tests/test_machine_toml.py": {
+        "before_sha256": "f7462c56245dfc6aa7f12f8ad380b8094638c7750c2da9116ed4cc2136492959",
+        "after_sha256": "fa492ca833a6bcb2a8545ffa9d17f569b93f402eb95594ef983a0459fecfde2a",
+        "after_bytes": 2591
+      },
+      "software/sorter/backend/tests/test_setup_wizard.py": {
+        "before_sha256": "6afdc92abf1059a0aaacf9378d738816d4ced23924ca1028984e939cf81b6cc3",
+        "after_sha256": "2dd6eaa4bfb40ca1eed4b6b07e9e99e268bc879dbca3cd95df805016a1f58da3",
+        "after_bytes": 14401
+      }
+    },
+    "artifact_hashes": {
+      "RB05.patch": {
+        "sha256": "007559b86c9f7adcd4290020e322211772f8e63a27d538f8722d8c349ab58e74",
+        "bytes": 13478
+      },
+      "REVIEW.md": {
+        "sha256": "0ba26d3dd3c7a05a5138d52adf2a205fd9757987c43c6cc4b7955525ab79bbf9",
+        "bytes": 12685
+      },
+      "QUALIFICATION.md": {
+        "sha256": "414b828e0a4fadb2dd623d66a284195ad40aa36dd803b7f6daa969e6aeb17dc9",
+        "bytes": 11289
+      },
+      "DEPLOYMENT.md": {
+        "sha256": "610f804b8037b1d2c8a9787f816fc6065db3ea75d299c20e909f08aba7d6eb16",
+        "bytes": 5328
+      }
+    },
+    "isolated_reapplication_exact": true
+  },
+  "instrumentation": {
+    "existing_reused": [
+      "Profiler.snapshotRows duration/state rows",
+      "DistributionStateMachine step and state dwell",
+      "RuntimeStats running time, lifecycle, incidents and throughput",
+      "KnownObject lifecycle timestamps",
+      "RB01 SORTER_PROFILE_BUS and minimum threshold",
+      "RB04 indexed current obligations and durable receipt/effect phases"
+    ],
+    "added_metrics": [
+      "smart_bins.reserve_ms",
+      "smart_bins.release_intent_ms",
+      "smart_bins.dispatch_consume_ms",
+      "smart_bins.current_authorization_ms"
+    ],
+    "constant_metric_names": true,
+    "disabled_mode": "nullcontext; no perf_counter call or profiler row",
+    "enabled_mode": "existing gc.profiler timer; aggregate-only rows; no I/O inside timing logic",
+    "not_directly_measurable": [
+      "paired C3-to-C4 physical latency",
+      "qualified receiving insert latency without installed receiver",
+      "isolated completion commit-only latency",
+      "isolated callback-only latency"
+    ]
+  },
+  "config": {
+    "synthetic_only": true,
+    "live_machine_toml_read": false,
+    "cases": [
+      "retired machine_setup selection keys ignored",
+      "feeder_go_to_angle ignored",
+      "feeder_constant_movement ignored",
+      "feeder_pulse_perception legacy speed and clamp migrate in memory",
+      "explicit per-channel feeder values win",
+      "c_channel_2 and c_channel_3 camera roles",
+      "classification_channel canonical camera",
+      "carousel historical camera alias and C4 motor alias",
+      "dual camera definitions conflict detected; canonical wins",
+      "cwd-independent default path",
+      "relative override based on backend directory",
+      "absolute override"
+    ]
+  },
+  "validation": {
+    "runner": "C:/Users/abria/AppData/Local/Temp/sorter-rb05-run-tests.py",
+    "environment": [
+      "uv run --frozen --offline",
+      "UV_NO_SYNC=1",
+      "Python 3.12",
+      "disposable SQLite root",
+      "external network forbidden",
+      "real serial denied",
+      "PYTHONDONTWRITEBYTECODE=1"
+    ],
+    "test_files": [
+      "tests/test_mcu_bus_read.py",
+      "tests/test_smart_bins_storage.py",
+      "tests/test_smart_bins_reservations.py",
+      "tests/test_smart_bins_native_custody.py",
+      "tests/test_smart_bins_native_runtime.py",
+      "tests/test_smart_bins_native_completion.py",
+      "tests/test_smart_bins_native_projection.py",
+      "tests/test_smart_bins_sending.py",
+      "tests/test_smart_bins_runtime_stats.py",
+      "tests/test_distribution_sending.py",
+      "tests/test_c4_distribution_handoff.py",
+      "tests/test_machine_toml.py",
+      "tests/test_setup_wizard.py",
+      "tests/test_pulse_perception_config.py",
+      "tests/test_rb05_configuration_isolation.py"
+    ],
+    "result": "197 passed, 42 subtests passed, 4 existing FastAPI deprecation warnings",
+    "disposable_db_root": "C:/Users/abria/AppData/Local/Temp/sorter-rb03-tests-3q_0251i",
+    "full_backend_suite_run": false,
+    "ruff_rb04_changed_path_baseline_findings": 0,
+    "ruff_rb05_changed_path_findings": 0,
+    "ruff_new_findings": 0,
+    "git_diff_check": true,
+    "isolated_patch_diff_check": true,
+    "review_nonpatch_staged_diff_check": true,
+    "review_nested_patch_context_whitespace_lines": 13
+  },
+  "gates": {
+    "source_gate": "PASS for review of exact uncommitted tree; user acceptance pending",
+    "receiving_evidence_source_contract": "READY",
+    "physical_receiving_evidence_policy": "NOT YET QUALIFIED",
+    "deployment": "NOT AUTHORIZED OR PERFORMED",
+    "physical_performance": "NOT RUN",
+    "P2C6B": "BLOCKED"
+  },
+  "preservation": {
+    "implementation_branch": "smart-bins-v030-integration",
+    "implementation_head": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "implementation_index_empty": true,
+    "implementation_uncommitted": true,
+    "implementation_not_pushed": true,
+    "old_candidate_branch": "sorting-flow-candidate",
+    "old_candidate_head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "old_candidate_inventory_digest_sha256": "623b773072f5d76e81018229bedbb4759332d37c86c0e3230e3ab3d0016c79c1",
+    "old_candidate_read_only": true,
+    "no_live_hardware_firmware_deployment_provider_or_physical_action": true
+  }
+}
