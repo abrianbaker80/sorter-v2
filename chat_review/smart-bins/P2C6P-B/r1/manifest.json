@@ -1,0 +1,246 @@
+{
+  "package": "P2C6P-B",
+  "revision": "r1",
+  "analysis_only": true,
+  "source_states": {
+    "A": {
+      "ref": "2c8269843c16282659c9edbfbf03e7c7042a15ce",
+      "tree": "26269348312cd4154140828a82c6f5e0a7325bd7",
+      "kind": "commit"
+    },
+    "B": {
+      "ref": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+      "tree": "21e805b60da575ff7468fcc3570a517d80f01cd0",
+      "kind": "commit"
+    },
+    "C": {
+      "ref": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+      "tree": "8d5b04fc56682b0d0a6daab131cd039eedf08aeb",
+      "kind": "commit"
+    },
+    "D": {
+      "ref": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf",
+      "tree": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf",
+      "kind": "tree"
+    }
+  },
+  "candidate": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true,
+    "accepted_result_tree": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf"
+  },
+  "accepted_patch_chain": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch",
+      "patch_sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48",
+      "result_tree": "24f74a41bf8186a69562ad48b22cc244c3c8a5c7"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch",
+      "patch_sha256": "c5fa8560d32b35ddcff00c667d9155ef863c64dac83d932f5e630859fde544cf",
+      "result_tree": "0038a45ec140ae34ae05feda254480bd01ec1d45"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch",
+      "patch_sha256": "66c10674daf771cd6150cb00875f0adbc8528d03bd9e06e651e3bb906d437ca9",
+      "result_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2",
+      "patch": "P2B.patch",
+      "patch_sha256": "bb52252e81fc121cd791c62178107caee12ed2d4c30eecaebad77b49e7dd618d",
+      "result_tree": "33f4b7e6b15709fda640a660ef65475c661a96fe"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2",
+      "patch": "P2C1.patch",
+      "patch_sha256": "5a05f90c31d6b90a1d477fd373de506aee56ed5755d4d0e94f020731cc283773",
+      "result_tree": "43640dfac3e75774be73785084fc6debdedd4bb9"
+    },
+    {
+      "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+      "package": "chat_review/smart-bins/P2C2/r2",
+      "patch": "P2C2.patch",
+      "patch_sha256": "a70b1a768e3dd72efc414f4cdbff249d61cb9e069c83029056cf7460bcc6a4a8",
+      "result_tree": "884171860aa224fc123a3783c3c7363fad70013d"
+    },
+    {
+      "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+      "package": "chat_review/smart-bins/P2C3/r3",
+      "patch": "P2C3.patch",
+      "patch_sha256": "78f8a5fb42bcaa905ade1bd2807ad248c5cb07fee87d2fcddc6571d713420d39",
+      "result_tree": "14c8a136f98136e55f2b982b386ce452e24a1252"
+    },
+    {
+      "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+      "package": "chat_review/smart-bins/P2C4/r3",
+      "patch": "P2C4.patch",
+      "patch_sha256": "e047a4ca5a27772479f1a651305bca412cc5563ce933ddf5e699f6e673cabc5f",
+      "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187"
+    },
+    {
+      "commit": "63c2ca9842e0f3ad461d558ce20513b131504044",
+      "package": "chat_review/smart-bins/P2C5A/r1",
+      "patch": "P2C5A.patch",
+      "patch_sha256": "f50ed2a8b35c970c619a2d83625c7bfb6307c477fbc5094e086fd2788a349b68",
+      "result_tree": "06db1f4e13695b4b45a5fbb295584e82b3f2f2d3"
+    },
+    {
+      "commit": "a798d9c7a9225f69aabf77fed599515d6edea791",
+      "package": "chat_review/smart-bins/P2C5B/r2",
+      "patch": "P2C5B.patch",
+      "patch_sha256": "4a972e256cb60ac352be30a308bcbc941389b53f0a0c60ae7805c9f2393e3dac",
+      "result_tree": "9d8f68b33790d98c7f34584ade99be7b5a164b9a"
+    },
+    {
+      "commit": "2952a9ac4d52ec9b5f0becd580c97f9512ce3853",
+      "package": "chat_review/smart-bins/P2C6A/r1",
+      "patch": "P2C6A.patch",
+      "patch_sha256": "c083fa3ed2134a1710b9deac924c2a780750e678af90384794034c5b6d808659",
+      "result_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22"
+    },
+    {
+      "commit": "d774c93b44d67be15d65d90bbe515ef8e593cbea",
+      "package": "chat_review/smart-bins/P2C6P-C01/r1",
+      "patch": "P2C6P-C01.patch",
+      "patch_sha256": "ec31d6a2301fee052aa0a398249c733526810ddc35c70d4b4cc120e15c9f1582",
+      "result_tree": "b604851c01253880d331525884d0dc280a478485"
+    },
+    {
+      "commit": "6c723deba5f4fa20a23a6a6706089a51356034ef",
+      "package": "chat_review/smart-bins/P2C6P-C02/r1",
+      "patch": "P2C6P-C02.patch",
+      "patch_sha256": "8592dec6c2373772fcb30ea0be851a191a4617d8adad470fe275948b542afdfb",
+      "result_tree": "615cb66d5d78e4f5737564f3e81b82a1c47ee9cf"
+    }
+  ],
+  "accepted_chain_reconstruction_verified": true,
+  "accepted_chain_patch_count": 13,
+  "working_tree_canonical_files_verified": 869,
+  "compared_inventories": {
+    "A": {
+      "paths": 1449,
+      "sha256": "ec0be5fb0ac33110501552d6204aed79a55d9bb05ef58db14caf005b8d139cb9"
+    },
+    "B": {
+      "paths": 1569,
+      "sha256": "01262c7ae2e24259f05fc7a0747021aecc09e44426b99752ab2a8107f1ac0b21"
+    },
+    "C": {
+      "paths": 844,
+      "sha256": "1ea649c21d18b2c0187c78a2af37e40c6cf9f728034413f09b013429f906e3c8"
+    },
+    "D": {
+      "paths": 869,
+      "sha256": "1546bcd077c648a9bb451d01ea38a7abdc8985167aa40d19a4b62336f1d90ce3"
+    }
+  },
+  "compared_relevant_paths": 77,
+  "accepted_production_change_count": 29,
+  "custom_component_counts": {
+    "REQUIRED_NOW": 2,
+    "USEFUL_BUT_SIMPLIFIABLE": 7,
+    "DEFERRED_EXPERIMENT": 9,
+    "OBSOLETE_FOR_CURRENT_ARCHITECTURE": 3,
+    "SMART_BIN_ADAPTER_ONLY": 3
+  },
+  "custom_module_count": 24,
+  "firmware_ref": "8d560d26b60b09145d0c7c62ac81f2fb3c22a60c",
+  "firmware_objects": {
+    "software/firmware/sorter_interface_firmware": {
+      "B": "06181d87b2258fcce1581145cea672daaa2b5702",
+      "firmware_v0_8_1": "06181d87b2258fcce1581145cea672daaa2b5702"
+    },
+    "software/firmware/sorter_interface_firmware/sorter_interface_firmware.cpp": {
+      "B": "3c5abfbd83039b1902eae0bb7e2cce5d9a5f18cc",
+      "firmware_v0_8_1": "3c5abfbd83039b1902eae0bb7e2cce5d9a5f18cc"
+    },
+    "software/firmware/sorter_interface_firmware/message.cpp": {
+      "B": "3a03b672afaa6378f5e93034031e5ca0fc7dbe1c",
+      "firmware_v0_8_1": "3a03b672afaa6378f5e93034031e5ca0fc7dbe1c"
+    },
+    "software/firmware/sorter_interface_firmware/Servo.cpp": {
+      "B": "75b605a37dc9c8d326f2873d72d36af7a59d1854",
+      "firmware_v0_8_1": "75b605a37dc9c8d326f2873d72d36af7a59d1854"
+    },
+    "software/firmware/sorter_interface_firmware/Stepper.cpp": {
+      "B": "4ab459035fbe17db4d73b749315be12f96814a03",
+      "firmware_v0_8_1": "4ab459035fbe17db4d73b749315be12f96814a03"
+    },
+    "software/firmware/sorter_interface_firmware/hwcfg_basically_v1_2.h": {
+      "B": "fa99c7edd04685b4b68390feab08bbebd0a61b6b",
+      "firmware_v0_8_1": "fa99c7edd04685b4b68390feab08bbebd0a61b6b"
+    }
+  },
+  "recommendations": {
+    "source_base": "OPTION_2",
+    "physical_owner": "A",
+    "first_slice": "RB01",
+    "agent": "GPT-6 Sol",
+    "reasoning": "High"
+  },
+  "gate": {
+    "P2C6B": "BLOCKED",
+    "old_C03_C13": "SUPERSEDED",
+    "physical_evidence_contract": "not yet qualified",
+    "deployment": "not authorized by this analysis"
+  },
+  "checks": {
+    "four_way_git_sources": true,
+    "C01_AST_equivalent_to_B": true,
+    "C02_bus_B_equal_A": true,
+    "citation_ranges_checked": 51,
+    "custom_citation_ranges_checked": 104,
+    "platform_source_objects_checked": 64,
+    "application_imports": false,
+    "pytest_run": false,
+    "schemas_initialized": false,
+    "firmware_build_or_flash": false,
+    "live_access": false,
+    "implementation_changes": false,
+    "independent_source_reviews": "PASSED: native flow/evidence, custom components/accepted-change coverage, platform/Harvest/privacy; integrated artifact reviews passed"
+  },
+  "preservation": {
+    "inventory_files": 869,
+    "all_files_byte_identical": true,
+    "inventory_sha256": "d4ae072299bc0590115451435325d135ae22dc0b375d459b14827c45733af03e",
+    "status_sha256": "122d952f69d50d554494fe5506289b4a5cb169310dc4f1ce70bc386a50c282be",
+    "status_unchanged": true,
+    "implementation_index_sha256": "f9b14e028a87a6722fb563af357225d867cb8b5cf701d77603f113e9d94dc7d6",
+    "index_byte_identical": true,
+    "index_empty": true,
+    "head_unchanged": true,
+    "branch_unchanged": true,
+    "implementation_source_modifications": 0,
+    "old_blocked_indexes": "not accessed",
+    "operational_databases": "not accessed or hashed",
+    "ignored_configuration": "not modified",
+    "private_full_inventory_retained": true
+  },
+  "publication": {
+    "branch": "chat-review",
+    "expected_parent": "6c723deba5f4fa20a23a6a6706089a51356034ef",
+    "allowlist": [
+      "chat_review/smart-bins/P2C6P-B/r1/REVIEW.md",
+      "chat_review/smart-bins/P2C6P-B/r1/ARCHITECTURE.md",
+      "chat_review/smart-bins/P2C6P-B/r1/comparison.json",
+      "chat_review/smart-bins/P2C6P-B/r1/manifest.json"
+    ],
+    "normal_fast_forward_only": true,
+    "remote_readback": "Ref, parent, exact file list and byte hashes verified before final response; separate private receipt"
+  },
+  "package_hashes": {
+    "REVIEW.md": "25d07b16c4b1bd44d5def1503216eb4fdf8fe7839a9b2679ae138728645899d9",
+    "ARCHITECTURE.md": "bbfbb58287840cce7f93666644b80389d06acdba428cb9e65778e148b1182aff",
+    "comparison.json": "a268e8b2a3da34a4729a9fafeaaedf3711b71918f0d8a2b766be1ea82ff9ec7e"
+  }
+}
