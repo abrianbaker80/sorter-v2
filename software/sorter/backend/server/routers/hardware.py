@@ -55,7 +55,7 @@ from local_state import (
     list_bin_snapshots,
 )
 from server import shared_state
-from server.routers.steppers import _stepper_mapping, _halt_stepper
+from server.routers.steppers import _stepper_mapping, _halt_stepper, _guard_route_configuration
 from server.waveshare_inventory import get_waveshare_inventory_manager
 from machine_platform.control_board import discover_control_boards
 
@@ -69,6 +69,12 @@ def _active_irl() -> Any | None:
 
 
 def _ensure_not_homing(action: str) -> None:
+    from smart_bins_native_custody import motion_entry, CustodyRefused
+    try:
+        with motion_entry("manual", "route"):
+            pass
+    except CustodyRefused as exc:
+        raise HTTPException(status_code=409,detail=f"Cannot {action}: {exc}") from exc
     worker = shared_state.hardware_worker_thread
     if (
         (worker is not None and worker.is_alive())
@@ -1030,6 +1036,7 @@ def get_live_servo_feedback() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo")
+@_guard_route_configuration
 def save_servo_hardware_config(
     payload: ServoHardwareSettingsPayload,
 ) -> Dict[str, Any]:
@@ -1184,6 +1191,7 @@ class ServoSpeedSettingsPayload(BaseModel):
 
 
 @router.post("/api/hardware-config/servo/speeds")
+@_guard_route_configuration
 def save_servo_speeds(payload: ServoSpeedSettingsPayload) -> Dict[str, Any]:
     _SPEED_RANGE = (1, 2000)
 
@@ -1437,6 +1445,7 @@ def _servo_calibration_state(servo: Any) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/servo/layers/{layer_index}/lock")
+@_guard_route_configuration
 def lock_layer_servo_angle(layer_index: int, payload: ServoLayerLockPayload) -> Dict[str, Any]:
     _ensure_not_homing("lock a servo angle")
     if payload.which not in {"open", "closed"}:
@@ -1598,6 +1607,7 @@ def get_waveshare_servos(port: str | None = None) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/waveshare/servos/{servo_id}/set-id")
+@_guard_route_configuration
 def set_waveshare_servo_id(servo_id: int, payload: ServoSetIdPayload) -> Dict[str, Any]:
     """Change a servo's ID on the bus."""
     _ensure_not_homing("change a Waveshare servo ID")
@@ -1810,6 +1820,7 @@ def get_chute_hardware_config() -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/chute")
+@_guard_route_configuration
 def save_chute_hardware_config(
     payload: ChuteHardwareSettingsPayload,
 ) -> Dict[str, Any]:
@@ -2090,6 +2101,7 @@ def _persist_and_apply_chute_aiming(
 
 
 @router.post("/api/hardware-config/chute/aiming")
+@_guard_route_configuration
 def save_chute_aiming_config(payload: ChuteAimingSettingsPayload) -> Dict[str, Any]:
     num_sections = int(payload.num_sections)
     if num_sections < 1:
@@ -2303,6 +2315,7 @@ def delete_chute_calibration(calibration_id: str) -> Dict[str, Any]:
 
 
 @router.post("/api/hardware-config/storage-layers")
+@_guard_route_configuration
 def save_storage_layer_hardware_config(
     payload: StorageLayerSettingsPayload,
 ) -> Dict[str, Any]:
@@ -2526,6 +2539,7 @@ def _apply_and_persist_not_in_inventory(flags: list[list[list[bool]]]) -> None:
     setNotInInventoryBins(flags)
 
 
+@_guard_route_configuration
 def set_not_in_inventory_mode(
     *, scope: str, layer_index: int | None, section_index: int | None,
     bin_index: int | None, enabled: bool,
@@ -3025,6 +3039,7 @@ def get_bins_settings() -> Dict[str, Any]:
 
 
 @router.post("/api/bins/settings")
+@_guard_route_configuration
 def set_bins_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     from toml_config import setBinAssignmentConfig
 
@@ -3119,6 +3134,7 @@ def move_to_section(payload: MoveToSectionPayload) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/sections/enabled")
+@_guard_route_configuration
 def set_section_enabled(payload: SectionEnabledPayload) -> Dict[str, Any]:
     """Enable/disable sections: a single section, a whole column (same section
     index across every layer), or every section on the machine."""
@@ -3196,6 +3212,7 @@ def auto_assign_bins_route(payload: AutoAssignBinsPayload) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/not-in-inventory/set")
+@_guard_route_configuration
 def set_bins_not_in_inventory(payload: NotInInventoryModePayload) -> Dict[str, Any]:
     return set_not_in_inventory_mode(
         scope=payload.scope,
@@ -3217,6 +3234,7 @@ def clear_bins_contents(payload: ClearBinContentsPayload) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/reset/layer/{layer_index}")
+@_guard_route_configuration
 def reset_bins_layer(layer_index: int) -> Dict[str, Any]:
     # Full reset of one layer: drop its category assignments and empty its bins
     # in a single server-side call, then hand back the fresh layout + contents so
@@ -3228,6 +3246,7 @@ def reset_bins_layer(layer_index: int) -> Dict[str, Any]:
 
 
 @router.post("/api/bins/reset/machine")
+@_guard_route_configuration
 def reset_bins_machine() -> Dict[str, Any]:
     # Full machine reset: drop every assignment and empty every bin in one call,
     # returning the fresh layout + (now empty) contents.

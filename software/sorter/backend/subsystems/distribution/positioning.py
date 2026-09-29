@@ -98,6 +98,7 @@ class Positioning(BaseState):
         self._jam_ignored_logged: bool = False
         self._servo_bus_pause_enqueued: bool = False
         self._chute_move_estimated_ms: int = 0
+        self._native_flaps_released = False
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -111,6 +112,11 @@ class Positioning(BaseState):
         )
 
     def step(self) -> Optional[DistributionState]:
+        adapter = getattr(self.shared, "native_custody", None)
+        if adapter is not None:
+            from smart_bins_native_custody import MOTION_LOCK
+            with MOTION_LOCK:
+                return self._nativeCustodyStep(adapter)
         now = time.monotonic()
 
         if self._phase == "init":
@@ -390,6 +396,90 @@ class Positioning(BaseState):
                 self.logger.info(f"Positioning: complete (servo+chute={move_ms:.0f}ms, total={total_ms:.0f}ms)")
             return DistributionState.READY
 
+        return None
+
+    def _nativeCustodyStep(self, adapter) -> Optional[DistributionState]:
+        from smart_bins_native_custody import CustodyRefused
+        from .flap_path import qualify
+        if adapter.blocked or adapter._fault:
+            self.shared.set_distribution_gate(False,reason="native_custody_held")
+            if not self._native_flaps_released:
+                released = True
+                for servo in self.irl.servos:
+                    try:
+                        servo.stop()
+                    except Exception as exc:
+                        released = False
+                        self.logger.warning(f"Native custody flap release failed: {exc}")
+                self._native_flaps_released = released
+            return None
+        try:
+            if self._phase == "init":
+                piece = self.shared.transport.getPieceForDistributionPositioning()
+                if piece is None:
+                    return DistributionState.IDLE
+                # A manual command issued before reservation may still be in
+                # flight. Serialize inspection with reservation and require the
+                # native C4/C3 actors stopped before accepting physical custody.
+                for role in ("carousel_stepper", "c_channel_3_rotor_stepper"):
+                    motor = getattr(self.irl,role,None)
+                    if motor is None or getattr(motor,"software_disabled",False) or motor.stopped is not True:
+                        raise CustodyRefused(f"{role} has not established stopped state")
+                if getattr(self.shared, "bucket_passthrough_hold", False):
+                    adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"reason":"multi-drop bucket hold","quantity":None})
+                category = self.sorting_profile.getCategoryIdForPart(piece.part_id,piece.color_id) if piece.part_id else MISC_CATEGORY
+                override = self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
+                if override is not None:
+                    category = override
+                if piece.too_big or getattr(self.shared,"sample_collection_mode",False):
+                    category = MISC_CATEGORY
+                route = adapter.reserve_route(piece,category,self.sorting_profile,self.layout,self.chute,self.shared.transport)
+                self.shared.distribution_positioned_uuid = piece.uuid
+                self._piece = piece
+                self._target_address = route['address']
+                self.shared.native_route_layer = route['address'].layer_index if route['address'] else None
+                self.shared.native_flap_commands = {}
+                with adapter.route_scope():
+                    if route['address'] is None:
+                        self._openAllDoorsForPassthrough()
+                    else:
+                        self._selectDoor(route['address'].layer_index)
+                        self._startChuteMove()
+                if any(self.shared.native_flap_commands.get(i) is not True for i in range(len(self.layout.layers))):
+                    adapter.observation("ROUTE_UNCERTAIN",{"reason":"flap command unavailable or unconfirmed"},uncertain=True)
+                    raise CustodyRefused("Route flap command unconfirmed")
+                self._phase = "native_wait"
+                piece.stage = PieceStage.distributing
+                piece.distributing_at = time.time()
+                piece.distribution_target_selected_at = piece.distributing_at
+                piece.category_id = category
+                # Preserve native intended routing metadata; never create actual Smart Bin destination.
+                piece.destination_bin = ((route['address'].layer_index,route['address'].section_index,route['address'].bin_index) if route['address'] else None)
+                piece.updated_at = time.time()
+                self.event_queue.put(knownObjectToEvent(piece))
+                return None
+            if self._phase == "native_wait":
+                if self._target_address is not None:
+                    if self.gc.disable_chute or not self.chute.homed or not self.chute.stepper.stopped:
+                        return None
+                    receipt = self.chute.stepper.last_finite_receipt
+                    if receipt is None or receipt.outcome not in ('ACCEPTED','NOT_DISPATCHED'):
+                        raise CustodyRefused("Chute command unconfirmed")
+                    expected = self.chute.getAngleForBin(self._target_address)
+                    if expected is None or abs(self.chute.current_angle-expected) > 0.1:
+                        raise CustodyRefused("Chute controller position disagrees with intended route")
+                qualify(self.irl.servos,layer_count=len(self.layout.layers),target_layer=self.shared.native_route_layer,commands=self.shared.native_flap_commands)
+                self.shared.set_chute_motion(False,target_bin=self._target_address)
+                self._piece.distribution_positioned_at = time.time()
+                return DistributionState.READY
+        except CustodyRefused as exc:
+            self.shared.set_distribution_gate(False,reason="native_custody_refused")
+            self._setOccupancyState("positioning.native_custody_refused")
+            self.logger.warning(f"Native custody: {exc}")
+        except Exception as exc:
+            adapter._fault = str(exc)
+            self.shared.set_distribution_gate(False,reason="native_custody_error")
+            self.logger.error(f"Native custody route failed: {exc}")
         return None
 
     def _startChuteMove(self) -> None:
@@ -780,7 +870,9 @@ class Positioning(BaseState):
             try:
                 if hasattr(servo, "apply_open_speed"):
                     servo.apply_open_speed()
-                servo.open()
+                accepted = servo.open()
+                if getattr(self.shared, "native_custody", None) is not None:
+                    self.shared.native_flap_commands[i] = accepted is True
             except Exception as exc:
                 self._markLayerUnavailable(
                     i,
@@ -810,7 +902,9 @@ class Positioning(BaseState):
             try:
                 if hasattr(servo, "apply_open_speed"):
                     servo.apply_open_speed()
-                servo.open()
+                accepted = servo.open()
+                if getattr(self.shared, "native_custody", None) is not None:
+                    self.shared.native_flap_commands[i] = accepted is True
                 opened_layers.append(i)
             except Exception as exc:
                 self._markLayerUnavailable(
@@ -821,7 +915,9 @@ class Positioning(BaseState):
         try:
             if hasattr(target_servo, "apply_close_speed"):
                 target_servo.apply_close_speed()
-            target_servo.close()
+            accepted = target_servo.close()
+            if getattr(self.shared, "native_custody", None) is not None:
+                self.shared.native_flap_commands[target_layer_index] = accepted is True
         except Exception as exc:
             self._markLayerUnavailable(
                 target_layer_index,

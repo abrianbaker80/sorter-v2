@@ -33,6 +33,9 @@ class Sending(BaseState):
         self.start_time: float = 0.0
         self._occupancy_state: str | None = None
         self._committed: bool = False
+        self._native_pending_event_sent = False
+        self._native_next_check_at = 0.0
+        self._native_last_error: str | None = None
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -60,6 +63,11 @@ class Sending(BaseState):
                 elapsed_ms = (now - self.start_time) * 1000
                 self._setOccupancyState("sending.wait_drop_piece")
                 if elapsed_ms >= MISSING_DROP_PIECE_GRACE_MS:
+                    adapter = getattr(self.gc, "smart_bins_native_adapter", None)
+                    if (adapter is not None and adapter.active and
+                        adapter.current is not None):
+                        # A missing drop object cannot erase durable custody.
+                        return None
                     self.logger.warning(
                         "Sending: no distribution-drop piece available after "
                         f"{elapsed_ms:.0f}ms; reopening distribution gate"
@@ -77,6 +85,9 @@ class Sending(BaseState):
         self._setOccupancyState("sending.wait_chute_settle")
         if elapsed_ms < settle_ms:
             return None
+
+        if self.piece and self.piece.native_reservation_id:
+            return self._stepNative()
 
         # Commit the piece once (stats, event, recorder) — must not repeat
         # even if we decide to hold the gate for additional cooldown below.
@@ -119,6 +130,129 @@ class Sending(BaseState):
         self.shared.set_distribution_gate(True, reason=None)
         return DistributionState.IDLE
 
+    def _nativeEffect(self, completion, effect: str, callback) -> bool:
+        piece = self.piece
+        identity = (piece.native_machine_id, piece.native_reservation_id,
+                    piece.uuid, piece.native_delivery_id)
+        phase = completion.effect_phase(*identity, effect)
+        if phase == "SUCCEEDED":
+            return True
+        if phase == "ATTEMPTED":
+            raise completion.NativeCompletionRefused(
+                "Ambiguous callback attempt requires reconciliation"
+            )
+        attempt_id = completion.begin_effect(*identity, effect)
+        if attempt_id is None:
+            raise completion.NativeCompletionRefused(
+                "Publication effect changed before callback"
+            )
+        try:
+            callback()
+        except Exception as exc:
+            failure_phase = (
+                "GATE_OPEN" if effect == "GATE_OPEN" else
+                "ADMISSION_RELEASE" if effect == "ADMISSION_RELEASE" else
+                "PUBLICATION_CALLBACKS"
+            )
+            completion.record_effect_failure(
+                *identity, effect, attempt_id, failure_phase, str(exc)
+            )
+            raise
+        completion.finish_effect(*identity, effect, attempt_id)
+        return True
+
+    def _stepNative(self) -> Optional[DistributionState]:
+        import smart_bins_native_completion as completion
+
+        if time.time() < self._native_next_check_at:
+            return None
+        piece = self.piece
+        machine_id = piece.native_machine_id
+        reservation_id = piece.native_reservation_id
+        if not machine_id or not reservation_id or machine_id != self.gc.machine_id:
+            self.logger.warning("Sending: native provenance is incomplete or foreign")
+            return None
+        try:
+            delivery_id = completion.complete_native(piece, machine_id,
+                                                     reservation_id, self.gc.run_id)
+            if delivery_id is None:
+                # Route and settle are not receiving proof. No history, count or
+                # progress is published for this held claim.
+                if not self._native_pending_event_sent:
+                    piece.destination_bin = None
+                    self.event_queue.put(knownObjectToEvent(piece))
+                    self._native_pending_event_sent = True
+                self._setOccupancyState("sending.wait_piece_exit")
+                self._native_next_check_at = time.time() + 1.0
+                return None
+            piece.native_delivery_id = delivery_id
+            details = completion.delivery_details(machine_id, reservation_id,
+                                                  piece.uuid, delivery_id)
+            piece.destination_bin = details["destination_bin"]
+            piece.distributed_at = details["distributed_at"]
+            piece.updated_at = time.time()
+            piece.stage = PieceStage.distributed
+
+            if not self._nativeEffect(
+                completion, "EVENT_ENQUEUED",
+                lambda: self.event_queue.put(knownObjectToEvent(piece))
+            ):
+                return None
+            if not self._nativeEffect(
+                completion, "RUN_RECORDER_ADOPTED",
+                lambda: self.gc.run_recorder.recordCommittedNativePiece(
+                    piece, reservation_id, delivery_id)
+            ):
+                return None
+            tracker = getattr(self.gc, "set_progress_tracker", None)
+            if not self._nativeEffect(
+                completion, "PROGRESS_RECORDED",
+                lambda: tracker.record(piece.part_id, piece.color_id,
+                                       piece.category_id) if tracker else None
+            ):
+                return None
+            if not self._nativeEffect(
+                completion, "PROGRESS_SYNC_NOTIFIED",
+                lambda: __import__("server.set_progress_sync", fromlist=[
+                    "getSetProgressSyncWorker"]).getSetProgressSyncWorker().notify()
+                if tracker else None
+            ):
+                return None
+            if completion.effect_phase(machine_id, reservation_id, piece.uuid,
+                                       delivery_id, "CLOSE") != "SUCCEEDED":
+                completion.close_publication(machine_id, reservation_id,
+                                             piece.uuid, delivery_id)
+            if not self._shouldReopenGate():
+                return None
+            if completion.current_blocker(
+                machine_id, except_reservation=reservation_id
+            ):
+                return None
+            if not self._nativeEffect(
+                completion, "GATE_OPEN",
+                lambda: self.shared.set_distribution_gate(True, reason=None)
+            ):
+                return None
+            adapter = getattr(self.gc, "smart_bins_native_adapter", None)
+            if adapter is None:
+                return None
+            if not self._nativeEffect(
+                completion, "ADMISSION_RELEASE",
+                lambda: adapter.release_completed(piece.uuid, reservation_id,
+                                                  delivery_id)
+            ):
+                return None
+            return DistributionState.IDLE
+        except Exception as exc:
+            message = str(exc)
+            if message != self._native_last_error:
+                self.logger.warning(
+                    f"Sending: native completion remains held: {message}"
+                )
+                self._native_last_error = message
+            self._native_next_check_at = time.time() + 1.0
+            return None
+
     @staticmethod
     def _alreadyCommitted(piece) -> bool:
         return piece.stage == PieceStage.distributed or piece.distributed_at is not None
@@ -143,3 +277,6 @@ class Sending(BaseState):
         self.piece = None
         self.start_time = 0.0
         self._committed = False
+        self._native_pending_event_sent = False
+        self._native_next_check_at = 0.0
+        self._native_last_error = None

@@ -14,10 +14,14 @@ class ClassificationChannelTransport:
     """
 
     def __init__(self) -> None:
+        self.native_head_generation = 0
+        self.native_adapter = None
         self._wait_piece: KnownObject | None = None
         self._exit_piece: KnownObject | None = None
 
     def advanceTransport(self) -> None:
+        if self.native_adapter is not None:
+            self.native_adapter.observation("SOFTWARE_SLOT_PROMOTION")
         self._exit_piece = self._wait_piece
         self._wait_piece = None
 
@@ -25,6 +29,8 @@ class ClassificationChannelTransport:
         """Stage the classified piece in the positioning slot so distribution
         aims the chute for it; ``advanceTransport()`` (issued when the piece is
         flung into the chute) promotes it to the drop slot."""
+        if self._wait_piece is not obj:
+            self.native_head_generation += 1
         self._wait_piece = obj
 
     def clearPieceForDistribution(self, obj: KnownObject | None = None) -> bool:
@@ -36,6 +42,8 @@ class ClassificationChannelTransport:
             return False
         if obj is not None and self._wait_piece is not obj:
             return False
+        if self.native_adapter is not None:
+            self.native_adapter.observation("TRACK_LOST_REIDENTIFIED", uncertain=True)
         self._wait_piece = None
         return True
 

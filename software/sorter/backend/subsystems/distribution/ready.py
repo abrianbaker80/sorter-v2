@@ -18,6 +18,17 @@ class Ready(BaseState):
     def step(self) -> Optional[DistributionState]:
         transport = self.shared.transport
         if not self.signaled:
+            adapter = getattr(self.shared,"native_custody",None)
+            if adapter is not None:
+                from .flap_path import qualify
+                try:
+                    evidence = qualify(self.irl.servos,layer_count=len(self.irl.distribution_layout.layers),
+                        target_layer=self.shared.native_route_layer,commands=self.shared.native_flap_commands)
+                    adapter.arm_ready(self.shared.distribution_positioned_uuid,evidence)
+                except Exception as exc:
+                    self.shared.set_distribution_gate(False,reason="native_release_intent_refused")
+                    self.logger.warning(f"Native READY refused: {exc}")
+                    return None
             self.logger.info("Ready: distribution positioned, signaling ready")
             self.shared.set_distribution_gate(True, reason="ready_chute_aimed")
             self.signaled = True

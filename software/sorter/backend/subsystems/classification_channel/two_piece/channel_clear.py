@@ -51,7 +51,13 @@ def channelOccupied(gc: Any) -> Optional[bool]:
     perception_service = getattr(gc, "perception_service", None)
     if perception_service is not None:
         try:
-            return int(perception_service.read_state(4).n_pieces) > 0
+            state = perception_service.read_state(4)
+            adapter = getattr(gc,"smart_bins_native_adapter",None)
+            if adapter is not None and adapter.active:
+                ts = getattr(state,"ts",None)
+                if not isinstance(ts,(int,float)) or not 0 <= time.time()-ts <= 0.5:
+                    return None
+            return int(state.n_pieces) > 0
         except Exception:
             pass
     return None
@@ -132,7 +138,21 @@ def clearChannelByAdvancing(
     label: str = LOG_TAG,
 ) -> ChannelClearResult:
     occupied = channelOccupied(gc)
+    adapter = getattr(gc,"smart_bins_native_adapter",None)
+    if adapter is not None and (adapter.active or adapter.blocked):
+        try:
+            adapter.require_startup()
+            if occupied is not False:
+                adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL",{"entry":"channel_clear","quantity":None})
+        except Exception as exc:
+            return ChannelClearResult(False,bool(occupied),0.0,f"native_custody_refused: {exc}")
     if occupied is False:
+        if adapter is not None and adapter.active:
+            try:
+                adapter.observed_clear()
+            except Exception as exc:
+                adapter._fault = str(exc)
+                return ChannelClearResult(False,False,0.0,"native_clear_evidence_failed")
         gc.logger.info(f"{label} channel clear: already empty, nothing to advance")
         return ChannelClearResult(True, False, 0.0, "already_clear")
 

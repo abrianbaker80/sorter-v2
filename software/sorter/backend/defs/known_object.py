@@ -176,6 +176,10 @@ class KnownObject:
     # rejected for size (when too_big_for_layer is set).
     intended_layer_index: Optional[int] = None
     destination_bin: Optional[Tuple[int, int, int]] = None
+    # Durable native Smart Bin identity. Delivery is filled only after receipt readback.
+    native_machine_id: Optional[str] = None
+    native_reservation_id: Optional[str] = None
+    native_delivery_id: Optional[str] = None
     thumbnail: Optional[str] = None
     latest_captured_crop: Optional[str] = None
     latest_captured_crop_ts: Optional[float] = None

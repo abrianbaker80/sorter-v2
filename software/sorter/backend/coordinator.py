@@ -44,6 +44,13 @@ class Coordinator:
 
         self.transport = ClassificationChannelTransport()
         self.shared.transport = self.transport
+        from subsystems.classification_channel.smart_bins_native_adapter import attach
+        adapter = attach(gc)
+        adapter.require_startup()
+        self.shared.native_custody = adapter if adapter.active else None
+        self.transport.native_adapter = self.shared.native_custody
+        if adapter.active:
+            self.shared.set_distribution_gate(False, reason="native_custody_not_armed")
         self.distribution = DistributionStateMachine(
             irl,
             gc,
@@ -118,6 +125,11 @@ class Coordinator:
         return incident.get("source_kind") == "c4_stall_watchdog"
 
     def step(self) -> None:
+        from smart_bins_native_custody import MOTION_LOCK
+        with MOTION_LOCK:
+            self._step_owned()
+
+    def _step_owned(self) -> None:
         prof = self.gc.profiler
         prof.hit("coordinator.step.calls")
         prof.mark("coordinator.step.interval_ms")

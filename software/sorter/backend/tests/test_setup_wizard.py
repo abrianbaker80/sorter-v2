@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from server.api import app
 from server.routers import cameras, setup
+import local_state
 
 
 class SetupWizardConfigTests(unittest.TestCase):
@@ -24,6 +25,11 @@ class SetupWizardConfigTests(unittest.TestCase):
         os.environ["LOCAL_STATE_DB_PATH"] = str(self.local_state_db_path)
 
     def tearDown(self) -> None:
+        # The process-lifetime WAL keeper otherwise pins this disposable DB on Windows.
+        with local_state._KEEPER_LOCK:
+            if local_state._keeper_conn is not None:
+                local_state._keeper_conn.close()
+                local_state._keeper_conn = None
         if self._old_machine_params is None:
             os.environ.pop("MACHINE_SPECIFIC_PARAMS_PATH", None)
         else:

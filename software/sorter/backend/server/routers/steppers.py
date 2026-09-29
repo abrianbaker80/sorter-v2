@@ -7,6 +7,8 @@ import os
 import random
 import threading
 import time
+from functools import wraps
+from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import stepper_telemetry
@@ -119,6 +121,20 @@ class TmcSettingsRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _guard_route_configuration(fn):
+    """Keep route interpretation fixed while native custody is held."""
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        from smart_bins_native_custody import CustodyRefused, motion_entry
+        try:
+            with motion_entry("configuration", "route"):
+                return fn(*args, **kwargs)
+        except CustodyRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Resolve annotations in the original router's namespace for FastAPI.
+    guarded.__signature__ = signature(fn, eval_str=True)
+    return guarded
+
 def _stepper_mapping() -> Dict[str, Any]:
     irl = shared_state.getActiveIRL()
     if irl is None:
@@ -190,6 +206,12 @@ def _ensure_no_blocking_fault(action: str) -> None:
 
 
 def _ensure_manual_motion_allowed(action: str) -> None:
+    from smart_bins_native_custody import motion_entry, CustodyRefused
+    try:
+        with motion_entry("manual", "route"):
+            pass
+    except CustodyRefused as exc:
+        raise HTTPException(status_code=409,detail=f"Cannot {action}: {exc}") from exc
     from subsystems.power_stress import getActivePowerStressRunner
 
     power_runner = getActivePowerStressRunner()
@@ -1037,6 +1059,7 @@ def get_tmc_settings(name: str) -> Dict[str, Any]:
 
 
 @router.post("/api/stepper/{name}/tmc")
+@_guard_route_configuration
 def set_tmc_settings(name: str, body: TmcSettingsRequest) -> Dict[str, Any]:
     stepper = _resolve_stepper(name)
 
@@ -1634,6 +1657,7 @@ def _persist_stepper_stallguard(api_name: str, sgthrs: int, tcoolthrs: int, enab
 
 
 @router.post("/stepper/{stepper}/stallguard-config", response_model=StallGuardConfigResponse)
+@_guard_route_configuration
 def set_stallguard_config(stepper: str, body: StallGuardConfigBody) -> StallGuardConfigResponse:
     target = _resolve_stepper(stepper)
     toml_name = _STEPPER_API_TO_TOML_NAME.get(stepper, stepper)

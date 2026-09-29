@@ -189,12 +189,19 @@ def _ensureInitialized() -> None:
             conn.close()
 
 
-def recordPiece(
+def initialize_piece_records() -> None:
+    """Explicitly prepare history before a caller-owned transaction."""
+    _ensureInitialized()
+
+
+def recordPieceOnConnection(
+    conn: sqlite3.Connection,
     piece: dict[str, Any],
     *,
     run_id: Optional[str] = None,
     machine_id: Optional[str] = None,
 ) -> None:
+    """Write v0.3.0 history without opening a connection or committing."""
     uuid_val = piece.get("uuid")
     if not isinstance(uuid_val, str):
         return
@@ -205,67 +212,77 @@ def recordPiece(
     seen_at = piece.get("created_at")
     recorded_at = piece.get("distributed_at") or time.time()
     dead = 1 if piece.get("dead") else 0
-    with _connection() as conn:
-        # Upsert (not INSERT OR IGNORE): a piece can be recorded early by the
-        # correction API straight from memory (so a just-classified piece is
-        # correctable before it distributes), then re-recorded at distribution
-        # with its bin. On conflict we refresh the classification/bin columns but
-        # NEVER touch the correction columns (part_correct, color_corrected_id,
-        # *_feedback_submitted, correction_updated_at) so a recorded correction
-        # survives the distribution write.
-        conn.execute(
-            "INSERT INTO piece_records "
-            "(uuid, run_id, machine_id, seen_at, recorded_at, classification_status, "
-            "part_id, part_name, color_id, color_name, category_id, confidence, "
-            "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
-            "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
-            "brickognize_color_rank, color_provider, mold_provider, color_confidence) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(uuid) DO UPDATE SET "
-            "run_id=excluded.run_id, machine_id=excluded.machine_id, "
-            "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
-            "classification_status=excluded.classification_status, "
-            "part_id=excluded.part_id, part_name=excluded.part_name, "
-            "color_id=excluded.color_id, color_name=excluded.color_name, "
-            "category_id=excluded.category_id, confidence=excluded.confidence, "
-            "bin_x=excluded.bin_x, bin_y=excluded.bin_y, bin_z=excluded.bin_z, "
-            "dead=excluded.dead, brickognize_preview_url=excluded.brickognize_preview_url, "
-            "brickognize_listing_id=excluded.brickognize_listing_id, "
-            "brickognize_item_rank=excluded.brickognize_item_rank, "
-            "brickognize_item_type=excluded.brickognize_item_type, "
-            "brickognize_color_rank=excluded.brickognize_color_rank, "
-            "color_provider=excluded.color_provider, "
-            "mold_provider=excluded.mold_provider, "
-            "color_confidence=excluded.color_confidence",
-            (
-                uuid_val,
-                run_id,
-                machine_id,
-                float(seen_at) if isinstance(seen_at, (int, float)) else None,
-                float(recorded_at) if isinstance(recorded_at, (int, float)) else None,
-                piece.get("classification_status"),
-                piece.get("part_id"),
-                piece.get("part_name"),
-                piece.get("color_id"),
-                piece.get("color_name"),
-                piece.get("category_id"),
-                piece.get("confidence"),
-                bin_x,
-                bin_y,
-                bin_z,
-                dead,
-                piece.get("brickognize_preview_url"),
-                piece.get("brickognize_listing_id"),
-                piece.get("brickognize_item_rank"),
-                piece.get("brickognize_item_type"),
-                piece.get("brickognize_color_rank"),
-                piece.get("color_provider"),
-                piece.get("mold_provider"),
-                piece.get("color_confidence"),
-            ),
-        )
-        conn.commit()
+    # Upsert (not INSERT OR IGNORE): a piece can be recorded early by the
+    # correction API straight from memory (so a just-classified piece is
+    # correctable before it distributes), then re-recorded at distribution
+    # with its bin. On conflict we refresh the classification/bin columns but
+    # NEVER touch the correction columns (part_correct, color_corrected_id,
+    # *_feedback_submitted, correction_updated_at) so a recorded correction
+    # survives the distribution write.
+    conn.execute(
+        "INSERT INTO piece_records "
+        "(uuid, run_id, machine_id, seen_at, recorded_at, classification_status, "
+        "part_id, part_name, color_id, color_name, category_id, confidence, "
+        "bin_x, bin_y, bin_z, dead, brickognize_preview_url, "
+        "brickognize_listing_id, brickognize_item_rank, brickognize_item_type, "
+        "brickognize_color_rank, color_provider, mold_provider, color_confidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(uuid) DO UPDATE SET "
+        "run_id=excluded.run_id, machine_id=excluded.machine_id, "
+        "seen_at=excluded.seen_at, recorded_at=excluded.recorded_at, "
+        "classification_status=excluded.classification_status, "
+        "part_id=excluded.part_id, part_name=excluded.part_name, "
+        "color_id=excluded.color_id, color_name=excluded.color_name, "
+        "category_id=excluded.category_id, confidence=excluded.confidence, "
+        "bin_x=excluded.bin_x, bin_y=excluded.bin_y, bin_z=excluded.bin_z, "
+        "dead=excluded.dead, brickognize_preview_url=excluded.brickognize_preview_url, "
+        "brickognize_listing_id=excluded.brickognize_listing_id, "
+        "brickognize_item_rank=excluded.brickognize_item_rank, "
+        "brickognize_item_type=excluded.brickognize_item_type, "
+        "brickognize_color_rank=excluded.brickognize_color_rank, "
+        "color_provider=excluded.color_provider, "
+        "mold_provider=excluded.mold_provider, "
+        "color_confidence=excluded.color_confidence",
+        (
+            uuid_val,
+            run_id,
+            machine_id,
+            float(seen_at) if isinstance(seen_at, (int, float)) else None,
+            float(recorded_at) if isinstance(recorded_at, (int, float)) else None,
+            piece.get("classification_status"),
+            piece.get("part_id"),
+            piece.get("part_name"),
+            piece.get("color_id"),
+            piece.get("color_name"),
+            piece.get("category_id"),
+            piece.get("confidence"),
+            bin_x,
+            bin_y,
+            bin_z,
+            dead,
+            piece.get("brickognize_preview_url"),
+            piece.get("brickognize_listing_id"),
+            piece.get("brickognize_item_rank"),
+            piece.get("brickognize_item_type"),
+            piece.get("brickognize_color_rank"),
+            piece.get("color_provider"),
+            piece.get("mold_provider"),
+            piece.get("color_confidence"),
+        ),
+    )
 
+
+def recordPiece(
+    piece: dict[str, Any],
+    *,
+    run_id: Optional[str] = None,
+    machine_id: Optional[str] = None,
+) -> None:
+    if not isinstance(piece.get("uuid"), str):
+        return
+    with _connection() as conn:
+        recordPieceOnConnection(conn, piece, run_id=run_id, machine_id=machine_id)
+        conn.commit()
 
 def getOverview() -> dict[str, Any]:
     with _connection() as conn:

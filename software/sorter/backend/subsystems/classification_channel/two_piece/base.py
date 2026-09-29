@@ -122,6 +122,26 @@ class Rev01BaseState(BaseState):
         return ok
 
     def startOutputMove(self, output_degrees: float, speed_usteps_per_s: int) -> bool:
+        adapter = getattr(self.shared,"native_custody",None)
+        if adapter is not None:
+            target = getattr(self,"_eject_target",None)
+            obj = getattr(target,"known_object",None)
+            try:
+                if obj is None:
+                    adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"entry":"staging","quantity":None})
+                stepper = self.irl.carousel_stepper
+                platter = C4FiveSectorPlatter.from_irl_config(self.irl_config)
+                steps = platter.output_degrees_to_motor_microsteps(output_degrees)
+                with adapter.dispatch(obj.uuid):
+                    stepper.set_speed_limits(16,max(16,speed_usteps_per_s))
+                    receipt = stepper.move_steps_receipt(int(steps))
+                    adapter.command_outcome(receipt)
+                self._native_release_observed_after = time.time()
+                return receipt.outcome == "ACCEPTED"
+            except Exception as exc:
+                self.setClassificationReady(False,"native_custody_refused")
+                self.logger.warning(f"Native C4 movement refused: {exc}")
+                return False
         stepper = getattr(self.irl, "carousel_stepper", None)
         if stepper is None:
             self.logger.error(f"{LOG_TAG} carousel_stepper missing — cannot move")

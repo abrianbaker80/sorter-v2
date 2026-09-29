@@ -442,14 +442,14 @@ def clearPiecesFromChannel(
     gc: Any,
     irl: Any,
     irl_config: Any,
-) -> None:
+):
     # Closed-loop pre-home purge: advance the carousel forward (same travel
     # direction as the normal classification flow) until the channel reads clear,
     # using the shared routine the C4 stuck-incident auto-resolve also uses so
     # both agree on direction and on when the channel is actually empty.
     from .channel_clear import clearChannelByAdvancing
 
-    clearChannelByAdvancing(
+    return clearChannelByAdvancing(
         gc, irl, irl_config, label="C4 rev01 spoke home pre-purge"
     )
 
@@ -460,7 +460,10 @@ def maybeRunSpokeHome(
     irl_config: Any,
     vision: Any,
 ) -> bool:
-    clearPiecesFromChannel(gc, irl, irl_config)
+    clear_result = clearPiecesFromChannel(gc, irl, irl_config)
+    if clear_result is None or not clear_result.cleared:
+        gc.logger.warning("C4 spoke alignment refused: purge did not establish channel clear")
+        return False
 
     capture = None
     if hasattr(vision, "getCaptureThreadForRole"):

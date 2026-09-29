@@ -35,8 +35,9 @@ class MachineTomlPathTests(unittest.TestCase):
             os.chdir(here)
 
     def test_an_absolute_value_is_used_as_it_is(self) -> None:
-        with mock.patch.dict(os.environ, {machine_toml.ENV_VAR: "/srv/sorter/machine.toml"}):
-            self.assertEqual(machine_toml.machine_toml_path(), Path("/srv/sorter/machine.toml"))
+        absolute = BACKEND / "synthetic-machine.toml"
+        with mock.patch.dict(os.environ, {machine_toml.ENV_VAR: str(absolute)}):
+            self.assertEqual(machine_toml.machine_toml_path(), absolute)
 
     def test_nothing_else_reads_the_variable(self) -> None:
         # A dozen readers with a fallback each is how settings saved in the UI

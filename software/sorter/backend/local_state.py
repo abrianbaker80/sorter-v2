@@ -1834,6 +1834,43 @@ def get_current_bin_piece_counts() -> dict[tuple[int, int, int], int]:
         }
 
 
+def get_current_bin_occupancy_evidence() -> dict[tuple[int, int, int], tuple[int, dict[str | None, int]]]:
+    """Read current counts and all aggregate categories from one SQLite snapshot.
+
+    Include aggregate-only rows so a missing/zero count cannot make recorded
+    contents appear empty to the bin allocator. Inconsistent evidence is left
+    intact for the allocator to reject; this reader does not repair state.
+    """
+    initialize_local_state()
+    with _connection() as conn:
+        conn.execute("BEGIN")
+        active_session_id = _get_meta(conn, _META_KEY_ACTIVE_SORTING_SESSION_ID)
+        if not active_session_id:
+            return {}
+        result: dict[tuple[int, int, int], tuple[int, dict[str | None, int]]] = {}
+        for row in conn.execute(
+            "SELECT layer_index, section_index, bin_index, piece_count "
+            "FROM bin_state_current WHERE session_id = ?",
+            (active_session_id,),
+        ):
+            key = (int(row["layer_index"]), int(row["section_index"]), int(row["bin_index"]))
+            result[key] = (int(row["piece_count"]), {})
+        for row in conn.execute(
+            "SELECT layer_index, section_index, bin_index, category_id, "
+            "SUM(count) AS quantity, MIN(count) AS minimum_quantity "
+            "FROM bin_item_aggregates WHERE session_id = ? "
+            "GROUP BY layer_index, section_index, bin_index, category_id",
+            (active_session_id,),
+        ):
+            key = (int(row["layer_index"]), int(row["section_index"]), int(row["bin_index"]))
+            _, categories = result.setdefault(key, (0, {}))
+            categories[row["category_id"]] = (
+                int(row["quantity"]) if int(row["minimum_quantity"]) > 0 else 0
+            )
+        return result
+
+
+
 def get_current_bin_contents_snapshot() -> dict[str, Any]:
     initialize_local_state()
     with _connection() as conn:

@@ -401,6 +401,8 @@ def main() -> None:
         sys.exit(1)
 
     gc = mkGlobalConfig()
+    from subsystems.classification_channel.smart_bins_native_adapter import attach
+    attach(gc)
     gc.run_recorder = RunRecorder(gc)
     gc.lifetime_stats = LifetimeStatsTracker(gc)
     setGlobalConfig(gc)
@@ -621,6 +623,8 @@ def main() -> None:
 
         shared_state.setHardwareStatus(homing_step="Discovering hardware...")
         gc.logger.info("Starting hardware initialization...")
+        from subsystems.classification_channel.smart_bins_native_adapter import attach
+        attach(gc).require_startup()
         real_irl = mkIRLInterface(irl_config, gc)
         _replace_irl(real_irl)
         setHardwareRuntimeIRL(irl)
@@ -724,6 +728,8 @@ def main() -> None:
 
         shared_state.setHardwareStatus(homing_step="Discovering hardware...")
         gc.logger.info("Initializing hardware (no homing)...")
+        from subsystems.classification_channel.smart_bins_native_adapter import attach
+        attach(gc).require_startup()
         real_irl = mkIRLInterface(irl_config, gc)
         _replace_irl(real_irl)
         setHardwareRuntimeIRL(irl)

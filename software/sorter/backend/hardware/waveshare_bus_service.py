@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, TypeVar
 
 from hardware.waveshare_servo import ScServoBus, calibrate_servo as calibrate_servo_impl
+from smart_bins_native_custody import guard_motion, motion_entry
 
 T = TypeVar("T")
 
@@ -83,13 +84,21 @@ class WaveshareBusService:
         return self._execute(lambda bus: bus.set_pid(servo_id, p, d, i))
 
     def set_torque(self, servo_id: int, enable: bool) -> bool:
+        if enable:
+            # Ownership always precedes the existing serial lock.
+            with motion_entry("enable", "route"):
+                return self._execute(lambda bus: bus.set_torque(servo_id, enable))
         return self._execute(lambda bus: bus.set_torque(servo_id, enable))
 
+    @guard_motion("route")
     def move_to(self, servo_id: int, position: int, time_ms: int = 500) -> bool:
         return self._execute(lambda bus: bus.move_to(servo_id, position, time_ms))
 
     def read_position(self, servo_id: int) -> int | None:
         return self._execute(lambda bus: bus.read_position(servo_id))
+
+    def is_moving(self, servo_id: int) -> bool | None:
+        return self._execute(lambda bus: bus.is_moving(servo_id))
 
     def read_load(self, servo_id: int) -> int | None:
         return self._execute(lambda bus: bus.read_load(servo_id))
@@ -97,6 +106,7 @@ class WaveshareBusService:
     def set_id(self, old_id: int, new_id: int) -> bool:
         return self._execute(lambda bus: bus.set_id(old_id, new_id))
 
+    @guard_motion("route")
     def calibrate_servo(self, servo_id: int) -> tuple[int, int]:
         return self._execute(lambda bus: calibrate_servo_impl(bus, servo_id))
 

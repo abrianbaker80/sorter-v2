@@ -244,6 +244,14 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         rotation already performed), but its bin is cleared so the record says
         where it actually went. The rest have their in-flight objects abandoned,
         and anything still in distribution's slot is withdrawn."""
+        adapter = getattr(self.shared,"native_custody",None)
+        if adapter is not None:
+            try:
+                adapter.refuse_unqualified_motion("STALL_PRE_CLEAR_PROMOTION", {
+                    "known_piece_uuids":[tp.known_object.uuid for tp in self._pieces.values() if tp.known_object],
+                    "quantity":None,"entry":"stall_auto_clear"})
+            except Exception as exc:
+                return ChannelClearResult(False,True,0.0,f"native_custody_refused: {exc}")
         placed = self._pendingPlacedPiece()
         if placed is not None and self._headReady(placed):
             obj = placed.known_object
@@ -647,6 +655,23 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         gone_for = now - target.last_seen
         timed_out = (now - self._phase_started_at) > _EJECT_TIMEOUT_S
         if gone_for >= _EJECT_GONE_CONFIRM_S or timed_out:
+            adapter = getattr(self.shared,"native_custody",None)
+            if adapter is not None:
+                after = getattr(self,"_native_release_observed_after",None)
+                frame_ts = getattr(state,"ts",None)
+                # Capture timestamps are wall-clock. A stale/never-written frame
+                # cannot turn track absence into owned exit evidence.
+                fresh = (isinstance(frame_ts,(int,float)) and after is not None
+                         and after < frame_ts <= time.time() and time.time()-frame_ts <= 0.5)
+                absent = all(getattr(po,"sv_bt_track_id",None) != target.track_id for po in getattr(state,"pieces",()))
+                kind = "EJECT_TIMEOUT_VISIBLE" if timed_out and not absent else (
+                    "INFERRED_EXIT" if fresh and absent else "TRACK_LOST_REIDENTIFIED")
+                try:
+                    adapter.observation(kind,{"track_id":target.track_id,"frame_ts":frame_ts,
+                        "fresh":fresh,"receiving_evidence":False},uncertain=kind!="INFERRED_EXIT")
+                except Exception as exc:
+                    self.logger.warning(f"Native exit evidence refused: {exc}")
+                    return
             # Track id gone (debounced) == the piece dropped off the fall-off ==
             # ejected. Commit it to distribution; the chute was already aimed.
             self.transport.advanceTransport()

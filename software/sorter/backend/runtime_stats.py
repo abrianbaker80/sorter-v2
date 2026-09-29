@@ -105,6 +105,8 @@ class RuntimeStatsCollector:
         self._running_total_s = 0.0
         self._running_started_at_monotonic: float | None = None
         self._piece_by_uuid: dict[str, dict[str, Any]] = {}
+        # Native identity survives partial events and bounded detail lookup eviction.
+        self._native_provenance_by_uuid: dict[str, tuple[str, str, str | None]] = {}
         # Bounded LRU of every KnownObject payload we've ever observed in this
         # process, keyed by uuid. Populated unconditionally (even when the
         # machine is not running) so the frontend can look up a piece by
@@ -251,6 +253,39 @@ class RuntimeStatsCollector:
         obj_uuid = obj.get("uuid")
         if not obj_uuid:
             return
+        original = self._native_provenance_by_uuid.get(obj_uuid)
+        supplied = (obj.get("native_machine_id"), obj.get("native_reservation_id"),
+                    obj.get("native_delivery_id"))
+        if original is not None:
+            if any(new is not None and old is not None and new != old
+                   for new, old in zip(supplied, original)):
+                raise ValueError("Native provenance is immutable")
+            supplied = tuple(new if new is not None else old
+                             for new, old in zip(supplied, original))
+        verified_native = False
+        if supplied[0] and supplied[1]:
+            from smart_bins_native_completion import (
+                NativeCompletionRefused, lookup_native_claim,
+            )
+
+            try:
+                claim = lookup_native_claim(supplied[0], obj_uuid, supplied[1])
+            except NativeCompletionRefused:
+                if original is not None:
+                    raise
+                claim = None
+            if claim is not None and claim["reservation_id"] == supplied[1]:
+                if supplied[2] is not None and supplied[2] != claim["delivery_id"]:
+                    raise ValueError("Native delivery provenance has no matching receipt")
+                supplied = (supplied[0], supplied[1], claim["delivery_id"])
+                self._native_provenance_by_uuid[obj_uuid] = supplied
+                verified_native = True
+            elif original is not None:
+                raise ValueError("Durable native provenance disappeared")
+        if verified_native:
+            obj = dict(obj)
+            obj.update(zip(("native_machine_id", "native_reservation_id",
+                            "native_delivery_id"), supplied))
         # Keep the long-lived lookup fresh for every observation, even while
         # not running — so the detail page can hydrate a piece by uuid even
         # after lifecycle transitions. LRU-evicted once bounded.
@@ -269,7 +304,9 @@ class RuntimeStatsCollector:
         self._piece_by_uuid[obj_uuid] = current
         self._last_updated_at = time.time()
 
-        if current.get("distributed_at") is not None and current.get("destination_bin") is not None:
+        if (current.get("distributed_at") is not None
+            and current.get("destination_bin") is not None
+            and not verified_native):
             try:
                 from local_state import record_piece_distribution
 

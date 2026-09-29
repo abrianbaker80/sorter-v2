@@ -24,6 +24,9 @@ class SharedVariables:
         gc: "GlobalConfig" | None = None,
         bus: "TickBus" | None = None,
     ):
+        self.native_custody = None
+        self.native_flap_commands = {}
+        self.native_route_layer = None
         self._gc = gc
         self._bus = bus
         self._classification_ready: bool = False
@@ -114,6 +117,10 @@ class SharedVariables:
         reason: str | None = None,
     ) -> None:
         next_value = bool(open)
+        adapter = self.native_custody
+        if next_value and adapter is not None and (adapter.permit is None or adapter._fault or adapter.blocked):
+            next_value = False
+            reason = "native_custody_not_armed"
         if self._distribution_ready == next_value and not self._bus_enabled():
             return
         prev = self._distribution_ready

@@ -23,6 +23,8 @@ from typing import Any, Dict
 
 import serial
 
+from smart_bins_native_custody import guard_motion
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -175,8 +177,13 @@ class ScServoBus:
         return found
 
     def set_torque(self, servo_id: int, enable: bool) -> bool:
+        if enable:
+            from smart_bins_native_custody import motion_entry
+            with motion_entry("enable", "route"):
+                return self.write_byte(servo_id, _REG_TORQUE_ENABLE, 1)
         return self.write_byte(servo_id, _REG_TORQUE_ENABLE, 1 if enable else 0)
 
+    @guard_motion("route")
     def move_to(self, servo_id: int, position: int, time_ms: int = 500) -> bool:
         position = max(0, min(1023, position))
         pos_bytes = struct.pack(">H", position)
@@ -202,11 +209,11 @@ class ScServoBus:
             return -raw
         return raw
 
-    def is_moving(self, servo_id: int) -> bool:
+    def is_moving(self, servo_id: int) -> bool | None:
         data = self.read_bytes(servo_id, _REG_MOVING, 1)
-        if data is None:
-            return False
-        return data[0] != 0
+        if data is None or len(data) != 1 or data[0] not in (0, 1):
+            return None
+        return data[0] == 1
 
     def read_angle_limits(self, servo_id: int) -> tuple[int, int] | None:
         data = self.read_bytes(servo_id, _REG_MIN_ANGLE_L, 4)
@@ -423,7 +430,14 @@ class WaveshareServoMotor:
         self._invert = invert
         self._name = f"waveshare_servo_{servo_id}"
         self._enabled = False
-        self._current_position: int = 0  # raw SC position 0-1023
+        self._confirmed_position: int | None = None  # raw SC units, never a target
+        self._pending_target: int | None = None
+        self._last_command_outcome = "NONE"
+        self._last_position_observed_at: float | None = None
+        self._last_motion_observed_at: float | None = None
+        self._moving: bool | None = None
+        self._calibrated = False
+        self._release_pending = False
         self._min_limit: int = 0
         self._max_limit: int = 1023
         self._open_position: int = 0
@@ -433,6 +447,8 @@ class WaveshareServoMotor:
 
     def initialize(self) -> None:
         """Read or auto-calibrate limits and apply good PID settings."""
+        self._calibrated = False
+        self._invalidate_observations()
         # Set PID to avoid undershooting (factory default I=0 causes issues)
         self._bus.set_pid(self._servo_id, 32, 32, 20)
 
@@ -459,10 +475,11 @@ class WaveshareServoMotor:
             self._open_position = min_lim
             self._closed_position = max_lim
 
-        # Read current position
-        pos = self._bus.read_position(self._servo_id)
-        if pos is not None:
-            self._current_position = pos
+        self._calibrated = self._valid_limits(min_lim, max_lim)
+        self._pending_target = None
+        self._last_command_outcome = "NONE"
+        self._invalidate_observations()
+        self.position
 
     def set_invert(self, invert: bool) -> None:
         self._invert = invert
@@ -474,15 +491,30 @@ class WaveshareServoMotor:
             self._closed_position = self._max_limit
 
     def recalibrate(self) -> tuple[int, int]:
+        self._calibrated = False
+        self._pending_target = None
+        self._last_command_outcome = "NONE"
+        self._invalidate_observations()
         min_lim, max_lim = calibrate_servo(self._bus, self._servo_id)
-        self._min_limit = min_lim
-        self._max_limit = max_lim
+        self._min_limit, self._max_limit = min_lim, max_lim
         self.set_invert(self._invert)
-        pos = self._bus.read_position(self._servo_id)
-        if pos is not None:
-            self._current_position = pos
-        else:
-            self._current_position = (min_lim + max_lim) // 2
+        self._calibrated = self._valid_limits(min_lim, max_lim)
+        self.position
+        return min_lim, max_lim
+
+    @staticmethod
+    def _valid_limits(minimum: int, maximum: int) -> bool:
+        return 0 <= minimum < maximum <= 1023 and maximum - minimum >= 20 and (minimum, maximum) != (0, 1023)
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self._calibrated and self._valid_limits(self._min_limit, self._max_limit)
+
+    def _invalidate_observations(self) -> None:
+        self._confirmed_position = None
+        self._last_position_observed_at = None
+        self._last_motion_observed_at = None
+        self._moving = None
 
     # -- ServoMotor-compatible interface ------------------------------------
 
@@ -495,66 +527,118 @@ class WaveshareServoMotor:
         self._enabled = bool(value)
         self._bus.set_torque(self._servo_id, self._enabled)
 
-    def move_to(self, angle: int) -> bool:
-        """Move to angle (0-180). Maps linearly to calibrated range."""
-        if not self._enabled:
-            self.enabled = True
-        position = self._angle_to_position(angle)
-        self._move_duration = 0.3
+    @guard_motion("route")
+    def _move_raw(self, position: int, *, release: bool) -> bool:
+        self._pending_target = position
+        self._moving = None
+        self._last_motion_observed_at = None
+        self._last_position_observed_at = None
+        self._release_pending = release
+        self._move_duration = 0.3  # advisory only; never stopped evidence
         self._move_started_at = time.monotonic()
-        self._current_position = position
-        return self._bus.move_to(self._servo_id, position, 300)
+        try:
+            if not self._enabled:
+                self.enabled = True
+            acknowledged = self._bus.move_to(self._servo_id, position, 300)
+        except Exception:
+            self._last_command_outcome = "AMBIGUOUS"
+            self._invalidate_observations()
+            if release:
+                try:
+                    self._release_torque()
+                except Exception:
+                    logger.warning("Waveshare ambiguous command torque release was not acknowledged")
+            raise
+        self._last_command_outcome = "ACCEPTED" if acknowledged else "AMBIGUOUS"
+        if not acknowledged:
+            self._invalidate_observations()
+            if release:
+                try:
+                    self._release_torque()
+                except Exception:
+                    logger.warning("Waveshare ambiguous command torque release was not acknowledged")
+        return bool(acknowledged)
+
+    def move_to(self, angle: int) -> bool:
+        """Request an angle; an ACK does not establish physical position."""
+        return self._move_raw(self._angle_to_position(angle), release=False)
 
     def move_to_and_release(self, angle: int) -> bool:
-        """Move to angle then disable torque."""
-        result = self.move_to(angle)
-        self._enabled = False  # will release after move
-        return result
+        return self._move_raw(self._angle_to_position(angle), release=True)
 
     @property
-    def position(self) -> int:
-        pos = self._bus.read_position(self._servo_id)
-        return pos if pos is not None else self._current_position
+    def position(self) -> int | None:
+        try:
+            pos = self._bus.read_position(self._servo_id)
+        except Exception:
+            self._confirmed_position = None
+            self._last_position_observed_at = None
+            raise
+        if not isinstance(pos, int) or isinstance(pos, bool) or not 0 <= pos <= 1023:
+            self._confirmed_position = None
+            self._last_position_observed_at = None
+            return None
+        self._confirmed_position = pos
+        self._last_position_observed_at = time.monotonic()
+        return pos
 
     def stop(self):
-        self._bus.set_torque(self._servo_id, False)
+        self._invalidate_observations()
+        self._pending_target = None
+        self._last_command_outcome = "NONE"
+        self._release_torque()
+
+    def _release_torque(self) -> None:
+        # A failed release remains pending so the next normal poll can release.
+        if not self._bus.set_torque(self._servo_id, False):
+            raise RuntimeError("Waveshare torque release was not acknowledged")
         self._enabled = False
+        self._release_pending = False
 
     @property
     def stopped(self) -> bool:
-        # Use time-based estimate since polling is_moving is slow on the bus
-        if self._move_started_at == 0:
-            return True
-        elapsed = time.monotonic() - self._move_started_at
-        if elapsed >= self._move_duration + 0.1:
-            # Auto-release torque if move_to_and_release was used
-            if not self._enabled:
-                self._bus.set_torque(self._servo_id, False)
-            self._move_started_at = 0
-            return True
-        return False
+        try:
+            moving = self._bus.is_moving(self._servo_id)
+            self._moving = moving if isinstance(moving, bool) else None
+            self._last_motion_observed_at = time.monotonic() if self._moving is not None else None
+            if self._moving is False:
+                pos = self.position
+                if (pos is not None and self._pending_target is not None
+                        and self._last_command_outcome == "ACCEPTED"
+                        and abs(pos - self._pending_target) <= self.POSITION_TOLERANCE):
+                    self._pending_target = None
+                if self._release_pending:
+                    self._release_torque()
+                return True
+            # Last observed position cannot qualify a flap while moving/unknown.
+            self._confirmed_position = None
+            self._last_position_observed_at = None
+            if self._release_pending and time.monotonic() - self._move_started_at >= 3.5:
+                # Protective release on timeout is NOT stopped/target evidence.
+                self._release_torque()
+            return False
+        except Exception:
+            self._invalidate_observations()
+            if self._release_pending and time.monotonic() - self._move_started_at >= 3.5:
+                try:
+                    self._release_torque()
+                except Exception:
+                    logger.warning("Waveshare protective torque release was not acknowledged")
+            raise
 
     @property
     def available(self) -> bool:
         return True
 
-    def open(self, open_angle: int | None = None) -> None:
-        if not self._enabled:
-            self.enabled = True
-        self._move_duration = 0.3
-        self._move_started_at = time.monotonic()
-        self._current_position = self._open_position
-        self._bus.move_to(self._servo_id, self._open_position, 300)
-        self._enabled = False  # release after move
+    def open(self, open_angle: int | None = None) -> bool:
+        if not self.is_calibrated:
+            return False
+        return self._move_raw(self._open_position, release=True)
 
-    def close(self, closed_angle: int | None = None) -> None:
-        if not self._enabled:
-            self.enabled = True
-        self._move_duration = 0.3
-        self._move_started_at = time.monotonic()
-        self._current_position = self._closed_position
-        self._bus.move_to(self._servo_id, self._closed_position, 300)
-        self._enabled = False  # release after move
+    def close(self, closed_angle: int | None = None) -> bool:
+        if not self.is_calibrated:
+            return False
+        return self._move_raw(self._closed_position, release=True)
 
     def toggle(self) -> None:
         if self.isOpen():
@@ -562,11 +646,23 @@ class WaveshareServoMotor:
         else:
             self.open()
 
+    # Native calibration used <10 raw counts for a reached target. Keep the
+    # tolerance below that bound (SC has 1024 raw positions), without rounding.
+    POSITION_TOLERANCE = 9
+
+    def _at_position(self, target: int) -> bool:
+        return (self.is_calibrated and self._confirmed_position is not None
+                and self._last_position_observed_at is not None
+                and self._moving is False and self._last_motion_observed_at is not None
+                and self._pending_target is None
+                and self._last_command_outcome != "AMBIGUOUS"
+                and abs(self._confirmed_position - target) <= self.POSITION_TOLERANCE)
+
     def isOpen(self) -> bool:
-        return abs(self._current_position - self._open_position) < abs(self._current_position - self._closed_position)
+        return self._at_position(self._open_position)
 
     def isClosed(self) -> bool:
-        return not self.isOpen()
+        return self._at_position(self._closed_position)
 
     def set_speed_limits(self, min_speed: int, max_speed: int) -> None:
         pass  # SC servos use time-based moves, speed is implicit
@@ -586,25 +682,43 @@ class WaveshareServoMotor:
         pass
 
     @property
-    def angle(self) -> int:
-        return self._position_to_angle(self._current_position)
+    def angle(self) -> int | None:
+        pos = self._confirmed_position
+        return self._position_to_angle(pos) if pos is not None else None
 
     @property
     def channel(self) -> int:
         return self._servo_id
 
     def feedback(self) -> Dict[str, Any]:
-        position = self.position
+        error = None
+        try:
+            self.stopped  # one moving read; one position read when stopped
+        except Exception as exc:
+            error = str(exc)
+        position = self._confirmed_position
         return {
+            "available": self.available,
             "channel": self._servo_id,
             "position": position,
-            "angle": self._position_to_angle(position),
+            "angle": self._position_to_angle(position) if position is not None else None,
+            "pending_target": self._pending_target,
             "open_position": self._open_position,
             "closed_position": self._closed_position,
             "min_limit": self._min_limit,
             "max_limit": self._max_limit,
-            "is_open": abs(position - self._open_position) < abs(position - self._closed_position),
+            "is_open": self.isOpen(),
+            "is_closed": self.isClosed(),
+            "calibrated": self.is_calibrated,
+            "moving": self._moving,
+            "stopped": not self._moving if self._moving is not None else None,
+            "motion_state_valid": self._last_motion_observed_at is not None,
+            "position_valid": position is not None and self._last_position_observed_at is not None,
+            "command_outcome": self._last_command_outcome,
+            "position_observed_at": self._last_position_observed_at,
+            "motion_observed_at": self._last_motion_observed_at,
             "invert": self._invert,
+            "error": error,
         }
 
     # -- internal -----------------------------------------------------------

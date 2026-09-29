@@ -18,7 +18,7 @@ import pytest
 from serial.serialutil import SerialBase
 
 from hardware import cobs
-from hardware.bus import MCUBus, MCUBusError
+from hardware.bus import MAX_FRAME_SIZE, MCUBus, MCUBusError
 
 GET_STALL_STATUS = 0x1B
 
@@ -77,6 +77,7 @@ def _mkBus(port: _ScriptedPort) -> MCUBus:
     bus._serial = port
     bus._lock = Lock()
     bus._port = "scripted"
+    bus._unresolved_addresses = set()
     return bus
 
 
@@ -127,3 +128,14 @@ def test_reply_that_never_finishes_is_reported_as_partial() -> None:
 
     with pytest.raises(MCUBusError, match="Partial response"):
         _mkBus(port).send_command(0, GET_STALL_STATUS, 0, b"", retries=0)
+
+
+def test_reader_stops_at_frame_size_limit() -> None:
+    port = _ScriptedPort([(0.002, b"\x02" * MAX_FRAME_SIZE)])
+    bus = _mkBus(port)
+
+    with pytest.raises(MCUBusError, match="max frame size"):
+        bus.send_command(0, GET_STALL_STATUS, 0, b"", retries=99)
+
+    assert len(port.writes) == 1
+    assert bus._unresolved_addresses == {0}

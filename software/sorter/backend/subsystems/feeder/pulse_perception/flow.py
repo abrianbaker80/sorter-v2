@@ -128,6 +128,9 @@ class PulsePerceptionFeeding(BaseState):
     ) -> bool:
         if self._busy(stepper):
             return False
+        adapter = getattr(self.shared,"native_custody",None)
+        if channel == 3 and adapter is not None and not adapter.admission_allowed():
+            return False
         speed = channelMoveSpeed(cfg, channel)
         output_deg = abs(output_deg)
         if enforce_min:
