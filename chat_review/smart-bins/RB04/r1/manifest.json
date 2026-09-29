@@ -1,0 +1,277 @@
+{
+  "package": "RB04/r1",
+  "base": {
+    "v030_commit": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "v030_pristine_tree": "21e805b60da575ff7468fcc3570a517d80f01cd0",
+    "rb01_review_commit": "8c83a0ceb261f2e071b0b4dccff6765b0fb12e1f",
+    "rb01_result_tree": "ab7e7461a69efc1db74faac2c8e8f3318ca10341",
+    "rb02_review_commit": "688778a6f11222207e64a419a2dd64322b74b061",
+    "rb02_result_tree": "df609a4d5c953f253737a927432ab3598647765e",
+    "rb03_review_commit": "95c0c2150aa8efd5f5cf95f690933b99c4cad494",
+    "rb03_result_tree": "b4cf20bd92855e2ccdb22748fcf952f19b169738",
+    "p2c6pb_reference": "d451afdb5a93d3e3b7bc8d84c57a15f005b23f7b",
+    "rb01_rb02_rb03_isolated_reconstruction_before_edit": true,
+    "accepted_working_files_matched_rb03_before_edit": true
+  },
+  "patch": {
+    "base_tree": "b4cf20bd92855e2ccdb22748fcf952f19b169738",
+    "result_tree": "f388c5b91945e01a141100039f41f55d728a7331",
+    "sha256": "ca7d912e05fac9dd34aa92c6e8d93caf6160dcae32127dd4ce07f5401af53fe6",
+    "bytes": 123238,
+    "format": "git binary/full-index unified diff with 3 context lines",
+    "changed_paths": [
+      "software/sorter/backend/defs/events.py",
+      "software/sorter/backend/defs/known_object.py",
+      "software/sorter/backend/run_recorder.py",
+      "software/sorter/backend/runtime_stats.py",
+      "software/sorter/backend/smart_bins_completion_recovery.py",
+      "software/sorter/backend/smart_bins_native_completion.py",
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py",
+      "software/sorter/backend/subsystems/distribution/sending.py",
+      "software/sorter/backend/tests/test_smart_bins_native_completion.py",
+      "software/sorter/backend/tests/test_smart_bins_native_custody.py",
+      "software/sorter/backend/tests/test_smart_bins_native_faults.py",
+      "software/sorter/backend/tests/test_smart_bins_native_projection.py",
+      "software/sorter/backend/tests/test_smart_bins_native_provenance.py",
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py",
+      "software/sorter/backend/tests/test_smart_bins_runtime_stats.py",
+      "software/sorter/backend/tests/test_smart_bins_sending.py",
+      "software/sorter/backend/utils/event.py"
+    ],
+    "file_hashes": {
+      "software/sorter/backend/defs/events.py": {
+        "before_blob": "57edca693d759358873fa8074b6e23fe11fcc7bd",
+        "before_sha256": "a0030b362b005079b8903f5839edb70b222abb4f52a199f7af248f82f2990bf1",
+        "after_blob": "935832ef293f41442d3e754850a176d2f148f2be",
+        "after_sha256": "d6a6e6e4199be15e7a62427a5e42c5e52065a772396598ad3cb086e77fe38982"
+      },
+      "software/sorter/backend/defs/known_object.py": {
+        "before_blob": "adae19e7ca3d31e9f03b71f366a46493632803c9",
+        "before_sha256": "d288cb4c2ead70ceb3040d9e9ecf06ddf46f71673a206c799843bc248c07f537",
+        "after_blob": "7ce4055ca6be6f763f1687876e3cf8f00bf5d8e8",
+        "after_sha256": "c32e2d0f86d6626b3964b8d3b6b6d654527899436b3f9d43a9880aadca3d6ea2"
+      },
+      "software/sorter/backend/run_recorder.py": {
+        "before_blob": "0d3901192af2b7123074810cc3c8409a92ef333e",
+        "before_sha256": "c9ae0bc9e4fb7d4f2351befbcbef09ee6ffba640396af963f9fb3f1353d29dcb",
+        "after_blob": "32aaf68fd65e5fa3121773436fe9188a0913fa8f",
+        "after_sha256": "8fe2297432e2343a2de312c48012e09a46beb217ffd80330798b68478cb3b802"
+      },
+      "software/sorter/backend/runtime_stats.py": {
+        "before_blob": "0c744ebd9163db7cca7a06c89f36116c6a340942",
+        "before_sha256": "f7592f8012ba619ff990bead99a7aa8efbcf0136d129e82ad3d1a54bb24b1c53",
+        "after_blob": "0a00c3d8b826e1e3abdbabdf08a169dc80a672ed",
+        "after_sha256": "3b02e8981cff36eac8b3f4fae56b129b8e8be5247486fa051c3c0bb8290e64a1"
+      },
+      "software/sorter/backend/smart_bins_completion_recovery.py": {
+        "before_blob": "ae7bb5c51e10b73b8a2fe8b76fc343a7182afbd8",
+        "before_sha256": "62a8dc7b27dbdd9df0e1bfb01bc26e317e868cedc4980dcd20ef8e31ec81eb29",
+        "after_blob": "1ee1fbd4d7f0621736d56e8676954bc65823aabd",
+        "after_sha256": "57a192b7eb9733f70d74b747d33f2ed97bb36ef8cfbf9e3e08e07a5ca98d1cf4"
+      },
+      "software/sorter/backend/smart_bins_native_completion.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "b49d3355702d47a7fbcf0911883a0daa28311a36",
+        "after_sha256": "53978f889d0e27f5d2ada0780cb742058cf20fd72aa259d3b48aa75b37026e3f"
+      },
+      "software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py": {
+        "before_blob": "cf6f02987fcdddac862638ca96f1611739fe1686",
+        "before_sha256": "b12365c20a1b8e5517f110a9ad3616a37ee58f26a3d54f8b5fcf7da9419260a6",
+        "after_blob": "8ad8d036a032771d9c329ea4e9101856b6e33409",
+        "after_sha256": "e78c42ee8ebf4d438646de7328f3d2006295fe6314005603046fb378f547b68a"
+      },
+      "software/sorter/backend/subsystems/distribution/sending.py": {
+        "before_blob": "90e7c20161d811506ac0bc56f338960919ce1176",
+        "before_sha256": "c6a4ab23d8962f783f86ab13224a56d92889eaa48ce8e3faaa8abe257bfa5707",
+        "after_blob": "9eedd07c6aca33c1a3b621e99625d9813ccb0cd0",
+        "after_sha256": "2abc70a77a4976acfe89ee2d1069a6f058fa997d726ca6856006bf452cad0f9d"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_completion.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "a0b664bd961956176a225c0c513206a394d8083c",
+        "after_sha256": "16a17e6787690bd7872c21968cddd9103b72610169244acb7402a72fd8dc26f0"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_custody.py": {
+        "before_blob": "507e0b1b373618f5e3aff11bb448553ea3b68d37",
+        "before_sha256": "95fba31767c56808d377539968f416311407a4899184c3c739bd6d88bfc7a950",
+        "after_blob": "1d7c574ba3e16e50ee16ce0d8965ac0f4f559c8e",
+        "after_sha256": "7ae1de9e8150709c3c39e818b20633d0123fdb71ef6e5f8c930a2ad97ae54b6b"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_faults.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "8094630d230236bf17143abe95df8a2bb7e49d24",
+        "after_sha256": "b7ca6e070e09857707f0e04f8700709b26ce7864584db81caf01620d44eb555f"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_projection.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "168a933c0440b54cd4f551e75ad50b0ffc8e8080",
+        "after_sha256": "af08f5cd69e0d211e34829ad00cf36933572d4dbf7df9c7772d988b1015435fb"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_provenance.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "1798e718107cddb6cccbd1bd8d1ec7869b677b78",
+        "after_sha256": "2e11c6139ad9cf9bf1a1d9a78a86c3eb83b0d13d8f1fec7e99e5d53dfaa211f1"
+      },
+      "software/sorter/backend/tests/test_smart_bins_native_runtime.py": {
+        "before_blob": "28de3fd2982763997284b31199763db035790fbb",
+        "before_sha256": "59a5d3b56d240c7bd61df5fab1cdbed4fe2ea6300b3d766ec5b2bc154f88f63e",
+        "after_blob": "fc2002df419c69650c7323e3739d91b8adaacfaf",
+        "after_sha256": "1ab13b2265255ab3c2cd8d216508f60b502f60e8c29bde9c3d9821d19b0fa320"
+      },
+      "software/sorter/backend/tests/test_smart_bins_runtime_stats.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "824e3569e5ab9b0aca4f7f5e7f055f1f79d0915a",
+        "after_sha256": "2d05d5203e97047cd783823b530337cd2d60a260a1ebd349fe5db0c112917fbd"
+      },
+      "software/sorter/backend/tests/test_smart_bins_sending.py": {
+        "before_blob": null,
+        "before_sha256": null,
+        "after_blob": "b280cca3a2c1fb11471568325e18f51ce21b124d",
+        "after_sha256": "e3a6e487769264f5e2acecf78579a80df5f8ddad9141806c7cd064af6892cc87"
+      },
+      "software/sorter/backend/utils/event.py": {
+        "before_blob": "e80e7bc25bde756a3bc500ed26d781f15a7cf46f",
+        "before_sha256": "3e86749b80205fa486cdcee483d891f422b5ccd9cc33b0f75ce6e926e3f5b73b",
+        "after_blob": "054df4b2c03331c4b253305989c5be3fa0a8cd40",
+        "after_sha256": "9cd1a73e94b7161df8977e1822a7edca1eecd1b5f4ffc8ffa8a93f0975f14b8e"
+      }
+    },
+    "isolated_index_reconstruction_exact": true
+  },
+  "schema": {
+    "extension": "smart_bin_native_completion_versions",
+    "version": 1,
+    "explicit_init": "smart_bins_native_completion.initialize_schema()",
+    "import_time_ddl": false,
+    "ordinary_startup_auto_migration": false,
+    "active_native_missing_extension_fails_closed_test": "test_explicit_extension_required_before_native_adapter",
+    "explicit_local_prerequisites": [
+      "piece_records",
+      "smart_bins_completion_recovery",
+      "smart_bins_reconciliation",
+      "smart_bins_followup_reconciliation"
+    ],
+    "tables": [
+      "smart_bin_native_completion_versions",
+      "smart_bin_native_receiving_evidence",
+      "smart_bin_native_completion_receipts",
+      "smart_bin_native_completion_effects",
+      "smart_bin_current_obligations"
+    ],
+    "indexes": [
+      "smart_bin_native_receiving_by_reservation",
+      "smart_bin_native_effects_current",
+      "smart_bin_native_claim_by_piece",
+      "smart_bin_rb04_followup_by_piece",
+      "smart_bin_native_receipt_by_piece",
+      "smart_bin_current_obligations_machine"
+    ],
+    "projection_maintenance": "SQLite triggers in each canonical writer transaction; explicit initial backfill"
+  },
+  "evidence": {
+    "contract_version": 1,
+    "policy_version": 1,
+    "fields": [
+      "evidence_id",
+      "machine_id",
+      "reservation_id",
+      "piece_uuid",
+      "attempt_id",
+      "incarnation",
+      "head_generation",
+      "route_revision",
+      "actual_kind",
+      "actual_slot_id",
+      "actual_cycle_id",
+      "evidence_type",
+      "policy_version",
+      "evidence_ref",
+      "observed_at",
+      "source_identity",
+      "qualifier_identity",
+      "revision"
+    ],
+    "default_runtime_source_qualified": false,
+    "accepted_source_observations_not_receiving_proof": [
+      "MOTOR_ACCEPTED",
+      "INFERRED_EXIT",
+      "transport association",
+      "route/flap qualification",
+      "Sending settle"
+    ],
+    "immutable_payload_sha256": true,
+    "same_key_same_payload": "exact replay",
+    "same_key_different_payload": "conflict",
+    "different_receiver_same_reservation": "conflict",
+    "tests": [
+      "test_qualified_receiver_commits_history_receipt_and_actual_credit",
+      "test_second_receiver_for_same_reservation_conflicts",
+      "test_wrong_or_stale_receiving_evidence_never_completes"
+    ]
+  },
+  "performance": {
+    "generated_closed_followups": [
+      1,
+      51,
+      201
+    ],
+    "current_authorization_sql_statements": {
+      "1": 10,
+      "51": 10,
+      "201": 10
+    },
+    "current_obligation_rows_returned": {
+      "1": 0,
+      "51": 0,
+      "201": 0
+    },
+    "query_plan": "SEARCH smart_bin_current_obligations USING COVERING INDEX smart_bin_current_obligations_machine (machine_id=?)",
+    "historical_inspector_equivalence": "clear at all three sizes; separate late hold, missing history, reconciliation, other-machine and rollback cases",
+    "wall_clock_threshold_used": false
+  },
+  "validation": {
+    "runner": "C:/Users/abria/AppData/Local/Temp/sorter-rb04-run-tests.py",
+    "runner_basis": "RB03 disposable runner with RB04 module allowed; temp SQLite, blocked network and real serial",
+    "environment": [
+      "uv run --frozen --offline",
+      "UV_NO_SYNC=1",
+      "PYTHONDONTWRITEBYTECODE=1"
+    ],
+    "rb02_rb03_ordinary_direct_run": {
+      "command": "uv run --frozen --offline python $TEMP/sorter-rb04-run-tests.py -q -p no:cacheprovider tests/test_smart_bins_delivery.py tests/test_smart_bins_completion_recovery.py tests/test_smart_bins_reconciliation.py tests/test_smart_bins_followup_reconciliation.py tests/test_smart_bins_native_custody.py tests/test_smart_bins_native_runtime.py tests/test_distribution_sending.py tests/test_c4_distribution_handoff.py",
+      "result": "193 passed",
+      "disposable_db_root": "C:/Users/abria/AppData/Local/Temp/sorter-rb03-tests-_1ldg6hj"
+    },
+    "combined_directly_affected": {
+      "command": "uv run --frozen --offline python $TEMP/sorter-rb04-run-tests.py -q -s -p no:cacheprovider tests/test_smart_bins_native_completion.py tests/test_smart_bins_native_projection.py tests/test_smart_bins_native_faults.py tests/test_smart_bins_native_provenance.py tests/test_smart_bins_sending.py tests/test_smart_bins_runtime_stats.py tests/test_smart_bins_delivery.py tests/test_smart_bins_completion_recovery.py tests/test_smart_bins_reconciliation.py tests/test_smart_bins_followup_reconciliation.py tests/test_smart_bins_native_custody.py tests/test_smart_bins_native_runtime.py tests/test_distribution_sending.py tests/test_c4_distribution_handoff.py",
+      "result": "237 passed",
+      "disposable_db_root": "C:/Users/abria/AppData/Local/Temp/sorter-rb03-tests-8pe6ku3z"
+    },
+    "ruff_changed_path_baseline_findings": 0,
+    "ruff_changed_path_current_findings": 0,
+    "ruff_new_findings": 0,
+    "rb03_existing_other_path_findings": 39,
+    "git_diff_check_source": true
+  },
+  "preservation": {
+    "implementation_branch": "smart-bins-v030-integration",
+    "implementation_head": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "implementation_index_sha256": "18c7474d1a3a7fc2b9b8b894f6340ca5e8e607d78b0de3a154156c3c08b1027f",
+    "implementation_index_empty": true,
+    "implementation_uncommitted": true,
+    "implementation_not_pushed": true,
+    "old_candidate_branch": "sorting-flow-candidate",
+    "old_candidate_head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "old_candidate_inventory_sha256": "d4ae072299bc0590115451435325d135ae22dc0b375d459b14827c45733af03e",
+    "old_candidate_unchanged": true,
+    "no_live_hardware_firmware_deployment_provider_action": true,
+    "rb05_not_started": true,
+    "p2c6b_blocked": true
+  }
+}

@@ -1,0 +1,2389 @@
+diff --git a/software/sorter/backend/defs/events.py b/software/sorter/backend/defs/events.py
+index 57edca693d759358873fa8074b6e23fe11fcc7bd..935832ef293f41442d3e754850a176d2f148f2be 100644
+--- a/software/sorter/backend/defs/events.py
++++ b/software/sorter/backend/defs/events.py
+@@ -150,6 +150,9 @@ class KnownObjectData(BaseModel):
+     too_big_for_layer: bool = False
+     intended_layer_index: Optional[int] = None
+     destination_bin: Optional[Tuple[int, int, int]] = None
++    native_machine_id: Optional[str] = None
++    native_reservation_id: Optional[str] = None
++    native_delivery_id: Optional[str] = None
+     tracked_global_id: Optional[int] = None
+     classification_channel_zone_state: Optional[str] = None
+     classification_channel_zone_center_deg: Optional[float] = None
+diff --git a/software/sorter/backend/defs/known_object.py b/software/sorter/backend/defs/known_object.py
+index adae19e7ca3d31e9f03b71f366a46493632803c9..7ce4055ca6be6f763f1687876e3cf8f00bf5d8e8 100644
+--- a/software/sorter/backend/defs/known_object.py
++++ b/software/sorter/backend/defs/known_object.py
+@@ -176,6 +176,10 @@ class KnownObject:
+     # rejected for size (when too_big_for_layer is set).
+     intended_layer_index: Optional[int] = None
+     destination_bin: Optional[Tuple[int, int, int]] = None
++    # Durable native Smart Bin identity. Delivery is filled only after receipt readback.
++    native_machine_id: Optional[str] = None
++    native_reservation_id: Optional[str] = None
++    native_delivery_id: Optional[str] = None
+     thumbnail: Optional[str] = None
+     latest_captured_crop: Optional[str] = None
+     latest_captured_crop_ts: Optional[float] = None
+diff --git a/software/sorter/backend/run_recorder.py b/software/sorter/backend/run_recorder.py
+index 0d3901192af2b7123074810cc3c8409a92ef333e..32aaf68fd65e5fa3121773436fe9188a0913fa8f 100644
+--- a/software/sorter/backend/run_recorder.py
++++ b/software/sorter/backend/run_recorder.py
+@@ -48,6 +48,7 @@ class RunRecorder:
+         self.sorting_profile_path = gc.sorting_profile_path
+         self.started_at = time.time()
+         self.pieces: list[KnownObject] = []
++        self._native_recorded: set[str] = set()
+         self.active_periods: list[dict[str, float]] = []
+         self._current_active_start: Optional[float] = None
+ 
+@@ -78,6 +79,23 @@ class RunRecorder:
+         except Exception as e:
+             self.gc.logger.warning(f"RunRecorder: failed to persist piece {piece.uuid}: {e}")
+ 
++    def recordCommittedNativePiece(
++        self, piece: KnownObject, reservation_id: str, delivery_id: str
++    ) -> None:
++        """Adopt the already committed history; never issue a second upsert."""
++        from smart_bins_native_completion import verify_native_identity
++
++        machine_id = piece.native_machine_id
++        if machine_id != self.machine_id or piece.native_reservation_id != reservation_id:
++            raise ValueError("Native recorder provenance disagrees with run identity")
++        verified = verify_native_identity(machine_id, reservation_id, piece.uuid,
++                                          delivery_id, self.run_id)
++        if verified != delivery_id:
++            raise ValueError("Canonical native receipt was not verified")
++        if piece.uuid not in self._native_recorded:
++            self.pieces.append(piece)
++            self._native_recorded.add(piece.uuid)
++
+     def save(self) -> None:
+         self.markPaused()
+         ended_at = time.time()
+diff --git a/software/sorter/backend/runtime_stats.py b/software/sorter/backend/runtime_stats.py
+index 0c744ebd9163db7cca7a06c89f36116c6a340942..0a00c3d8b826e1e3abdbabdf08a169dc80a672ed 100644
+--- a/software/sorter/backend/runtime_stats.py
++++ b/software/sorter/backend/runtime_stats.py
+@@ -105,6 +105,8 @@ class RuntimeStatsCollector:
+         self._running_total_s = 0.0
+         self._running_started_at_monotonic: float | None = None
+         self._piece_by_uuid: dict[str, dict[str, Any]] = {}
++        # Native identity survives partial events and bounded detail lookup eviction.
++        self._native_provenance_by_uuid: dict[str, tuple[str, str, str | None]] = {}
+         # Bounded LRU of every KnownObject payload we've ever observed in this
+         # process, keyed by uuid. Populated unconditionally (even when the
+         # machine is not running) so the frontend can look up a piece by
+@@ -251,6 +253,39 @@ class RuntimeStatsCollector:
+         obj_uuid = obj.get("uuid")
+         if not obj_uuid:
+             return
++        original = self._native_provenance_by_uuid.get(obj_uuid)
++        supplied = (obj.get("native_machine_id"), obj.get("native_reservation_id"),
++                    obj.get("native_delivery_id"))
++        if original is not None:
++            if any(new is not None and old is not None and new != old
++                   for new, old in zip(supplied, original)):
++                raise ValueError("Native provenance is immutable")
++            supplied = tuple(new if new is not None else old
++                             for new, old in zip(supplied, original))
++        verified_native = False
++        if supplied[0] and supplied[1]:
++            from smart_bins_native_completion import (
++                NativeCompletionRefused, lookup_native_claim,
++            )
++
++            try:
++                claim = lookup_native_claim(supplied[0], obj_uuid, supplied[1])
++            except NativeCompletionRefused:
++                if original is not None:
++                    raise
++                claim = None
++            if claim is not None and claim["reservation_id"] == supplied[1]:
++                if supplied[2] is not None and supplied[2] != claim["delivery_id"]:
++                    raise ValueError("Native delivery provenance has no matching receipt")
++                supplied = (supplied[0], supplied[1], claim["delivery_id"])
++                self._native_provenance_by_uuid[obj_uuid] = supplied
++                verified_native = True
++            elif original is not None:
++                raise ValueError("Durable native provenance disappeared")
++        if verified_native:
++            obj = dict(obj)
++            obj.update(zip(("native_machine_id", "native_reservation_id",
++                            "native_delivery_id"), supplied))
+         # Keep the long-lived lookup fresh for every observation, even while
+         # not running — so the detail page can hydrate a piece by uuid even
+         # after lifecycle transitions. LRU-evicted once bounded.
+@@ -269,7 +304,9 @@ class RuntimeStatsCollector:
+         self._piece_by_uuid[obj_uuid] = current
+         self._last_updated_at = time.time()
+ 
+-        if current.get("distributed_at") is not None and current.get("destination_bin") is not None:
++        if (current.get("distributed_at") is not None
++            and current.get("destination_bin") is not None
++            and not verified_native):
+             try:
+                 from local_state import record_piece_distribution
+ 
+diff --git a/software/sorter/backend/smart_bins_completion_recovery.py b/software/sorter/backend/smart_bins_completion_recovery.py
+index ae7bb5c51e10b73b8a2fe8b76fc343a7182afbd8..1ee1fbd4d7f0621736d56e8676954bc65823aabd 100644
+--- a/software/sorter/backend/smart_bins_completion_recovery.py
++++ b/software/sorter/backend/smart_bins_completion_recovery.py
+@@ -451,15 +451,92 @@ def inspect_on_connection(conn, machine_id: str) -> dict[str, Any]:
+                              "state": row["state"], "missing_evidence": row["missing_evidence"],
+                              "ownership_loss_reason": row["ownership_loss_reason"],
+                              "failure_kind": row["failure_kind"]})
++    has_native_receipts = conn.execute(
++        "SELECT 1 FROM sqlite_master WHERE type='table' AND "
++        "name='smart_bin_native_completion_receipts'"
++    ).fetchone() is not None
++    native_join = (
++        "LEFT JOIN smart_bin_native_completion_receipts n ON n.reservation_id=r.id "
++        if has_native_receipts else ""
++    )
++    native_filter = "AND n.reservation_id IS NULL" if has_native_receipts else ""
+     unlinked = [dict(row) for row in conn.execute(
+         "SELECT r.id AS reservation_id,d.id AS delivery_id,r.state "
+         "FROM smart_bin_reservations r "
+         "LEFT JOIN smart_bin_deliveries d ON d.reservation_id=r.id "
+         "LEFT JOIN smart_bin_completion_followups f ON f.reservation_id=r.id "
+-        "WHERE r.machine_id=? AND r.state='COMPLETED' AND f.id IS NULL",
++        + native_join +
++        "WHERE r.machine_id=? AND r.state='COMPLETED' AND f.id IS NULL "
++        + native_filter,
+         (machine_id,))]
+     blockers.extend({"followup_id": None, **row, "missing_evidence": True}
+                     for row in unlinked)
++    if has_native_receipts:
++        from smart_bins_native_completion import (
++            NativeCompletionRefused, _receipt_on_connection,
++        )
++
++        for native in conn.execute(
++            "SELECT reservation_id,piece_uuid,delivery_id FROM "
++            "smart_bin_native_completion_receipts WHERE machine_id=?",
++            (machine_id,)):
++            missing = False
++            try:
++                _receipt_on_connection(conn, machine_id, native["reservation_id"],
++                                       native["piece_uuid"], native["delivery_id"])
++            except NativeCompletionRefused:
++                missing = True
++            unfinished = conn.execute(
++                "SELECT 1 FROM smart_bin_native_completion_effects "
++                "WHERE reservation_id=? AND phase<>'SUCCEEDED' LIMIT 1",
++                (native["reservation_id"],)).fetchone() is not None
++            if missing or unfinished:
++                blockers.append({
++                    "followup_id": None,
++                    "reservation_id": native["reservation_id"],
++                    "delivery_id": native["delivery_id"],
++                    "origin": "native_completion",
++                    "missing_evidence": missing,
++                    "unfinished_publication": unfinished,
++                    "physical_recovery_authorized": False,
++                })
++        for discrepancy in conn.execute(
++            "SELECT id,reservation_id FROM smart_bin_discrepancies "
++            "WHERE machine_id=? AND resolved_at IS NULL",
++            (machine_id,)):
++            if discrepancy["reservation_id"] and not any(
++                b["reservation_id"] == discrepancy["reservation_id"]
++                for b in blockers
++            ):
++                blockers.append({
++                    "followup_id": None,
++                    "reservation_id": discrepancy["reservation_id"],
++                    "origin": "active_discrepancy",
++                    "discrepancy_id": discrepancy["id"],
++                    "physical_recovery_authorized": False,
++                })
++        for reservation in conn.execute(
++            "SELECT id,state FROM smart_bin_reservations WHERE machine_id=? "
++            "AND state IN ('RESERVED','RELEASE_INTENT','EXIT_CONFIRMED','UNCERTAIN')",
++            (machine_id,)):
++            if not any(b["reservation_id"] == reservation["id"] for b in blockers):
++                blockers.append({
++                    "followup_id": None,
++                    "reservation_id": reservation["id"],
++                    "state": reservation["state"],
++                    "origin": "held_reservation",
++                    "physical_recovery_authorized": False,
++                })
++        for hold in conn.execute(
++            "SELECT id FROM smart_bin_native_holds WHERE machine_id=? "
++            "AND resolved_at IS NULL", (machine_id,)):
++            blockers.append({
++                "followup_id": None,
++                "reservation_id": None,
++                "native_hold_id": hold["id"],
++                "origin": "native_hold",
++                "physical_recovery_authorized": False,
++            })
+     # Reconciliation never manufactures a normal completion/publication or
+     # releases restart/physical ownership. Cancellation also needs requalification.
+     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+@@ -482,6 +559,18 @@ def authorization_on_connection(conn, machine_id: str, followup_id: str) -> tupl
+     dict[str, Any], list[dict[str, Any]]
+ ]:
+     """Assess one current handoff and all other machine obligations in one snapshot."""
++    # The operator inspector deliberately retains full history. RB04 live
++    # authorization uses the transactionally maintained current projection.
++    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
++                    "name='smart_bin_native_completion_versions'").fetchone():
++        from smart_bins_native_completion import current_blocker_on_connection
++
++        current = assess_on_connection(conn, machine_id, followup_id)
++        blocked = current_blocker_on_connection(
++            conn, machine_id, except_reservation=current["reservation_id"])
++        return current, ([{"origin": "current_same_machine_obligation",
++                           "physical_recovery_authorized": False}]
++                         if blocked else [])
+     report = inspect_on_connection(conn, machine_id)
+     current = next((row for row in report["followups"] if row["id"] == followup_id), None)
+     if current is None:
+diff --git a/software/sorter/backend/smart_bins_native_completion.py b/software/sorter/backend/smart_bins_native_completion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b49d3355702d47a7fbcf0911883a0daa28311a36
+--- /dev/null
++++ b/software/sorter/backend/smart_bins_native_completion.py
+@@ -0,0 +1,965 @@
++"""Explicit native receiving evidence and canonical completion for Smart Bins.
++
++No native observation is promoted to receiving proof by this module. A caller
++must supply a separately qualified, immutable observation. Import has no DDL
++or physical side effects.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import sqlite3
++import time
++import uuid
++from dataclasses import asdict, dataclass
++
++import smart_bins_native_custody as custody
++from piece_records import recordPieceOnConnection
++from smart_bins_storage import critical_transaction
++
++
++SCHEMA_VERSION = 1
++EVIDENCE_POLICY_VERSION = 1
++
++
++class NativeCompletionRefused(RuntimeError):
++    """A native claim has no qualified, matching completion fact."""
++
++
++@dataclass(frozen=True)
++class ReceivingEvidence:
++    evidence_id: str
++    machine_id: str
++    reservation_id: str
++    piece_uuid: str
++    attempt_id: str
++    incarnation: str
++    head_generation: int
++    route_revision: int
++    actual_kind: str
++    actual_slot_id: str | None
++    actual_cycle_id: str | None
++    evidence_type: str
++    policy_version: int
++    evidence_ref: str
++    observed_at: float
++    source_identity: str
++    qualifier_identity: str
++    revision: int = 1
++
++
++_DDL = (
++    "CREATE TABLE smart_bin_native_completion_versions("
++    "singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
++    "CREATE TABLE smart_bin_native_receiving_evidence("
++    "evidence_id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,reservation_id TEXT NOT NULL,"
++    "piece_uuid TEXT NOT NULL,attempt_id TEXT NOT NULL,incarnation TEXT NOT NULL,"
++    "head_generation INTEGER NOT NULL,route_revision INTEGER NOT NULL,"
++    "actual_kind TEXT NOT NULL,actual_slot_id TEXT,actual_cycle_id TEXT,"
++    "evidence_type TEXT NOT NULL,policy_version INTEGER NOT NULL,"
++    "evidence_ref TEXT NOT NULL,observed_at REAL NOT NULL,source_identity TEXT NOT NULL,"
++    "qualifier_identity TEXT NOT NULL,revision INTEGER NOT NULL,payload_hash TEXT NOT NULL,"
++    "payload_json TEXT NOT NULL,FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE UNIQUE INDEX smart_bin_native_receiving_by_reservation "
++    "ON smart_bin_native_receiving_evidence(reservation_id)",
++    "CREATE TRIGGER smart_bin_native_receiving_no_update BEFORE UPDATE "
++    "ON smart_bin_native_receiving_evidence BEGIN SELECT RAISE(ABORT,'receiving evidence is immutable'); END",
++    "CREATE TRIGGER smart_bin_native_receiving_no_delete BEFORE DELETE "
++    "ON smart_bin_native_receiving_evidence BEGIN SELECT RAISE(ABORT,'receiving evidence is immutable'); END",
++    "CREATE TABLE smart_bin_native_completion_receipts("
++    "reservation_id TEXT PRIMARY KEY,machine_id TEXT NOT NULL,piece_uuid TEXT NOT NULL,"
++    "evidence_id TEXT NOT NULL UNIQUE,delivery_id TEXT NOT NULL UNIQUE,"
++    "history_run_id TEXT NOT NULL,receipt_hash TEXT NOT NULL,created_at REAL NOT NULL,"
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id),"
++    "FOREIGN KEY(evidence_id) REFERENCES smart_bin_native_receiving_evidence(evidence_id),"
++    "FOREIGN KEY(delivery_id) REFERENCES smart_bin_deliveries(id))",
++    "CREATE TRIGGER smart_bin_native_receipt_no_update BEFORE UPDATE "
++    "ON smart_bin_native_completion_receipts BEGIN SELECT RAISE(ABORT,'native receipt is immutable'); END",
++    "CREATE TRIGGER smart_bin_native_receipt_no_delete BEFORE DELETE "
++    "ON smart_bin_native_completion_receipts BEGIN SELECT RAISE(ABORT,'native receipt is immutable'); END",
++    "CREATE TABLE smart_bin_native_completion_effects("
++    "reservation_id TEXT NOT NULL,effect TEXT NOT NULL,phase TEXT NOT NULL "
++    "CHECK(phase IN ('PENDING','ATTEMPTED','SUCCEEDED')),"
++    "attempt_id TEXT,updated_at REAL NOT NULL,failure_phase TEXT,failure_reason TEXT,"
++    "failure_at REAL,PRIMARY KEY(reservation_id,effect),"
++    "FOREIGN KEY(reservation_id) REFERENCES smart_bin_reservations(id))",
++    "CREATE INDEX smart_bin_native_effects_current "
++    "ON smart_bin_native_completion_effects(reservation_id,phase)",
++    "CREATE INDEX smart_bin_native_claim_by_piece "
++    "ON smart_bin_native_claims(machine_id,piece_uuid,created_at DESC)",
++    "CREATE INDEX smart_bin_rb04_followup_by_piece "
++    "ON smart_bin_completion_followups(piece_uuid)",
++    "CREATE INDEX smart_bin_native_receipt_by_piece "
++    "ON smart_bin_native_completion_receipts(piece_uuid)",
++    "CREATE TABLE smart_bin_current_obligations("
++    "machine_id TEXT NOT NULL,reservation_id TEXT NOT NULL,kind TEXT NOT NULL,"
++    "source_id TEXT NOT NULL,PRIMARY KEY(kind,source_id))",
++    "CREATE INDEX smart_bin_current_obligations_machine "
++    "ON smart_bin_current_obligations(machine_id,reservation_id)",
++)
++
++# All refreshes execute inside the writer's transaction. A rollback cannot
++# publish a current blocker that the canonical ledger did not commit.
++_FOLLOWUP_BLOCKED = (
++    "NEW.state<>'CLOSED' OR NEW.ownership_loss_reason IS NOT NULL OR "
++    "NEW.failure_kind IS NOT NULL"
++)
++_DDL += (
++    "CREATE TRIGGER smart_bin_current_followup_insert AFTER INSERT "
++    "ON smart_bin_completion_followups BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT NEW.machine_id,NEW.reservation_id,'FOLLOWUP',NEW.id WHERE "
++    + _FOLLOWUP_BLOCKED + "; END",
++    "CREATE TRIGGER smart_bin_current_followup_update AFTER UPDATE "
++    "ON smart_bin_completion_followups BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP' AND source_id=NEW.id; "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT NEW.machine_id,NEW.reservation_id,'FOLLOWUP',NEW.id WHERE "
++    + _FOLLOWUP_BLOCKED + "; END",
++    "CREATE TRIGGER smart_bin_current_discrepancy_insert AFTER INSERT "
++    "ON smart_bin_discrepancies WHEN NEW.resolved_at IS NULL AND NEW.reservation_id IS NOT NULL "
++    "BEGIN INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "VALUES(NEW.machine_id,NEW.reservation_id,'DISCREPANCY',NEW.id); END",
++    "CREATE TRIGGER smart_bin_current_discrepancy_update AFTER UPDATE OF resolved_at "
++    "ON smart_bin_discrepancies BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='DISCREPANCY' AND source_id=NEW.id; "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT NEW.machine_id,NEW.reservation_id,'DISCREPANCY',NEW.id "
++    "WHERE NEW.resolved_at IS NULL AND NEW.reservation_id IS NOT NULL; END",
++    "CREATE TRIGGER smart_bin_current_reconciliation_insert AFTER INSERT "
++    "ON smart_bin_reconciliations BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "VALUES(NEW.machine_id,NEW.reservation_id,'RECONCILIATION',NEW.id); END",
++    "CREATE TRIGGER smart_bin_current_completed_update AFTER UPDATE OF state "
++    "ON smart_bin_reservations BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='UNLINKED_COMPLETION' "
++    "AND source_id=NEW.id; "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT NEW.machine_id,NEW.id,'UNLINKED_COMPLETION',NEW.id "
++    "WHERE NEW.state='COMPLETED' AND NOT EXISTS "
++    "(SELECT 1 FROM smart_bin_completion_followups f WHERE f.reservation_id=NEW.id) "
++    "AND NOT EXISTS (SELECT 1 FROM smart_bin_native_completion_receipts n "
++    "WHERE n.reservation_id=NEW.id); END",
++    "CREATE TRIGGER smart_bin_current_followup_links AFTER INSERT "
++    "ON smart_bin_completion_followups BEGIN "
++    "DELETE FROM smart_bin_current_obligations "
++    "WHERE kind='UNLINKED_COMPLETION' AND source_id=NEW.reservation_id; END",
++    "CREATE TRIGGER smart_bin_current_native_receipt_insert AFTER INSERT "
++    "ON smart_bin_native_completion_receipts BEGIN "
++    "DELETE FROM smart_bin_current_obligations "
++    "WHERE kind='UNLINKED_COMPLETION' AND source_id=NEW.reservation_id; END",
++    "CREATE TRIGGER smart_bin_current_history_delete AFTER DELETE "
++    "ON piece_records BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT f.machine_id,f.reservation_id,'MISSING_HISTORY',f.id "
++    "FROM smart_bin_completion_followups f WHERE f.piece_uuid=OLD.uuid "
++    "AND f.delivery_id IS NOT NULL; "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT r.machine_id,r.reservation_id,'NATIVE_MISSING_HISTORY',r.reservation_id "
++    "FROM smart_bin_native_completion_receipts r WHERE r.piece_uuid=OLD.uuid; END",
++    "CREATE TRIGGER smart_bin_current_history_insert AFTER INSERT "
++    "ON piece_records BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='MISSING_HISTORY' "
++    "AND source_id IN (SELECT f.id FROM smart_bin_completion_followups f "
++    "WHERE f.piece_uuid=NEW.uuid AND f.machine_id=NEW.machine_id "
++    "AND NEW.run_id=json_extract(f.completion_json,'$.runtime_run_id')); "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='NATIVE_MISSING_HISTORY' "
++    "AND source_id IN (SELECT r.reservation_id FROM smart_bin_native_completion_receipts r "
++    "WHERE r.piece_uuid=NEW.uuid AND r.machine_id=NEW.machine_id "
++    "AND r.history_run_id=NEW.run_id); END",
++    "CREATE TRIGGER smart_bin_current_history_update AFTER UPDATE OF machine_id,run_id "
++    "ON piece_records BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT f.machine_id,f.reservation_id,'MISSING_HISTORY',f.id "
++    "FROM smart_bin_completion_followups f WHERE f.piece_uuid=NEW.uuid "
++    "AND (NEW.machine_id IS NOT f.machine_id OR NEW.run_id IS NOT "
++    "json_extract(f.completion_json,'$.runtime_run_id')); "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT r.machine_id,r.reservation_id,'NATIVE_MISSING_HISTORY',r.reservation_id "
++    "FROM smart_bin_native_completion_receipts r WHERE r.piece_uuid=NEW.uuid "
++    "AND (NEW.machine_id IS NOT r.machine_id OR NEW.run_id IS NOT r.history_run_id); "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='MISSING_HISTORY' "
++    "AND source_id IN (SELECT f.id FROM smart_bin_completion_followups f "
++    "WHERE f.piece_uuid=NEW.uuid AND NEW.machine_id=f.machine_id "
++    "AND NEW.run_id=json_extract(f.completion_json,'$.runtime_run_id')); "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='NATIVE_MISSING_HISTORY' "
++    "AND source_id IN (SELECT r.reservation_id FROM smart_bin_native_completion_receipts r "
++    "WHERE r.piece_uuid=NEW.uuid AND NEW.machine_id=r.machine_id "
++    "AND NEW.run_id=r.history_run_id); END",
++)
++
++_VALID_FOLLOWUP_SOURCE = (
++    "SELECT 1 FROM smart_bin_reservations r "
++    "JOIN smart_bin_release_attempts a ON a.reservation_id=r.id "
++    "JOIN smart_bin_release_evidence e ON e.attempt_id=a.id "
++    "LEFT JOIN smart_bin_deliveries d ON d.id=f.delivery_id "
++    "LEFT JOIN piece_records p ON p.uuid=f.piece_uuid "
++    "WHERE r.id=f.reservation_id AND r.machine_id=f.machine_id "
++    "AND a.id=f.release_attempt_id AND e.exit_json IS NOT NULL "
++    "AND (f.state='RETAINED' OR "
++    "(e.completion_json=f.completion_json AND r.state='COMPLETED' "
++    "AND d.reservation_id=f.reservation_id AND d.machine_id=f.machine_id "
++    "AND d.piece_uuid=f.piece_uuid "
++    "AND d.evidence_ref=json_extract(f.completion_json,'$.completion_evidence_ref') "
++    "AND p.machine_id=f.machine_id "
++    "AND p.run_id=json_extract(f.completion_json,'$.runtime_run_id')))"
++)
++for _operation in ("INSERT", "UPDATE"):
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_followup_source_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_completion_followups BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++        "AND source_id=NEW.id; "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++        "FROM smart_bin_completion_followups f WHERE f.id=NEW.id "
++        f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    )
++for _operation in ("INSERT", "UPDATE", "DELETE"):
++    _alias = "OLD" if _operation == "DELETE" else "NEW"
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_release_source_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_release_evidence BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++        "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++        f"WHERE release_attempt_id={_alias}.attempt_id); "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++        "FROM smart_bin_completion_followups f "
++        f"WHERE f.release_attempt_id={_alias}.attempt_id "
++        f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    )
++for _operation in ("INSERT", "UPDATE", "DELETE"):
++    _alias = "OLD" if _operation == "DELETE" else "NEW"
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_delivery_source_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_deliveries BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++        "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++        f"WHERE delivery_id={_alias}.id); "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++        "FROM smart_bin_completion_followups f "
++        f"WHERE f.delivery_id={_alias}.id "
++        f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    )
++for _operation in ("INSERT", "UPDATE", "DELETE"):
++    _alias = "OLD" if _operation == "DELETE" else "NEW"
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_history_source_{_operation.lower()} "
++        f"AFTER {_operation} ON piece_records BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++        "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++        f"WHERE piece_uuid={_alias}.uuid); "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++        "FROM smart_bin_completion_followups f "
++        f"WHERE f.piece_uuid={_alias}.uuid "
++        f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    )
++for _operation in ("INSERT", "UPDATE", "DELETE"):
++    _alias = "OLD" if _operation == "DELETE" else "NEW"
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_attempt_source_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_release_attempts BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++        "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++        f"WHERE release_attempt_id={_alias}.id); "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++        "FROM smart_bin_completion_followups f "
++        f"WHERE f.release_attempt_id={_alias}.id "
++        f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    )
++_DDL += (
++    "CREATE TRIGGER smart_bin_native_history_facts_immutable BEFORE UPDATE OF "
++    "run_id,machine_id,bin_x,bin_y,bin_z ON piece_records WHEN EXISTS("
++    "SELECT 1 FROM smart_bin_native_completion_receipts n "
++    "JOIN smart_bin_deliveries d ON d.id=n.delivery_id "
++    "LEFT JOIN smart_bin_slots s ON s.id=d.actual_slot_id "
++    "WHERE n.piece_uuid=OLD.uuid AND (NEW.machine_id IS NOT n.machine_id "
++    "OR NEW.run_id IS NOT n.history_run_id "
++    "OR NEW.bin_x IS NOT s.layer_index OR NEW.bin_y IS NOT s.section_index "
++    "OR NEW.bin_z IS NOT s.bin_index)) BEGIN "
++    "SELECT RAISE(ABORT,'canonical native history destination is immutable'); END",
++    "CREATE TRIGGER smart_bin_current_release_fence BEFORE UPDATE OF status "
++    "ON smart_bin_native_claims WHEN NEW.status IN ('RELEASE_INTENT','DISPATCH_CONSUMED') "
++    "AND NEW.status IS NOT OLD.status AND ("
++    "EXISTS(SELECT 1 FROM smart_bin_current_obligations "
++    "WHERE machine_id=NEW.machine_id AND reservation_id<NEW.reservation_id LIMIT 1) "
++    "OR EXISTS(SELECT 1 FROM smart_bin_current_obligations "
++    "WHERE machine_id=NEW.machine_id AND reservation_id>NEW.reservation_id LIMIT 1) "
++    "OR EXISTS(SELECT 1 FROM smart_bin_native_holds WHERE machine_id=NEW.machine_id "
++    "AND resolved_at IS NULL LIMIT 1) "
++    "OR EXISTS(SELECT 1 FROM smart_bin_discrepancies WHERE machine_id=NEW.machine_id "
++    "AND resolved_at IS NULL LIMIT 1)) BEGIN "
++    "SELECT RAISE(ABORT,'current completion obligation blocks native release'); END",
++    "CREATE TRIGGER smart_bin_current_native_effect_insert AFTER INSERT "
++    "ON smart_bin_native_completion_effects WHEN NEW.phase<>'SUCCEEDED' BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT r.machine_id,NEW.reservation_id,'NATIVE_EFFECT',"
++    "NEW.reservation_id||':'||NEW.effect FROM smart_bin_reservations r "
++    "WHERE r.id=NEW.reservation_id; END",
++    "CREATE TRIGGER smart_bin_current_native_effect_update AFTER UPDATE OF phase "
++    "ON smart_bin_native_completion_effects BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='NATIVE_EFFECT' "
++    "AND source_id=NEW.reservation_id||':'||NEW.effect; "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT r.machine_id,NEW.reservation_id,'NATIVE_EFFECT',"
++    "NEW.reservation_id||':'||NEW.effect FROM smart_bin_reservations r "
++    "WHERE r.id=NEW.reservation_id AND NEW.phase<>'SUCCEEDED'; END",
++    "CREATE TRIGGER smart_bin_native_effect_no_delete BEFORE DELETE "
++    "ON smart_bin_native_completion_effects BEGIN "
++    "SELECT RAISE(ABORT,'native publication obligation is retained'); END",
++    "CREATE TRIGGER smart_bin_native_effect_forward BEFORE UPDATE "
++    "ON smart_bin_native_completion_effects WHEN "
++    "NEW.reservation_id IS NOT OLD.reservation_id OR NEW.effect IS NOT OLD.effect "
++    "OR (OLD.phase='SUCCEEDED' AND NEW.phase<>'SUCCEEDED') "
++    "OR (OLD.phase='ATTEMPTED' AND NEW.phase='PENDING') "
++    "BEGIN SELECT RAISE(ABORT,'native publication phase cannot rewind'); END",
++    "CREATE TRIGGER smart_bin_current_reservation_source AFTER UPDATE OF state "
++    "ON smart_bin_reservations BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE kind='FOLLOWUP_SOURCE' "
++    "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++    "WHERE reservation_id=NEW.id); "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++    "FROM smart_bin_completion_followups f WHERE f.reservation_id=NEW.id "
++    f"AND NOT EXISTS ({_VALID_FOLLOWUP_SOURCE}); END",
++    "CREATE TRIGGER smart_bin_current_discrepancy_delete AFTER DELETE "
++    "ON smart_bin_discrepancies BEGIN DELETE FROM smart_bin_current_obligations "
++    "WHERE kind='DISCREPANCY' AND source_id=OLD.id; END",
++    "CREATE TRIGGER smart_bin_current_reconciliation_delete AFTER DELETE "
++    "ON smart_bin_reconciliations BEGIN DELETE FROM smart_bin_current_obligations "
++    "WHERE kind='RECONCILIATION' AND source_id=OLD.id; END",
++    "CREATE TRIGGER smart_bin_current_followup_delete AFTER DELETE "
++    "ON smart_bin_completion_followups BEGIN "
++    "DELETE FROM smart_bin_current_obligations WHERE source_id=OLD.id "
++    "AND kind IN ('FOLLOWUP','FOLLOWUP_SOURCE','MISSING_HISTORY'); "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "SELECT r.machine_id,r.id,'UNLINKED_COMPLETION',r.id "
++    "FROM smart_bin_reservations r WHERE r.id=OLD.reservation_id "
++    "AND r.state='COMPLETED' AND NOT EXISTS "
++    "(SELECT 1 FROM smart_bin_native_completion_receipts n "
++    "WHERE n.reservation_id=r.id); END",
++)
++
++_VALID_CLOSE = (
++    "SELECT 1 FROM smart_bin_completion_receipts c "
++    "WHERE c.request_key=f.completion_request_key||':close' "
++    "AND c.machine_id=f.machine_id AND c.action='CLOSE' "
++    "AND CASE WHEN json_valid(c.result_json) THEN "
++    "json_extract(c.result_json,'$.code')='OK' "
++    "AND json_extract(c.result_json,'$.state')='CLOSED' "
++    "AND json_extract(c.result_json,'$.followup_id')=f.id ELSE 0 END"
++)
++for _operation in ("INSERT", "UPDATE"):
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_close_followup_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_completion_followups BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='CLOSURE_PENDING' "
++        "AND source_id=NEW.id; "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'CLOSURE_PENDING',f.id "
++        "FROM smart_bin_completion_followups f WHERE f.id=NEW.id "
++        f"AND f.state='CLOSED' AND NOT EXISTS ({_VALID_CLOSE}); END",
++    )
++for _operation in ("INSERT", "UPDATE", "DELETE"):
++    _alias = "OLD" if _operation == "DELETE" else "NEW"
++    _DDL += (
++        f"CREATE TRIGGER smart_bin_current_close_receipt_{_operation.lower()} "
++        f"AFTER {_operation} ON smart_bin_completion_receipts BEGIN "
++        "DELETE FROM smart_bin_current_obligations WHERE kind='CLOSURE_PENDING' "
++        "AND source_id IN (SELECT id FROM smart_bin_completion_followups "
++        f"WHERE completion_request_key=substr({_alias}.request_key,1,"
++        f"length({_alias}.request_key)-6)); "
++        "INSERT OR IGNORE INTO smart_bin_current_obligations "
++        "SELECT f.machine_id,f.reservation_id,'CLOSURE_PENDING',f.id "
++        "FROM smart_bin_completion_followups f "
++        f"WHERE f.completion_request_key=substr({_alias}.request_key,1,"
++        f"length({_alias}.request_key)-6) "
++        f"AND f.state='CLOSED' AND NOT EXISTS ({_VALID_CLOSE}); END",
++    )
++_DDL += (
++    "CREATE TRIGGER smart_bin_current_followup_reconciliation_insert "
++    "AFTER INSERT ON smart_bin_followup_reconciliation_dispositions BEGIN "
++    "INSERT OR IGNORE INTO smart_bin_current_obligations "
++    "VALUES(NEW.machine_id,NEW.reservation_id,'OWNER_REQUALIFICATION',NEW.id); END",
++)
++
++EFFECTS = ("EVENT_ENQUEUED", "RUN_RECORDER_ADOPTED", "PROGRESS_RECORDED",
++           "PROGRESS_SYNC_NOTIFIED", "CLOSE", "GATE_OPEN", "ADMISSION_RELEASE")
++
++
++def _objects(conn: sqlite3.Connection) -> set[tuple[str, str]]:
++    return {(row[0], row[1]) for row in conn.execute(
++        "SELECT type,name FROM sqlite_master")}
++
++
++def check_schema(conn: sqlite3.Connection) -> None:
++    custody._check(conn)
++    try:
++        rows = conn.execute(
++            "SELECT singleton,version FROM smart_bin_native_completion_versions"
++        ).fetchall()
++        required = set()
++        for sql in _DDL:
++            tokens = sql.split()
++            kind = "index" if "INDEX" in tokens[:3] else tokens[1].lower()
++            name = tokens[tokens.index("INDEX") + 1] if kind == "index" else tokens[2]
++            required.add((kind, name.split("(")[0]))
++        if [tuple(row) for row in rows] != [(1, SCHEMA_VERSION)] or not required <= _objects(conn):
++            raise NativeCompletionRefused("Native completion extension is incomplete")
++    except sqlite3.Error as exc:
++        raise NativeCompletionRefused("Native completion extension is unavailable") from exc
++
++
++def initialize_schema() -> int:
++    """Explicit versioned initialization; never called by ordinary startup."""
++    import piece_records
++    import smart_bins_completion_recovery as recovery
++    import smart_bins_followup_reconciliation as followup_reconciliation
++    import smart_bins_reconciliation as reconciliation
++
++    # These are local, explicit prerequisites. None imports or activates Harvest.
++    piece_records.initialize_piece_records()
++    recovery.initialize_schema()
++    reconciliation.initialize_schema()
++    followup_reconciliation.initialize_schema()
++    with critical_transaction() as conn:
++        custody._check(conn)
++        objects = _objects(conn)
++        if ("table", "smart_bin_native_completion_versions") not in objects:
++            for statement in _DDL:
++                conn.execute(statement)
++            conn.execute("INSERT INTO smart_bin_native_completion_versions VALUES(1,?)",
++                         (SCHEMA_VERSION,))
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT machine_id,reservation_id,'FOLLOWUP',id "
++                "FROM smart_bin_completion_followups "
++                "WHERE state<>'CLOSED' OR ownership_loss_reason IS NOT NULL "
++                "OR failure_kind IS NOT NULL")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT f.machine_id,f.reservation_id,'FOLLOWUP_SOURCE',f.id "
++                "FROM smart_bin_completion_followups f "
++                f"WHERE NOT EXISTS ({_VALID_FOLLOWUP_SOURCE})")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT f.machine_id,f.reservation_id,'MISSING_HISTORY',f.id "
++                "FROM smart_bin_completion_followups f "
++                "JOIN smart_bin_deliveries d ON d.id=f.delivery_id "
++                "LEFT JOIN piece_records p ON p.uuid=f.piece_uuid "
++                "AND p.machine_id=f.machine_id "
++                "AND p.run_id=json_extract(f.completion_json,'$.runtime_run_id') "
++                "WHERE f.delivery_id IS NOT NULL AND p.uuid IS NULL")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT machine_id,reservation_id,'DISCREPANCY',id "
++                "FROM smart_bin_discrepancies WHERE resolved_at IS NULL "
++                "AND reservation_id IS NOT NULL")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT machine_id,reservation_id,'RECONCILIATION',id "
++                "FROM smart_bin_reconciliations")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT r.machine_id,r.id,'UNLINKED_COMPLETION',r.id "
++                "FROM smart_bin_reservations r WHERE r.state='COMPLETED' "
++                "AND NOT EXISTS (SELECT 1 FROM smart_bin_completion_followups f "
++                "WHERE f.reservation_id=r.id) AND NOT EXISTS "
++                "(SELECT 1 FROM smart_bin_native_completion_receipts n "
++                "WHERE n.reservation_id=r.id)")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT f.machine_id,f.reservation_id,'CLOSURE_PENDING',f.id "
++                "FROM smart_bin_completion_followups f WHERE f.state='CLOSED' "
++                f"AND NOT EXISTS ({_VALID_CLOSE})")
++            conn.execute(
++                "INSERT OR IGNORE INTO smart_bin_current_obligations "
++                "SELECT machine_id,reservation_id,'OWNER_REQUALIFICATION',id "
++                "FROM smart_bin_followup_reconciliation_dispositions")
++        check_schema(conn)
++        conn.commit()
++    return SCHEMA_VERSION
++
++
++def _hash(value: object) -> str:
++    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
++                                     allow_nan=False).encode()).hexdigest()
++
++
++def _claim(conn: sqlite3.Connection, machine_id: str, reservation_id: str):
++    return conn.execute(
++        "SELECT n.*,r.state AS reservation_state,r.row_revision,r.run_id,"
++        "r.policy_revision_id,r.group_key_id,r.quantity,r.intended_kind,"
++        "r.intended_slot_id,r.intended_cycle_id,r.routing_revision "
++        "FROM smart_bin_native_claims n JOIN smart_bin_reservations r "
++        "ON r.id=n.reservation_id AND r.machine_id=n.machine_id "
++        "WHERE n.machine_id=? AND n.reservation_id=?",
++        (machine_id, reservation_id)).fetchone()
++
++
++def _validate_evidence(conn: sqlite3.Connection, evidence: ReceivingEvidence) -> None:
++    if (evidence.policy_version != EVIDENCE_POLICY_VERSION or evidence.revision != 1
++        or evidence.evidence_type != "PHYSICALLY_QUALIFIED_RECEIVER"
++        or not all((evidence.evidence_id, evidence.machine_id, evidence.reservation_id,
++                    evidence.piece_uuid, evidence.attempt_id, evidence.incarnation,
++                    evidence.evidence_ref, evidence.source_identity,
++                    evidence.qualifier_identity))
++        or type(evidence.head_generation) is not int
++        or type(evidence.route_revision) is not int
++        or type(evidence.observed_at) not in (float, int)
++        or evidence.observed_at <= 0 or evidence.observed_at > time.time()
++        or (evidence.actual_kind == "BIN" and
++            (not evidence.actual_slot_id or not evidence.actual_cycle_id))
++        or (evidence.actual_kind == "REJECT" and
++            (evidence.actual_slot_id is not None or evidence.actual_cycle_id is not None))
++        or evidence.actual_kind not in ("BIN", "REJECT")):
++        raise NativeCompletionRefused("Receiving evidence contract is invalid")
++    row = _claim(conn, evidence.machine_id, evidence.reservation_id)
++    if (row is None or row["piece_uuid"] != evidence.piece_uuid
++        or row["attempt_id"] != evidence.attempt_id
++        or row["incarnation"] != evidence.incarnation
++        or row["head_generation"] != evidence.head_generation
++        or row["route_revision"] != evidence.route_revision
++        or row["routing_revision"] != evidence.route_revision):
++        raise NativeCompletionRefused("Receiving evidence does not bind to the native claim")
++    attempt = conn.execute(
++        "SELECT created_at FROM smart_bin_release_attempts "
++        "WHERE id=? AND reservation_id=? AND owner_incarnation=?",
++        (evidence.attempt_id, evidence.reservation_id, evidence.incarnation)).fetchone()
++    if attempt is None or evidence.observed_at < attempt[0]:
++        raise NativeCompletionRefused("Receiving evidence predates or misses release")
++    accepted = conn.execute(
++        "SELECT observed_at FROM smart_bin_native_evidence "
++        "WHERE reservation_id=? AND attempt_id=? AND kind='MOTOR_ACCEPTED' "
++        "ORDER BY observed_at DESC LIMIT 1",
++        (evidence.reservation_id, evidence.attempt_id)).fetchone()
++    if (row["status"] not in ("ACCEPTED",)
++        or accepted is None or evidence.observed_at < accepted[0]):
++        raise NativeCompletionRefused(
++            "Receiving observation must follow the accepted release receipt"
++        )
++    if evidence.actual_kind == "BIN":
++        destination = conn.execute(
++            "SELECT s.id,c.opened_at,c.closed_at FROM smart_bin_slots s "
++            "JOIN smart_bin_cycles c ON c.slot_id=s.id AND c.machine_id=s.machine_id "
++            "WHERE s.machine_id=? AND s.id=? AND c.id=?",
++            (evidence.machine_id, evidence.actual_slot_id,
++             evidence.actual_cycle_id)).fetchone()
++        if (destination is None or evidence.observed_at < destination["opened_at"]
++            or (destination["closed_at"] is not None and
++                evidence.observed_at > destination["closed_at"])):
++            raise NativeCompletionRefused("Actual receiver cycle is not qualified at observation")
++
++
++def record_receiving_evidence(evidence: ReceivingEvidence) -> str:
++    """Narrow programmatic seam. No runtime source supplies this by default."""
++    payload = asdict(evidence)
++    digest = _hash(payload)
++    with critical_transaction() as conn:
++        check_schema(conn)
++        prior = conn.execute(
++            "SELECT payload_hash FROM smart_bin_native_receiving_evidence WHERE evidence_id=?",
++            (evidence.evidence_id,)).fetchone()
++        if prior is not None:
++            if prior[0] != digest:
++                raise NativeCompletionRefused("Receiving evidence idempotency conflict")
++            conn.commit()
++            return evidence.evidence_id
++        if conn.execute(
++            "SELECT 1 FROM smart_bin_native_receiving_evidence WHERE reservation_id=?",
++            (evidence.reservation_id,)).fetchone():
++            raise NativeCompletionRefused(
++                "Reservation already has conflicting receiving evidence"
++            )
++        _validate_evidence(conn, evidence)
++        conn.execute(
++            "INSERT INTO smart_bin_native_receiving_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (evidence.evidence_id, evidence.machine_id, evidence.reservation_id,
++             evidence.piece_uuid, evidence.attempt_id, evidence.incarnation,
++             evidence.head_generation, evidence.route_revision, evidence.actual_kind,
++             evidence.actual_slot_id, evidence.actual_cycle_id, evidence.evidence_type,
++             evidence.policy_version, evidence.evidence_ref, evidence.observed_at,
++             evidence.source_identity, evidence.qualifier_identity, evidence.revision,
++             digest, json.dumps(payload, sort_keys=True, allow_nan=False)))
++        conn.commit()
++    return evidence.evidence_id
++
++
++def _receipt_on_connection(conn: sqlite3.Connection, machine_id: str,
++                           reservation_id: str, piece_uuid: str,
++                           delivery_id: str | None = None,
++                           history_run_id: str | None = None) -> str | None:
++    claim = _claim(conn, machine_id, reservation_id)
++    if claim is None or claim["piece_uuid"] != piece_uuid:
++        raise NativeCompletionRefused("Native machine, reservation or piece mismatch")
++    receipt = conn.execute(
++        "SELECT * FROM smart_bin_native_completion_receipts "
++        "WHERE machine_id=? AND reservation_id=? AND piece_uuid=?",
++        (machine_id, reservation_id, piece_uuid)).fetchone()
++    if receipt is None:
++        if delivery_id is not None:
++            raise NativeCompletionRefused("Canonical completion receipt is missing")
++        return None
++    if delivery_id is not None and receipt["delivery_id"] != delivery_id:
++        raise NativeCompletionRefused("Foreign native delivery receipt")
++    if history_run_id is not None and receipt["history_run_id"] != history_run_id:
++        raise NativeCompletionRefused("Foreign native run receipt")
++    evidence = conn.execute(
++        "SELECT * FROM smart_bin_native_receiving_evidence WHERE evidence_id=?",
++        (receipt["evidence_id"],)).fetchone()
++    delivery = conn.execute(
++        "SELECT * FROM smart_bin_deliveries WHERE id=? AND reservation_id=?",
++        (receipt["delivery_id"], reservation_id)).fetchone()
++    history = conn.execute(
++        "SELECT uuid,machine_id,run_id,bin_x,bin_y,bin_z "
++        "FROM piece_records WHERE uuid=?",
++        (piece_uuid,)).fetchone()
++    slot = None
++    if delivery is not None and delivery["actual_kind"] == "BIN":
++        slot = conn.execute(
++            "SELECT layer_index,section_index,bin_index FROM smart_bin_slots "
++            "WHERE machine_id=? AND id=?",
++            (machine_id, delivery["actual_slot_id"])).fetchone()
++    if (evidence is None or delivery is None or history is None
++        or claim["reservation_state"] != "COMPLETED"
++        or evidence["machine_id"] != machine_id
++        or evidence["reservation_id"] != reservation_id
++        or evidence["piece_uuid"] != piece_uuid
++        or evidence["attempt_id"] != claim["attempt_id"]
++        or evidence["incarnation"] != claim["incarnation"]
++        or evidence["head_generation"] != claim["head_generation"]
++        or evidence["route_revision"] != claim["route_revision"]
++        or (delivery["actual_kind"] == "BIN" and slot is None)
++        or delivery["machine_id"] != machine_id
++        or delivery["piece_uuid"] != piece_uuid
++        or delivery["evidence_ref"] != evidence["evidence_ref"]
++        or (delivery["actual_kind"], delivery["actual_slot_id"],
++            delivery["actual_cycle_id"]) !=
++           (evidence["actual_kind"], evidence["actual_slot_id"],
++            evidence["actual_cycle_id"])
++        or (history["machine_id"], history["run_id"]) !=
++           (machine_id, receipt["history_run_id"])
++        or (history["bin_x"], history["bin_y"], history["bin_z"]) !=
++           (tuple(slot) if slot is not None else (None, None, None))):
++        raise NativeCompletionRefused("Canonical delivery/history/evidence is inconsistent")
++    try:
++        payload = json.loads(evidence["payload_json"])
++    except (ValueError, TypeError) as exc:
++        raise NativeCompletionRefused("Receiving payload is malformed") from exc
++    if (not isinstance(payload, dict)
++        or evidence["payload_hash"] != _hash(payload)
++        or any(payload.get(key) != evidence[key] for key in payload)):
++        raise NativeCompletionRefused("Receiving payload hash or fields mismatch")
++    receipt_facts = (machine_id, reservation_id, piece_uuid, receipt["evidence_id"],
++                     receipt["delivery_id"], receipt["history_run_id"])
++    if receipt["receipt_hash"] != _hash(receipt_facts):
++        raise NativeCompletionRefused("Canonical receipt hash is inconsistent")
++    return receipt["delivery_id"]
++
++
++def verify_native_identity(machine_id: str, reservation_id: str, piece_uuid: str,
++                           delivery_id: str | None = None,
++                           history_run_id: str | None = None) -> str | None:
++    """Verify ledger facts independently of event and KnownObject fields."""
++    with custody.read_only() as conn:
++        check_schema(conn)
++        return _receipt_on_connection(conn, machine_id, reservation_id,
++                                      piece_uuid, delivery_id, history_run_id)
++
++
++def lookup_native_claim(machine_id: str, piece_uuid: str,
++                        reservation_id: str | None = None) -> dict | None:
++    """Identify a native piece without trusting an event's provenance fields."""
++    with custody.read_only() as conn:
++        check_schema(conn)
++        if reservation_id is not None:
++            row = conn.execute(
++                "SELECT reservation_id FROM smart_bin_native_claims "
++                "WHERE machine_id=? AND piece_uuid=? AND reservation_id=?",
++                (machine_id, piece_uuid, reservation_id)).fetchone()
++        else:
++            row = conn.execute(
++                "SELECT reservation_id FROM smart_bin_native_claims "
++                "WHERE machine_id=? AND piece_uuid=? ORDER BY created_at DESC LIMIT 1",
++                (machine_id, piece_uuid)).fetchone()
++        if row is None:
++            return None
++        return {"reservation_id": row[0],
++                "delivery_id": _receipt_on_connection(conn, machine_id, row[0],
++                                                      piece_uuid)}
++
++
++def delivery_details(machine_id: str, reservation_id: str,
++                     piece_uuid: str, delivery_id: str) -> dict:
++    with custody.read_only() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        row = conn.execute(
++            "SELECT d.actual_kind,d.actual_slot_id,e.observed_at,"
++            "s.layer_index,s.section_index,s.bin_index "
++            "FROM smart_bin_deliveries d "
++            "JOIN smart_bin_native_completion_receipts r ON r.delivery_id=d.id "
++            "JOIN smart_bin_native_receiving_evidence e ON e.evidence_id=r.evidence_id "
++            "LEFT JOIN smart_bin_slots s ON s.id=d.actual_slot_id "
++            "WHERE d.id=?", (delivery_id,)).fetchone()
++        return {"distributed_at": row["observed_at"],
++                "destination_bin": (row["layer_index"], row["section_index"],
++                                    row["bin_index"])
++                if row["actual_kind"] == "BIN" else None}
++
++
++def _receiving_for_reservation(conn: sqlite3.Connection, reservation_id: str):
++    row = conn.execute(
++        "SELECT payload_json FROM smart_bin_native_receiving_evidence "
++        "WHERE reservation_id=?", (reservation_id,)).fetchone()
++    return ReceivingEvidence(**json.loads(row[0])) if row else None
++
++
++def complete_native(piece, machine_id: str, reservation_id: str,
++                    runtime_run_id: str) -> str | None:
++    """Commit evidenced delivery, actual credit, history and receipt together.
++
++    A missing receiving observation is a normal held outcome. This function has
++    no callback, gate, transport or motion side effect.
++    """
++    from run_recorder import _serializePiece
++
++    if not all((machine_id, reservation_id, runtime_run_id)):
++        raise ValueError("Native completion identity and runtime run are required")
++    with critical_transaction() as conn:
++        check_schema(conn)
++        existing = _receipt_on_connection(conn, machine_id, reservation_id,
++                                          piece.uuid, history_run_id=runtime_run_id)
++        if existing is not None:
++            conn.commit()
++            return existing
++        row = _claim(conn, machine_id, reservation_id)
++        if row is None or row["piece_uuid"] != piece.uuid:
++            raise NativeCompletionRefused("Piece does not own native reservation")
++        evidence = _receiving_for_reservation(conn, reservation_id)
++        if evidence is None:
++            conn.commit()
++            return None
++        _validate_evidence(conn, evidence)
++        if (row["status"] != "ACCEPTED" or row["reservation_state"] != "RELEASE_INTENT"
++            or current_blocker_on_connection(conn, machine_id,
++                                             except_reservation=reservation_id)
++            or conn.execute("SELECT 1 FROM smart_bin_native_holds WHERE machine_id=? "
++                            "AND resolved_at IS NULL LIMIT 1", (machine_id,)).fetchone()
++            or conn.execute("SELECT 1 FROM smart_bin_discrepancies WHERE machine_id=? "
++                            "AND resolved_at IS NULL LIMIT 1", (machine_id,)).fetchone()
++            or (("table", "smart_bin_reconciliations") in _objects(conn)
++                and conn.execute("SELECT 1 FROM smart_bin_reconciliations WHERE machine_id=? "
++                                 "AND reservation_id=? LIMIT 1",
++                                 (machine_id, reservation_id)).fetchone())
++            or not conn.execute("SELECT 1 FROM smart_bin_native_evidence "
++                                "WHERE reservation_id=? AND attempt_id=? "
++                                "AND kind='MOTOR_ACCEPTED' LIMIT 1",
++                                (reservation_id, evidence.attempt_id)).fetchone()):
++            raise NativeCompletionRefused("Current release or custody contradicts completion")
++        actual_bin = None
++        if evidence.actual_kind == "BIN":
++            actual_bin = list(conn.execute(
++                "SELECT layer_index,section_index,bin_index FROM smart_bin_slots "
++                "WHERE machine_id=? AND id=?",
++                (machine_id, evidence.actual_slot_id)).fetchone())
++        delivery_id = str(uuid.uuid4())
++        conn.execute(
++            "INSERT INTO smart_bin_deliveries "
++            "(id,reservation_id,machine_id,piece_uuid,run_id,policy_revision_id,"
++            "group_key_id,quantity,intended_kind,intended_slot_id,intended_cycle_id,"
++            "actual_kind,actual_slot_id,actual_cycle_id,evidence_ref,delivered_at) "
++            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++            (delivery_id, reservation_id, machine_id, piece.uuid, row["run_id"],
++             row["policy_revision_id"], row["group_key_id"], row["quantity"],
++             row["intended_kind"], row["intended_slot_id"], row["intended_cycle_id"],
++             evidence.actual_kind, evidence.actual_slot_id, evidence.actual_cycle_id,
++             evidence.evidence_ref, evidence.observed_at))
++        history = _serializePiece(piece)
++        history["destination_bin"] = actual_bin
++        history["distributed_at"] = evidence.observed_at
++        recordPieceOnConnection(conn, history, run_id=runtime_run_id,
++                                machine_id=machine_id)
++        changed = conn.execute(
++            "UPDATE smart_bin_reservations SET state='COMPLETED',"
++            "row_revision=row_revision+1,updated_at=? "
++            "WHERE machine_id=? AND id=? AND state='RELEASE_INTENT' AND row_revision=?",
++            (time.time(), machine_id, reservation_id, row["row_revision"]))
++        if changed.rowcount != 1:
++            raise NativeCompletionRefused("Reservation changed during completion")
++        if (evidence.actual_kind, evidence.actual_slot_id, evidence.actual_cycle_id) != (
++            row["intended_kind"], row["intended_slot_id"], row["intended_cycle_id"]):
++            conn.execute(
++                "INSERT INTO smart_bin_discrepancies "
++                "(id,machine_id,reservation_id,cycle_id,kind,status,evidence_ref,"
++                "details_json,created_at) VALUES(?,?,?,?,?,'open',?,?,?)",
++                (str(uuid.uuid4()), machine_id, reservation_id, evidence.actual_cycle_id,
++                 "NATIVE_DESTINATION_MISMATCH", evidence.evidence_ref,
++                 json.dumps(asdict(evidence), sort_keys=True, allow_nan=False), time.time()))
++        for effect in EFFECTS:
++            conn.execute(
++                "INSERT INTO smart_bin_native_completion_effects "
++                "(reservation_id,effect,phase,attempt_id,updated_at) "
++                "VALUES(?,?,'PENDING',NULL,?)",
++                (reservation_id, effect, time.time()))
++        receipt_facts = (machine_id, reservation_id, piece.uuid, evidence.evidence_id,
++                         delivery_id, runtime_run_id)
++        conn.execute(
++            "INSERT INTO smart_bin_native_completion_receipts VALUES(?,?,?,?,?,?,?,?)",
++            (reservation_id, machine_id, piece.uuid, evidence.evidence_id, delivery_id,
++             runtime_run_id, _hash(receipt_facts), time.time()))
++        conn.execute("UPDATE smart_bin_machines SET state_revision=state_revision+1 "
++                     "WHERE machine_id=?", (machine_id,))
++        conn.commit()
++    return verify_native_identity(machine_id, reservation_id, piece.uuid, delivery_id)
++
++
++def effect_phase(machine_id: str, reservation_id: str, piece_uuid: str,
++                 delivery_id: str, effect: str) -> str:
++    if effect not in EFFECTS:
++        raise ValueError("Unknown native publication effect")
++    with custody.read_only() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        row = conn.execute("SELECT phase FROM smart_bin_native_completion_effects "
++                           "WHERE reservation_id=? AND effect=?",
++                           (reservation_id, effect)).fetchone()
++        if row is None:
++            raise NativeCompletionRefused("Publication obligation is missing")
++        return row[0]
++
++
++def begin_effect(machine_id: str, reservation_id: str, piece_uuid: str,
++                 delivery_id: str, effect: str) -> str | None:
++    """Persist an attempt barrier before a nontransactional callback."""
++    if effect not in EFFECTS or effect == "CLOSE":
++        raise ValueError("Unknown or transactional native publication effect")
++    with critical_transaction() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        index = EFFECTS.index(effect)
++        for predecessor in EFFECTS[:index]:
++            phase = conn.execute(
++                "SELECT phase FROM smart_bin_native_completion_effects "
++                "WHERE reservation_id=? AND effect=?",
++                (reservation_id, predecessor)).fetchone()
++            if phase is None or phase[0] != "SUCCEEDED":
++                raise NativeCompletionRefused("Earlier publication effect is unresolved")
++        current = conn.execute(
++            "SELECT phase FROM smart_bin_native_completion_effects "
++            "WHERE reservation_id=? AND effect=?", (reservation_id, effect)).fetchone()
++        if current is None or current[0] != "PENDING":
++            conn.commit()
++            return None
++        if effect in ("GATE_OPEN", "ADMISSION_RELEASE") and current_blocker_on_connection(
++            conn, machine_id, except_reservation=reservation_id):
++            raise NativeCompletionRefused("Current same-machine blocker prevents gate effect")
++        attempt_id = str(uuid.uuid4())
++        conn.execute(
++            "UPDATE smart_bin_native_completion_effects SET phase='ATTEMPTED',"
++            "attempt_id=?,updated_at=? WHERE reservation_id=? AND effect=?",
++            (attempt_id, time.time(), reservation_id, effect))
++        conn.commit()
++        return attempt_id
++
++
++def finish_effect(machine_id: str, reservation_id: str, piece_uuid: str,
++                  delivery_id: str, effect: str, attempt_id: str) -> None:
++    with critical_transaction() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        changed = conn.execute(
++            "UPDATE smart_bin_native_completion_effects SET phase='SUCCEEDED',"
++            "updated_at=? WHERE reservation_id=? AND effect=? "
++            "AND phase='ATTEMPTED' AND attempt_id=? AND failure_phase IS NULL",
++            (time.time(), reservation_id, effect, attempt_id))
++        if changed.rowcount != 1:
++            raise NativeCompletionRefused("Publication attempt receipt is stale")
++        conn.commit()
++
++
++def record_effect_failure(machine_id: str, reservation_id: str, piece_uuid: str,
++                          delivery_id: str, effect: str, attempt_id: str,
++                          failure_phase: str, reason: str) -> None:
++    if failure_phase not in ("PUBLICATION_CALLBACKS", "GATE_OPEN",
++                             "ADMISSION_RELEASE"):
++        raise ValueError("Unknown native effect failure phase")
++    with critical_transaction() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        changed = conn.execute(
++            "UPDATE smart_bin_native_completion_effects SET failure_phase=?,"
++            "failure_reason=?,failure_at=?,updated_at=? "
++            "WHERE reservation_id=? AND effect=? AND phase='ATTEMPTED' "
++            "AND attempt_id=? AND failure_phase IS NULL",
++            (failure_phase, reason, time.time(), time.time(),
++             reservation_id, effect, attempt_id))
++        if changed.rowcount != 1:
++            raise NativeCompletionRefused("Native failure attribution is stale")
++        conn.commit()
++
++
++def close_publication(machine_id: str, reservation_id: str,
++                      piece_uuid: str, delivery_id: str) -> None:
++    """CLOSE persists only after every producer effect has a success receipt."""
++    with critical_transaction() as conn:
++        check_schema(conn)
++        _receipt_on_connection(conn, machine_id, reservation_id, piece_uuid, delivery_id)
++        for effect in EFFECTS[:EFFECTS.index("CLOSE")]:
++            row = conn.execute(
++                "SELECT phase FROM smart_bin_native_completion_effects "
++                "WHERE reservation_id=? AND effect=?",
++                (reservation_id, effect)).fetchone()
++            if row is None or row[0] != "SUCCEEDED":
++                raise NativeCompletionRefused("Producer publication is not complete")
++        conn.execute(
++            "UPDATE smart_bin_native_completion_effects SET phase='SUCCEEDED',"
++            "updated_at=? WHERE reservation_id=? AND effect='CLOSE' AND phase='PENDING'",
++            (time.time(), reservation_id))
++        conn.commit()
++
++
++def current_blocker_on_connection(conn: sqlite3.Connection, machine_id: str,
++                                  except_reservation: str | None = None) -> bool:
++    """Indexed current facts only; work does not grow with closed history."""
++    check_schema(conn)
++    if except_reservation is None:
++        projected = conn.execute(
++            "SELECT 1 FROM smart_bin_current_obligations WHERE machine_id=? LIMIT 1",
++            (machine_id,)).fetchone()
++    else:
++        projected = (conn.execute(
++            "SELECT 1 FROM smart_bin_current_obligations WHERE machine_id=? "
++            "AND reservation_id<? LIMIT 1",
++            (machine_id, except_reservation)).fetchone()
++            or conn.execute(
++                "SELECT 1 FROM smart_bin_current_obligations WHERE machine_id=? "
++                "AND reservation_id>? LIMIT 1",
++                (machine_id, except_reservation)).fetchone())
++    if projected:
++        return True
++    if conn.execute(
++        "SELECT 1 FROM smart_bin_reservations WHERE machine_id=? AND "
++        "state IN ('RESERVED','RELEASE_INTENT','EXIT_CONFIRMED','UNCERTAIN') "
++        "AND id IS NOT ? LIMIT 1", (machine_id, except_reservation)).fetchone():
++        return True
++    if conn.execute(
++        "SELECT 1 FROM smart_bin_native_holds WHERE machine_id=? "
++        "AND resolved_at IS NULL LIMIT 1", (machine_id,)).fetchone():
++        return True
++    if conn.execute(
++        "SELECT 1 FROM smart_bin_discrepancies WHERE machine_id=? "
++        "AND resolved_at IS NULL LIMIT 1", (machine_id,)).fetchone():
++        return True
++    return False
++
++
++def current_blocker(machine_id: str,
++                    except_reservation: str | None = None) -> bool:
++    with custody.read_only() as conn:
++        return current_blocker_on_connection(conn, machine_id, except_reservation)
+diff --git a/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+index cf6f02987fcdddac862638ca96f1611739fe1686..8ad8d036a032771d9c329ea4e9101856b6e33409 100644
+--- a/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
++++ b/software/sorter/backend/subsystems/classification_channel/smart_bins_native_adapter.py
+@@ -7,6 +7,7 @@ from dataclasses import replace
+ import uuid
+ 
+ import smart_bins_native_custody as custody
++import smart_bins_native_completion as completion
+ import smart_bins_service as service
+ 
+ 
+@@ -17,6 +18,16 @@ class NativeCustodyAdapter:
+         state = custody.startup_state(machine_id)
+         self.active = state["active"]
+         self.blocked = state["blocked"]
++        if self.active:
++            with custody.read_only() as conn:
++                try:
++                    completion.check_schema(conn)
++                except completion.NativeCompletionRefused as exc:
++                    raise custody.CustodyRefused(
++                        "Active native custody requires explicit RB04 completion initialization"
++                    ) from exc
++                self.blocked = self.blocked or completion.current_blocker_on_connection(
++                    conn, machine_id)
+         self.settings = state.get("settings")
+         self.current = None
+         self.permit = None
+@@ -43,6 +54,19 @@ class NativeCustodyAdapter:
+             return
+         if self._fault or self.blocked:
+             raise custody.CustodyRefused("Smart Bin custody requires reconciliation")
++        with custody.read_only() as conn:
++            except_id = (
++                self.current.reservation_id
++                if (self.current and scope and scope.get("adapter") is self
++                    and scope.get("kind") in ("route", "dispatch"))
++                else None
++            )
++            if completion.current_blocker_on_connection(
++                conn, self.machine_id, except_id
++            ):
++                raise custody.CustodyRefused(
++                    "Current Smart Bin completion obligation blocks motion"
++                )
+         if scope and scope.get("adapter") is self and scope.get("kind") == "dispatch":
+             if kind == "finite" and role in (
+                 "carousel",
+@@ -107,6 +131,10 @@ class NativeCustodyAdapter:
+                     raise custody.CustodyRefused(
+                         "Existing durable custody blocks reservation"
+                     )
++                if completion.current_blocker_on_connection(conn, self.machine_id):
++                    raise custody.CustodyRefused(
++                        "Current completion obligation blocks reservation"
++                    )
+                 settings = conn.execute(
+                     "SELECT * FROM smart_bin_native_settings WHERE machine_id=?",
+                     (self.machine_id,),
+@@ -217,6 +245,12 @@ class NativeCustodyAdapter:
+             except Exception:
+                 self._fault = "Reservation committed but native custody binding failed"
+                 raise
++            if (piece.native_machine_id not in (None, identity.machine_id)
++                or piece.native_reservation_id not in (None, identity.reservation_id)):
++                self._fault = "KnownObject native provenance conflicts with durable custody"
++                raise custody.CustodyRefused(self._fault)
++            piece.native_machine_id = identity.machine_id
++            piece.native_reservation_id = identity.reservation_id
+             self.current = identity
+             self.transport = transport
+             selected = next((s for s in slots if s["id"] == result["slot_id"]), None)
+@@ -248,6 +282,10 @@ class NativeCustodyAdapter:
+             self._verify_head(positioned_uuid)
+             if self.permit is not None:
+                 raise custody.CustodyRefused("READY cannot create another permit")
++            if completion.current_blocker(
++                self.machine_id, except_reservation=self.current.reservation_id
++            ):
++                raise custody.CustodyRefused("Current completion obligation blocks READY")
+             identity = replace(self.current, attempt_id=str(uuid.uuid4()))
+             digest = service.configuration_digest()
+             custody.arm(identity, digest, evidence)
+@@ -356,6 +394,27 @@ class NativeCustodyAdapter:
+             "Unknown/resident custody requires explicit reconciliation"
+         )
+ 
++    def release_completed(self, piece_uuid, reservation_id, delivery_id):
++        """Forget only a fully published, verified owner. Grants no motion."""
++        with custody.MOTION_LOCK:
++            if (self.current is None or self.current.piece_uuid != piece_uuid
++                or self.current.reservation_id != reservation_id):
++                raise custody.CustodyRefused("Completion does not own current head")
++            completion.verify_native_identity(self.machine_id, reservation_id,
++                                              piece_uuid, delivery_id)
++            for effect in completion.EFFECTS[:-1]:
++                if completion.effect_phase(self.machine_id, reservation_id,
++                                           piece_uuid, delivery_id, effect) != "SUCCEEDED":
++                    raise custody.CustodyRefused("Completion effect is unfinished")
++            if completion.current_blocker(
++                self.machine_id, except_reservation=reservation_id
++            ):
++                raise custody.CustodyRefused("Current same-machine blocker remains")
++            self.current = None
++            self.permit = None
++            self.route = None
++            self.transport = None
++
+ 
+ def attach(gc):
+     adapter = getattr(gc, "smart_bins_native_adapter", None)
+diff --git a/software/sorter/backend/subsystems/distribution/sending.py b/software/sorter/backend/subsystems/distribution/sending.py
+index 90e7c20161d811506ac0bc56f338960919ce1176..9eedd07c6aca33c1a3b621e99625d9813ccb0cd0 100644
+--- a/software/sorter/backend/subsystems/distribution/sending.py
++++ b/software/sorter/backend/subsystems/distribution/sending.py
+@@ -33,6 +33,9 @@ class Sending(BaseState):
+         self.start_time: float = 0.0
+         self._occupancy_state: str | None = None
+         self._committed: bool = False
++        self._native_pending_event_sent = False
++        self._native_next_check_at = 0.0
++        self._native_last_error: str | None = None
+ 
+     def _setOccupancyState(self, state_name: str) -> None:
+         if self._occupancy_state == state_name:
+@@ -60,6 +63,11 @@ class Sending(BaseState):
+                 elapsed_ms = (now - self.start_time) * 1000
+                 self._setOccupancyState("sending.wait_drop_piece")
+                 if elapsed_ms >= MISSING_DROP_PIECE_GRACE_MS:
++                    adapter = getattr(self.gc, "smart_bins_native_adapter", None)
++                    if (adapter is not None and adapter.active and
++                        adapter.current is not None):
++                        # A missing drop object cannot erase durable custody.
++                        return None
+                     self.logger.warning(
+                         "Sending: no distribution-drop piece available after "
+                         f"{elapsed_ms:.0f}ms; reopening distribution gate"
+@@ -78,6 +86,9 @@ class Sending(BaseState):
+         if elapsed_ms < settle_ms:
+             return None
+ 
++        if self.piece and self.piece.native_reservation_id:
++            return self._stepNative()
++
+         # Commit the piece once (stats, event, recorder) — must not repeat
+         # even if we decide to hold the gate for additional cooldown below.
+         if not self._committed:
+@@ -119,6 +130,129 @@ class Sending(BaseState):
+         self.shared.set_distribution_gate(True, reason=None)
+         return DistributionState.IDLE
+ 
++    def _nativeEffect(self, completion, effect: str, callback) -> bool:
++        piece = self.piece
++        identity = (piece.native_machine_id, piece.native_reservation_id,
++                    piece.uuid, piece.native_delivery_id)
++        phase = completion.effect_phase(*identity, effect)
++        if phase == "SUCCEEDED":
++            return True
++        if phase == "ATTEMPTED":
++            raise completion.NativeCompletionRefused(
++                "Ambiguous callback attempt requires reconciliation"
++            )
++        attempt_id = completion.begin_effect(*identity, effect)
++        if attempt_id is None:
++            raise completion.NativeCompletionRefused(
++                "Publication effect changed before callback"
++            )
++        try:
++            callback()
++        except Exception as exc:
++            failure_phase = (
++                "GATE_OPEN" if effect == "GATE_OPEN" else
++                "ADMISSION_RELEASE" if effect == "ADMISSION_RELEASE" else
++                "PUBLICATION_CALLBACKS"
++            )
++            completion.record_effect_failure(
++                *identity, effect, attempt_id, failure_phase, str(exc)
++            )
++            raise
++        completion.finish_effect(*identity, effect, attempt_id)
++        return True
++
++    def _stepNative(self) -> Optional[DistributionState]:
++        import smart_bins_native_completion as completion
++
++        if time.time() < self._native_next_check_at:
++            return None
++        piece = self.piece
++        machine_id = piece.native_machine_id
++        reservation_id = piece.native_reservation_id
++        if not machine_id or not reservation_id or machine_id != self.gc.machine_id:
++            self.logger.warning("Sending: native provenance is incomplete or foreign")
++            return None
++        try:
++            delivery_id = completion.complete_native(piece, machine_id,
++                                                     reservation_id, self.gc.run_id)
++            if delivery_id is None:
++                # Route and settle are not receiving proof. No history, count or
++                # progress is published for this held claim.
++                if not self._native_pending_event_sent:
++                    piece.destination_bin = None
++                    self.event_queue.put(knownObjectToEvent(piece))
++                    self._native_pending_event_sent = True
++                self._setOccupancyState("sending.wait_piece_exit")
++                self._native_next_check_at = time.time() + 1.0
++                return None
++            piece.native_delivery_id = delivery_id
++            details = completion.delivery_details(machine_id, reservation_id,
++                                                  piece.uuid, delivery_id)
++            piece.destination_bin = details["destination_bin"]
++            piece.distributed_at = details["distributed_at"]
++            piece.updated_at = time.time()
++            piece.stage = PieceStage.distributed
++
++            if not self._nativeEffect(
++                completion, "EVENT_ENQUEUED",
++                lambda: self.event_queue.put(knownObjectToEvent(piece))
++            ):
++                return None
++            if not self._nativeEffect(
++                completion, "RUN_RECORDER_ADOPTED",
++                lambda: self.gc.run_recorder.recordCommittedNativePiece(
++                    piece, reservation_id, delivery_id)
++            ):
++                return None
++            tracker = getattr(self.gc, "set_progress_tracker", None)
++            if not self._nativeEffect(
++                completion, "PROGRESS_RECORDED",
++                lambda: tracker.record(piece.part_id, piece.color_id,
++                                       piece.category_id) if tracker else None
++            ):
++                return None
++            if not self._nativeEffect(
++                completion, "PROGRESS_SYNC_NOTIFIED",
++                lambda: __import__("server.set_progress_sync", fromlist=[
++                    "getSetProgressSyncWorker"]).getSetProgressSyncWorker().notify()
++                if tracker else None
++            ):
++                return None
++            if completion.effect_phase(machine_id, reservation_id, piece.uuid,
++                                       delivery_id, "CLOSE") != "SUCCEEDED":
++                completion.close_publication(machine_id, reservation_id,
++                                             piece.uuid, delivery_id)
++            if not self._shouldReopenGate():
++                return None
++            if completion.current_blocker(
++                machine_id, except_reservation=reservation_id
++            ):
++                return None
++            if not self._nativeEffect(
++                completion, "GATE_OPEN",
++                lambda: self.shared.set_distribution_gate(True, reason=None)
++            ):
++                return None
++            adapter = getattr(self.gc, "smart_bins_native_adapter", None)
++            if adapter is None:
++                return None
++            if not self._nativeEffect(
++                completion, "ADMISSION_RELEASE",
++                lambda: adapter.release_completed(piece.uuid, reservation_id,
++                                                  delivery_id)
++            ):
++                return None
++            return DistributionState.IDLE
++        except Exception as exc:
++            message = str(exc)
++            if message != self._native_last_error:
++                self.logger.warning(
++                    f"Sending: native completion remains held: {message}"
++                )
++                self._native_last_error = message
++            self._native_next_check_at = time.time() + 1.0
++            return None
++
+     @staticmethod
+     def _alreadyCommitted(piece) -> bool:
+         return piece.stage == PieceStage.distributed or piece.distributed_at is not None
+@@ -143,3 +277,6 @@ class Sending(BaseState):
+         self.piece = None
+         self.start_time = 0.0
+         self._committed = False
++        self._native_pending_event_sent = False
++        self._native_next_check_at = 0.0
++        self._native_last_error = None
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_completion.py b/software/sorter/backend/tests/test_smart_bins_native_completion.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0b664bd961956176a225c0c513206a394d8083c
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_completion.py
+@@ -0,0 +1,200 @@
++"""Native completion uses only explicit receiver evidence on disposable SQLite."""
++
++from dataclasses import replace
++import time
++import sqlite3
++
++import pytest
++
++from defs.known_object import KnownObject
++import piece_records
++import smart_bins_native_completion as completion
++import smart_bins_native_custody as custody
++import smart_bins_service as service
++from subsystems.classification_channel.smart_bins_native_adapter import NativeCustodyAdapter
++import test_smart_bins_reservations as reservation_fixtures
++from test_smart_bins_reservations import (
++    claim, connect, qualification, request,
++)
++
++prepared = reservation_fixtures.prepared
++
++
++@pytest.fixture
++def released(prepared):
++    piece_records.initialize_piece_records()
++    custody.initialize_native_schema("m", "p", "sorter", 0)
++    completion.initialize_schema()
++    reservation = claim(request(custody=False), qualification(), "native-rb04")
++    identity = custody.NativeIdentity("m", "one", reservation["reservation_id"],
++                                      "incarnation", 7, 0, "attempt")
++    digest = service.configuration_digest()
++    custody.bind_reservation(identity, digest)
++    custody.arm(identity, digest, {"receiving_evidence": False})
++    custody.consume(identity, digest)
++    custody.observe(identity, "MOTOR_ACCEPTED",
++                    {"proves_piece_displacement": False})
++    piece = KnownObject(uuid="one", native_machine_id="m",
++                        native_reservation_id=reservation["reservation_id"])
++    return prepared, identity, piece
++
++
++def evidence(identity, **overrides):
++    value = completion.ReceivingEvidence(
++        evidence_id="receiver-observation-1", machine_id="m",
++        reservation_id=identity.reservation_id, piece_uuid="one",
++        attempt_id=identity.attempt_id, incarnation=identity.incarnation,
++        head_generation=identity.head_generation,
++        route_revision=identity.route_revision, actual_kind="BIN",
++        actual_slot_id="s0", actual_cycle_id="c0",
++        evidence_type="PHYSICALLY_QUALIFIED_RECEIVER", policy_version=1,
++        evidence_ref="independent-receiver-1", observed_at=time.time(),
++        source_identity="qualified-test-source", qualifier_identity="test-policy",
++    )
++    return replace(value, **overrides)
++
++
++def test_no_source_observation_grants_completion(released):
++    path, identity, piece = released
++    custody.observe(identity, "INFERRED_EXIT", {"receiving_evidence": False})
++    assert completion.complete_native(piece, "m", identity.reservation_id, "run") is None
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        assert conn.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 0
++        assert conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0] == "RELEASE_INTENT"
++
++
++def test_explicit_extension_required_before_native_adapter(prepared):
++    custody.initialize_native_schema("m", "p", "sorter", 0)
++    with connect(prepared) as conn:
++        assert conn.execute(
++            "SELECT 1 FROM sqlite_master WHERE name='smart_bin_native_completion_versions'"
++        ).fetchone() is None
++    with pytest.raises(custody.CustodyRefused, match="explicit RB04"):
++        NativeCustodyAdapter("m")
++    completion.initialize_schema()
++    assert NativeCustodyAdapter("m").active
++
++
++def test_qualified_receiver_commits_history_receipt_and_actual_credit(released):
++    path, identity, piece = released
++    observation = evidence(identity)
++    assert completion.record_receiving_evidence(observation) == observation.evidence_id
++    delivery_id = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    assert delivery_id == completion.verify_native_identity(
++        "m", identity.reservation_id, piece.uuid)
++    assert delivery_id == completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 1
++        assert conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0] == "COMPLETED"
++        assert tuple(conn.execute("SELECT bin_x,bin_y,bin_z FROM piece_records").fetchone()) == (0, 0, 0)
++    assert completion.record_receiving_evidence(observation) == observation.evidence_id
++    with pytest.raises(completion.NativeCompletionRefused, match="conflict"):
++        completion.record_receiving_evidence(replace(observation, evidence_ref="other"))
++
++
++def test_wrong_generation_and_misroute(released):
++    path, identity, piece = released
++    with pytest.raises(completion.NativeCompletionRefused):
++        completion.record_receiving_evidence(evidence(identity, head_generation=8))
++    observation = evidence(identity, actual_slot_id="s1", actual_cycle_id="c1")
++    completion.record_receiving_evidence(observation)
++    delivery_id = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    assert delivery_id
++    with connect(path) as conn:
++        delivery = conn.execute("SELECT intended_slot_id,actual_slot_id FROM smart_bin_deliveries").fetchone()
++        assert tuple(delivery) == ("s0", "s1")
++        assert conn.execute("SELECT count(*) FROM smart_bin_discrepancies").fetchone()[0] == 1
++        assert tuple(conn.execute("SELECT bin_x,bin_y,bin_z FROM piece_records").fetchone()) == (0, 0, 1)
++    assert completion.current_blocker("m")
++
++
++def test_history_failure_rolls_back_all_completion_facts(released, monkeypatch):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    def fail(*args, **kwargs):
++        raise RuntimeError("injected history failure")
++    monkeypatch.setattr(completion, "recordPieceOnConnection", fail)
++    with pytest.raises(RuntimeError, match="injected"):
++        completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++        assert conn.execute("SELECT count(*) FROM smart_bin_native_completion_receipts").fetchone()[0] == 0
++        assert conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0] == "RELEASE_INTENT"
++
++
++@pytest.mark.parametrize("change", [
++    {"piece_uuid": "other"},
++    {"reservation_id": "other"},
++    {"attempt_id": "other"},
++    {"incarnation": "other"},
++    {"head_generation": 8},
++    {"route_revision": 1},
++    {"policy_version": 2},
++    {"evidence_type": "INFERRED_EXIT"},
++    {"observed_at": 1.0},
++])
++def test_wrong_or_stale_receiving_evidence_never_completes(released, change):
++    path, identity, piece = released
++    with pytest.raises(completion.NativeCompletionRefused):
++        completion.record_receiving_evidence(evidence(identity, **change))
++    assert completion.complete_native(piece, "m", identity.reservation_id, "run") is None
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++
++
++def test_second_receiver_for_same_reservation_conflicts(released):
++    _, identity, _ = released
++    first = evidence(identity)
++    completion.record_receiving_evidence(first)
++    with pytest.raises(completion.NativeCompletionRefused, match="conflicting"):
++        completion.record_receiving_evidence(replace(
++            first, evidence_id="another-evidence", actual_slot_id="s1",
++            actual_cycle_id="c1",
++        ))
++
++
++def test_uncertain_custody_refuses_recorded_receiver(released):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    custody.observe(identity, "EJECT_TIMEOUT_VISIBLE", {}, uncertain=True)
++    with pytest.raises(completion.NativeCompletionRefused):
++        completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 0
++
++
++def test_receipt_insert_failure_rolls_back_delivery_history_and_effects(released):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    with connect(path) as conn:
++        conn.execute(
++            "CREATE TRIGGER fail_native_receipt BEFORE INSERT "
++            "ON smart_bin_native_completion_receipts BEGIN "
++            "SELECT RAISE(ABORT,'injected receipt failure'); END"
++        )
++    with pytest.raises(sqlite3.IntegrityError, match="injected"):
++        completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        for table in ("smart_bin_deliveries", "piece_records",
++                      "smart_bin_native_completion_receipts",
++                      "smart_bin_native_completion_effects"):
++            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
++
++
++def test_native_receipt_cannot_hide_missing_history(released):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    delivery_id = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        conn.execute("DELETE FROM piece_records WHERE uuid=?", (piece.uuid,))
++        assert conn.execute(
++            "SELECT kind FROM smart_bin_current_obligations "
++            "WHERE reservation_id=? AND kind='NATIVE_MISSING_HISTORY'",
++            (identity.reservation_id,),
++        ).fetchone()
++    assert completion.current_blocker("m")
++    with pytest.raises(completion.NativeCompletionRefused, match="inconsistent"):
++        completion.verify_native_identity("m", identity.reservation_id,
++                                          piece.uuid, delivery_id)
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_custody.py b/software/sorter/backend/tests/test_smart_bins_native_custody.py
+index 507e0b1b373618f5e3aff11bb448553ea3b68d37..1d7c574ba3e16e50ee16ce0d8965ac0f4f559c8e 100644
+--- a/software/sorter/backend/tests/test_smart_bins_native_custody.py
++++ b/software/sorter/backend/tests/test_smart_bins_native_custody.py
+@@ -7,6 +7,7 @@ import sqlite3
+ import pytest
+ 
+ import smart_bins_native_custody as native
++import smart_bins_native_completion as completion
+ import smart_bins_service as service
+ from subsystems.classification_channel.smart_bins_native_adapter import (
+     NativeCustodyAdapter,
+@@ -30,6 +31,7 @@ def reset_fence():
+ @pytest.fixture
+ def bound(prepared):
+     native.initialize_native_schema("m", "p", "sorter", 0)
++    completion.initialize_schema()
+     result = claim(request(custody=False), qualification(), "native-reserve")
+     identity = native.NativeIdentity(
+         "m", "one", result["reservation_id"], "incarnation", 7, 0, "attempt"
+@@ -242,6 +244,7 @@ def test_no_db_writer_during_owned_hardware_scope(bound):
+ 
+ def test_unknown_material_hold_does_not_fabricate_quantity(prepared):
+     native.initialize_native_schema("m", "p", "sorter", 0)
++    completion.initialize_schema()
+     adapter = NativeCustodyAdapter("m")
+     with pytest.raises(native.CustodyRefused):
+         adapter.refuse_unqualified_motion("UNKNOWN_MATERIAL", {"quantity": None})
+@@ -279,6 +282,7 @@ def test_partial_native_schema_fails_closed(bound):
+ 
+ def test_hold_is_not_rewritten_every_motion_tick(prepared):
+     native.initialize_native_schema("m", "p", "sorter", 0)
++    completion.initialize_schema()
+     adapter = NativeCustodyAdapter("m")
+     for _ in range(3):
+         with pytest.raises(native.CustodyRefused):
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_faults.py b/software/sorter/backend/tests/test_smart_bins_native_faults.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8094630d230236bf17143abe95df8a2bb7e49d24
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_faults.py
+@@ -0,0 +1,166 @@
++"""Faults leave exact durable truth and never imply another physical release."""
++
++import sqlite3
++
++import pytest
++import smart_bins_native_completion as completion
++import test_smart_bins_native_completion as completion_fixtures
++from test_smart_bins_native_completion import evidence
++from test_smart_bins_reservations import connect
++from test_smart_bins_sending import setup_sending
++
++released = completion_fixtures.released
++prepared = completion_fixtures.prepared
++
++
++@pytest.mark.parametrize("table,operation,condition", [
++    ("smart_bin_deliveries", "INSERT", "1"),
++    ("piece_records", "INSERT", "1"),
++    ("smart_bin_reservations", "UPDATE", "NEW.state='COMPLETED'"),
++    ("smart_bin_native_completion_effects", "INSERT", "1"),
++    ("smart_bin_native_completion_receipts", "INSERT", "1"),
++])
++def test_atomic_failure_rolls_back_every_completion_fact(
++    released, table, operation, condition,
++):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    with connect(path) as conn:
++        conn.execute(
++            f"CREATE TRIGGER fail_stage BEFORE {operation} ON {table} "
++            f"WHEN {condition} BEGIN SELECT RAISE(ABORT,'injected stage'); END"
++        )
++    with pytest.raises(sqlite3.IntegrityError, match="injected stage"):
++        completion.complete_native(piece, "m", identity.reservation_id, "run")
++    with connect(path) as conn:
++        for name in ("smart_bin_deliveries", "piece_records",
++                     "smart_bin_native_completion_effects",
++                     "smart_bin_native_completion_receipts"):
++            assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == 0
++        assert conn.execute("SELECT state FROM smart_bin_reservations").fetchone()[0] == "RELEASE_INTENT"
++
++
++def test_receiving_insert_failure_retains_no_qualified_evidence(released):
++    path, identity, _ = released
++    with connect(path) as conn:
++        conn.execute(
++            "CREATE TRIGGER fail_receiver BEFORE INSERT ON "
++            "smart_bin_native_receiving_evidence BEGIN "
++            "SELECT RAISE(ABORT,'receiver write failed'); END"
++        )
++    with pytest.raises(sqlite3.IntegrityError, match="receiver write failed"):
++        completion.record_receiving_evidence(evidence(identity))
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_native_receiving_evidence").fetchone()[0] == 0
++
++
++def test_commit_readback_ambiguity_recovers_same_receipt(released, monkeypatch):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    original = completion.verify_native_identity
++    def lost_ack(*args, **kwargs):
++        raise OSError("readback unavailable after commit")
++    monkeypatch.setattr(completion, "verify_native_identity", lost_ack)
++    with pytest.raises(OSError, match="readback unavailable"):
++        completion.complete_native(piece, "m", identity.reservation_id, "run")
++    monkeypatch.setattr(completion, "verify_native_identity", original)
++    delivered = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    assert delivered == original("m", identity.reservation_id, piece.uuid)
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM smart_bin_native_completion_receipts").fetchone()[0] == 1
++
++
++def _effect(path, reservation_id, effect):
++    with connect(path) as conn:
++        return conn.execute(
++            "SELECT phase,failure_phase FROM smart_bin_native_completion_effects "
++            "WHERE reservation_id=? AND effect=?", (reservation_id, effect)
++        ).fetchone()
++
++
++def test_callback_failure_is_attributed_and_not_replayed(released, monkeypatch):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    sending, _, shared, events = setup_sending(piece)
++    attempts = []
++    def fail_event(_event):
++        attempts.append(1)
++        raise OSError("injected callback")
++    monkeypatch.setattr(events, "put", fail_event)
++    assert sending.step() is None
++    assert tuple(_effect(path, identity.reservation_id, "EVENT_ENQUEUED")) == (
++        "ATTEMPTED", "PUBLICATION_CALLBACKS")
++    sending._native_next_check_at = 0
++    assert sending.step() is None
++    assert attempts == [1]
++    assert not shared.get_distribution_ready()
++
++
++def test_publication_attempt_persistence_failure_runs_no_callback(released):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    with connect(path) as conn:
++        conn.execute(
++            "CREATE TRIGGER fail_attempt BEFORE UPDATE OF phase "
++            "ON smart_bin_native_completion_effects "
++            "WHEN NEW.effect='EVENT_ENQUEUED' AND NEW.phase='ATTEMPTED' "
++            "BEGIN SELECT RAISE(ABORT,'attempt write failed'); END"
++        )
++    sending, _, shared, events = setup_sending(piece)
++    assert sending.step() is None
++    assert tuple(_effect(path, identity.reservation_id, "EVENT_ENQUEUED")) == (
++        "PENDING", None)
++    assert events.qsize() == 0
++    assert not shared.get_distribution_ready()
++    with connect(path) as conn:
++        assert conn.execute("SELECT count(*) FROM smart_bin_deliveries").fetchone()[0] == 1
++        assert conn.execute("SELECT count(*) FROM piece_records").fetchone()[0] == 1
++
++
++@pytest.mark.parametrize("effect", ["EVENT_ENQUEUED", "CLOSE"])
++def test_success_or_close_persistence_failure_does_not_open_gate(
++    released, effect,
++):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    with connect(path) as conn:
++        conn.execute(
++            "CREATE TRIGGER fail_effect_success BEFORE UPDATE OF phase "
++            "ON smart_bin_native_completion_effects "
++            f"WHEN NEW.effect='{effect}' AND NEW.phase='SUCCEEDED' "
++            "BEGIN SELECT RAISE(ABORT,'phase persistence failed'); END"
++        )
++    sending, gc, shared, events = setup_sending(piece)
++    gc.set_progress_tracker = None
++    assert sending.step() is None
++    expected = "ATTEMPTED" if effect == "EVENT_ENQUEUED" else "PENDING"
++    assert _effect(path, identity.reservation_id, effect)[0] == expected
++    assert not shared.get_distribution_ready()
++    assert events.qsize() == 1
++
++
++@pytest.mark.parametrize("effect,phase", [
++    ("GATE_OPEN", "GATE_OPEN"),
++    ("ADMISSION_RELEASE", "ADMISSION_RELEASE"),
++])
++def test_gate_and_admission_failures_are_separate(released, monkeypatch, effect, phase):
++    path, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    sending, gc, shared, _ = setup_sending(piece)
++    gc.set_progress_tracker = None
++    if effect == "GATE_OPEN":
++        def fail_gate(value, **_kwargs):
++            if value:
++                raise OSError("injected gate failure")
++        monkeypatch.setattr(shared, "set_distribution_gate", fail_gate)
++    else:
++        def fail_admission(*_args):
++            raise OSError("injected admission failure")
++        monkeypatch.setattr(gc.smart_bins_native_adapter, "release_completed",
++                            fail_admission)
++    assert sending.step() is None
++    assert tuple(_effect(path, identity.reservation_id, effect)) == ("ATTEMPTED", phase)
++    assert completion.current_blocker("m")
++    assert _effect(path, identity.reservation_id, "CLOSE")[0] == "SUCCEEDED"
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_projection.py b/software/sorter/backend/tests/test_smart_bins_native_projection.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..168a933c0440b54cd4f551e75ad50b0ffc8e8080
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_projection.py
+@@ -0,0 +1,192 @@
++"""Current authorization tracks later contradictions without scanning old rows."""
++
++import json
++
++import smart_bins_native_completion as native_completion
++import smart_bins_native_custody as native_custody
++import smart_bins_completion_recovery as recovery
++import test_smart_bins_completion_recovery as recovery_fixtures
++from test_smart_bins_completion_recovery import (
++    connect, retained, complete_retained, close, late_hold,
++)
++
++prepared = recovery_fixtures.prepared
++
++
++def _closed(path):
++    ctx = retained(path)
++    complete_retained(ctx)
++    close(ctx)
++    native_custody.initialize_native_schema("m", "p", "sorter", 0)
++    native_completion.initialize_schema()
++    return ctx
++
++
++def test_closed_history_starts_clear_then_late_hold_blocks(prepared):
++    ctx = _closed(prepared)
++    with connect(prepared) as conn:
++        assert recovery.inspect_on_connection(conn, "m")["followup_blockers"] == []
++    assert not native_completion.current_blocker("m")
++    late_hold(ctx, ctx.handoff)
++    assert native_completion.current_blocker("m")
++    with connect(prepared) as conn:
++        assert conn.execute("SELECT kind FROM smart_bin_current_obligations "
++                            "WHERE reservation_id=? AND kind='FOLLOWUP'",
++                            (ctx.handoff.reservation_id,)).fetchone()
++
++
++def test_history_deleted_after_close_blocks_current_authorization(prepared):
++    _closed(prepared)
++    assert not native_completion.current_blocker("m")
++    with connect(prepared) as conn:
++        conn.execute("DELETE FROM piece_records")
++    assert native_completion.current_blocker("m")
++    with connect(prepared) as conn:
++        assert recovery.inspect_on_connection(conn, "m")["followup_blockers"]
++
++
++def test_other_machine_obligation_is_isolated(prepared):
++    _closed(prepared)
++    with connect(prepared) as conn:
++        conn.execute("INSERT INTO smart_bin_machines(machine_id) VALUES('other')")
++        conn.execute("INSERT INTO smart_bin_native_holds "
++                     "VALUES('other-hold','other','UNKNOWN_MATERIAL','{}',1,NULL)")
++    assert not native_completion.current_blocker("m")
++    assert native_completion.current_blocker("other")
++
++
++def _copy_row(conn, table, row, **changes):
++    values = dict(row)
++    values.update(changes)
++    if table == "piece_records":
++        values.pop("id")
++    columns = list(values)
++    conn.execute(
++        f"INSERT INTO {table} ({','.join(columns)}) "
++        f"VALUES ({','.join('?' for _ in columns)})",
++        tuple(values.values()),
++    )
++
++
++def _replace_piece(raw, piece):
++    def replace(value):
++        if isinstance(value, dict):
++            return {key: replace(item) for key, item in value.items()}
++        if isinstance(value, list):
++            return [replace(item) for item in value]
++        return piece if value == "piece" else value
++    return json.dumps(replace(json.loads(raw)), sort_keys=True)
++
++
++def _synthetic_closed_history(conn, start, count):
++    """Clone one accepted closure with unique durable identities and references."""
++    source = {table: conn.execute(f"SELECT * FROM {table} LIMIT 1").fetchone()
++              for table in (
++                  "smart_bin_reservations", "smart_bin_release_attempts",
++                  "smart_bin_release_evidence", "piece_records",
++                  "smart_bin_deliveries", "smart_bin_completion_followups",
++              )}
++    for index in range(start, start + count):
++        reservation_id = f"synthetic-reservation-{index}"
++        attempt_id = f"synthetic-attempt-{index}"
++        delivery_id = f"synthetic-delivery-{index}"
++        followup_id = f"synthetic-followup-{index}"
++        piece = f"synthetic-piece-{index}"
++        key = f"synthetic-key-{index}"
++        _copy_row(conn, "smart_bin_reservations", source["smart_bin_reservations"],
++                  id=reservation_id, piece_uuid=piece, request_key=key)
++        _copy_row(conn, "smart_bin_release_attempts", source["smart_bin_release_attempts"],
++                  id=attempt_id, reservation_id=reservation_id,
++                  target_boundary=str(1000 + index))
++        release = dict(source["smart_bin_release_evidence"])
++        for name in ("intent_json", "exit_json", "completion_json"):
++            release[name] = _replace_piece(release[name], piece)
++        _copy_row(conn, "smart_bin_release_evidence", release,
++                  attempt_id=attempt_id, reservation_id=reservation_id)
++        _copy_row(conn, "piece_records", source["piece_records"], uuid=piece)
++        _copy_row(conn, "smart_bin_deliveries", source["smart_bin_deliveries"],
++                  id=delivery_id, reservation_id=reservation_id, piece_uuid=piece)
++        followup = dict(source["smart_bin_completion_followups"])
++        for name in ("custody_json", "completion_json"):
++            followup[name] = _replace_piece(followup[name], piece)
++        _copy_row(conn, "smart_bin_completion_followups", followup,
++                  id=followup_id, reservation_id=reservation_id,
++                  release_attempt_id=attempt_id, piece_uuid=piece,
++                  delivery_id=delivery_id, completion_request_key=key)
++        result = {"code": "OK", "state": "CLOSED", "followup_id": followup_id}
++        conn.execute(
++            "INSERT INTO smart_bin_completion_receipts VALUES(?,?,?,?,?,1)",
++            (key + ":close", "m", "CLOSE", "synthetic-digest",
++             json.dumps(result, sort_keys=True)),
++        )
++
++
++def test_current_projection_matches_inspector_and_stays_bounded(prepared):
++    _closed(prepared)
++    counts = {}
++    with connect(prepared) as conn:
++        for size, additional in ((1, 0), (51, 50), (201, 150)):
++            _synthetic_closed_history(conn, size - additional - 1, additional)
++            assert conn.execute(
++                "SELECT count(*) FROM smart_bin_completion_followups"
++            ).fetchone()[0] == size
++            report = recovery.inspect_on_connection(conn, "m")
++            assert report["followup_blockers"] == []
++            queries = []
++            conn.set_trace_callback(queries.append)
++            assert not native_completion.current_blocker_on_connection(conn, "m")
++            conn.set_trace_callback(None)
++            counts[size] = len(queries)
++            assert conn.execute(
++                "SELECT count(*) FROM smart_bin_current_obligations"
++            ).fetchone()[0] == 0
++        assert len(set(counts.values())) == 1, counts
++        plan = [str(tuple(row)) for row in conn.execute(
++            "EXPLAIN QUERY PLAN SELECT 1 FROM smart_bin_current_obligations "
++            "WHERE machine_id='m' LIMIT 1"
++        )]
++        assert any("smart_bin_current_obligations_machine" in row for row in plan)
++        print(f"RB04 current authorization SQL statements: {counts}; plan: {plan}")
++
++
++def test_projection_rollback_and_close_receipt_loss(prepared):
++    ctx = _closed(prepared)
++    with connect(prepared) as conn:
++        assert not native_completion.current_blocker_on_connection(conn, "m")
++        conn.execute("SAVEPOINT contradiction")
++        conn.execute(
++            "INSERT INTO smart_bin_discrepancies "
++            "(id,machine_id,reservation_id,kind,status,details_json,created_at) "
++            "VALUES('rollback','m',?,'LATE','open','{}',1)",
++            (ctx.handoff.reservation_id,),
++        )
++        assert native_completion.current_blocker_on_connection(conn, "m")
++        conn.execute("ROLLBACK TO contradiction")
++        conn.execute("RELEASE contradiction")
++        assert not native_completion.current_blocker_on_connection(conn, "m")
++        conn.execute("DELETE FROM smart_bin_completion_receipts WHERE action='CLOSE'")
++        assert native_completion.current_blocker_on_connection(conn, "m")
++        assert conn.execute(
++            "SELECT kind FROM smart_bin_current_obligations "
++            "WHERE kind='CLOSURE_PENDING'"
++        ).fetchone()
++
++
++def test_native_history_loss_and_late_reconciliation_block(prepared):
++    _closed(prepared)
++    with connect(prepared) as conn:
++        reservation_id = conn.execute(
++            "SELECT id FROM smart_bin_reservations LIMIT 1"
++        ).fetchone()[0]
++        audit = conn.execute("SELECT * FROM smart_bin_audit_events LIMIT 1").fetchone()
++        _copy_row(conn, "smart_bin_audit_events", audit,
++                  id="later-audit", request_key="later-reconciliation",
++                  reservation_id=reservation_id)
++        conn.execute(
++            "INSERT INTO smart_bin_reconciliations "
++            "(id,machine_id,reservation_id,audit_id,evidence_json) "
++            "VALUES('later','m',?,'later-audit','{}')",
++            (reservation_id,),
++        )
++        assert native_completion.current_blocker_on_connection(conn, "m")
++        assert recovery.inspect_on_connection(conn, "m")["followup_blockers"]
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_provenance.py b/software/sorter/backend/tests/test_smart_bins_native_provenance.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1798e718107cddb6cccbd1bd8d1ec7869b677b78
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_native_provenance.py
+@@ -0,0 +1,55 @@
++"""Canonical native identity is carried without a second history write."""
++
++from types import SimpleNamespace
++
++import pytest
++from defs.events import KnownObjectData
++import piece_records
++from run_recorder import RunRecorder
++import smart_bins_native_completion as completion
++import test_smart_bins_native_completion as completion_fixtures
++from test_smart_bins_native_completion import evidence
++from utils.event import knownObjectToEvent
++
++released = completion_fixtures.released
++prepared = completion_fixtures.prepared
++
++
++def test_native_recorder_adopts_one_verified_history_without_upsert(
++    released, monkeypatch,
++):
++    _, identity, piece = released
++    completion.record_receiving_evidence(evidence(identity))
++    delivery_id = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    piece.native_delivery_id = delivery_id
++    gc = SimpleNamespace(run_id="run", machine_id="m",
++                         sorting_profile_path=None, logger=SimpleNamespace())
++    recorder = RunRecorder(gc)
++    def forbidden(*args, **kwargs):
++        raise AssertionError("second piece-record write")
++    monkeypatch.setattr(piece_records, "recordPiece", forbidden)
++    recorder.recordCommittedNativePiece(piece, identity.reservation_id, delivery_id)
++    recorder.recordCommittedNativePiece(piece, identity.reservation_id, delivery_id)
++    assert recorder.pieces == [piece]
++    with pytest.raises(completion.NativeCompletionRefused, match="Foreign"):
++        recorder.recordCommittedNativePiece(piece, identity.reservation_id, "other")
++    foreign_run = RunRecorder(SimpleNamespace(
++        run_id="another-run", machine_id="m", sorting_profile_path=None,
++        logger=SimpleNamespace(),
++    ))
++    with pytest.raises(completion.NativeCompletionRefused, match="Foreign native run"):
++        foreign_run.recordCommittedNativePiece(piece, identity.reservation_id, delivery_id)
++
++
++def test_native_ids_serialize_and_old_event_shape_remains_valid(released):
++    _, identity, piece = released
++    event = knownObjectToEvent(piece)
++    data = event.data.model_dump()
++    assert data["native_machine_id"] == "m"
++    assert data["native_reservation_id"] == identity.reservation_id
++    assert data["native_delivery_id"] is None
++    old = {key: value for key, value in data.items() if not key.startswith("native_")}
++    restored = KnownObjectData.model_validate(old)
++    assert restored.native_machine_id is None
++    assert restored.native_reservation_id is None
++    assert restored.native_delivery_id is None
+diff --git a/software/sorter/backend/tests/test_smart_bins_native_runtime.py b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+index 28de3fd2982763997284b31199763db035790fbb..fc2002df419c69650c7323e3739d91b8adaacfaf 100644
+--- a/software/sorter/backend/tests/test_smart_bins_native_runtime.py
++++ b/software/sorter/backend/tests/test_smart_bins_native_runtime.py
+@@ -13,6 +13,7 @@ import pytest
+ from fastapi import HTTPException
+ 
+ import smart_bins_native_custody as native
++import smart_bins_native_completion as completion
+ from subsystems.classification_channel.smart_bins_native_adapter import (
+     NativeCustodyAdapter,
+ )
+@@ -47,6 +48,7 @@ def reset_fence():
+ @pytest.fixture
+ def world(prepared):
+     native.initialize_native_schema("m", "p", "sorter", 0)
++    completion.initialize_schema()
+     gc = _mkGc()
+     gc.machine_id = "m"
+     gc.disable_chute = False
+diff --git a/software/sorter/backend/tests/test_smart_bins_runtime_stats.py b/software/sorter/backend/tests/test_smart_bins_runtime_stats.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..824e3569e5ab9b0aca4f7f5e7f055f1f79d0915a
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_runtime_stats.py
+@@ -0,0 +1,69 @@
++"""Ledger verified native provenance suppresses the legacy count writer."""
++
++import time
++
++import pytest
++import local_state
++from runtime_stats import RuntimeStatsCollector
++import smart_bins_native_completion as completion
++import test_smart_bins_native_completion as completion_fixtures
++from test_smart_bins_native_completion import evidence
++
++released = completion_fixtures.released
++prepared = completion_fixtures.prepared
++
++
++def test_pending_verified_and_ordinary_accounting(released, monkeypatch):
++    _, identity, piece = released
++    calls = []
++    monkeypatch.setattr(local_state, "record_piece_distribution",
++                        lambda payload: calls.append(payload["uuid"]))
++    stats = RuntimeStatsCollector()
++    stats.setLifecycleState("running")
++    common = {"uuid": piece.uuid, "native_machine_id": "m",
++              "native_reservation_id": identity.reservation_id,
++              "destination_bin": (0, 0, 0), "distributed_at": time.time()}
++    stats.observeKnownObject(common)
++    assert calls == []
++    completion.record_receiving_evidence(evidence(identity))
++    delivery_id = completion.complete_native(piece, "m", identity.reservation_id, "run")
++    stats.observeKnownObject({"uuid": piece.uuid, "native_delivery_id": delivery_id})
++    assert calls == []
++    stats.observeKnownObject({"uuid": "ordinary", "destination_bin": (0, 0, 1),
++                              "distributed_at": time.time()})
++    assert calls == ["ordinary"]
++
++
++def test_partial_update_survives_lookup_eviction_and_mutation_rejected(
++    released, monkeypatch,
++):
++    _, identity, piece = released
++    calls = []
++    monkeypatch.setattr(local_state, "record_piece_distribution",
++                        lambda payload: calls.append(payload["uuid"]))
++    monkeypatch.setattr("runtime_stats.MAX_KNOWN_OBJECT_LOOKUP_ENTRIES", 1)
++    stats = RuntimeStatsCollector()
++    stats.setLifecycleState("running")
++    stats.observeKnownObject({"uuid": piece.uuid, "native_machine_id": "m",
++                              "native_reservation_id": identity.reservation_id})
++    stats.observeKnownObject({"uuid": "evict"})
++    assert stats.lookupKnownObject(piece.uuid) is None
++    stats.observeKnownObject({"uuid": piece.uuid, "destination_bin": (0, 0, 0),
++                              "distributed_at": time.time()})
++    assert calls == []
++    with pytest.raises(ValueError, match="immutable"):
++        stats.observeKnownObject({"uuid": piece.uuid,
++                                  "native_reservation_id": "foreign"})
++
++
++def test_forged_native_fields_do_not_suppress_ordinary_writer(released, monkeypatch):
++    calls = []
++    monkeypatch.setattr(local_state, "record_piece_distribution",
++                        lambda payload: calls.append(payload["uuid"]))
++    stats = RuntimeStatsCollector()
++    stats.setLifecycleState("running")
++    stats.observeKnownObject({"uuid": "ordinary", "native_machine_id": "m",
++                              "native_reservation_id": "made-up",
++                              "destination_bin": (0, 0, 0),
++                              "distributed_at": time.time()})
++    assert calls == ["ordinary"]
+diff --git a/software/sorter/backend/tests/test_smart_bins_sending.py b/software/sorter/backend/tests/test_smart_bins_sending.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b280cca3a2c1fb11471568325e18f51ce21b124d
+--- /dev/null
++++ b/software/sorter/backend/tests/test_smart_bins_sending.py
+@@ -0,0 +1,99 @@
++"""Native Sending cannot turn settle time into received-piece accounting."""
++
++import queue
++import time
++from piece_transport import ClassificationChannelTransport
++from subsystems.distribution.sending import CHUTE_SETTLE_MS, Sending
++from subsystems.distribution.states import DistributionState
++from subsystems.shared_variables import SharedVariables
++from test_distribution_sending import _GlobalConfig
++import test_smart_bins_native_completion as completion_fixtures
++from test_smart_bins_native_completion import evidence
++import smart_bins_native_completion as completion
++
++released = completion_fixtures.released
++prepared = completion_fixtures.prepared
++
++
++class Recorder:
++    def __init__(self):
++        self.native = []
++        self.ordinary = []
++
++    def recordPiece(self, piece):
++        self.ordinary.append(piece.uuid)
++
++    def recordCommittedNativePiece(self, piece, reservation_id, delivery_id):
++        self.native.append((piece.uuid, reservation_id, delivery_id))
++
++
++class Tracker:
++    def __init__(self):
++        self.calls = []
++
++    def record(self, part_id, color_id, category_id):
++        self.calls.append((part_id, color_id, category_id))
++
++
++class Adapter:
++    def __init__(self):
++        self.calls = []
++
++    def release_completed(self, piece_uuid, reservation_id, delivery_id):
++        self.calls.append((piece_uuid, reservation_id, delivery_id))
++
++
++def setup_sending(piece):
++    gc = _GlobalConfig()
++    gc.machine_id = "m"
++    gc.run_id = "run"
++    gc.run_recorder = Recorder()
++    gc.set_progress_tracker = Tracker()
++    gc.smart_bins_native_adapter = Adapter()
++    transport = ClassificationChannelTransport()
++    transport._exit_piece = piece
++    shared = SharedVariables(gc=gc)
++    shared.transport = transport
++    shared.set_distribution_gate(False, reason="test")
++    events = queue.Queue()
++    sending = Sending(object(), gc, shared, events)
++    sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
++    return sending, gc, shared, events
++
++
++def test_pending_native_claim_has_no_accounting_or_gate(released):
++    _, identity, piece = released
++    piece.destination_bin = (0, 0, 0)  # intended route before Sending
++    sending, gc, shared, events = setup_sending(piece)
++    assert sending.step() is None
++    assert sending.step() is None
++    assert gc.run_recorder.native == gc.run_recorder.ordinary == []
++    assert gc.set_progress_tracker.calls == []
++    assert not shared.get_distribution_ready()
++    assert piece.native_delivery_id is None
++    assert piece.distributed_at is None
++    assert piece.destination_bin is None
++    assert events.qsize() == 1
++    assert identity.reservation_id == piece.native_reservation_id
++
++
++def test_qualified_native_sending_publishes_once(released, monkeypatch):
++    _, identity, piece = released
++    sending, gc, shared, events = setup_sending(piece)
++    assert sending.step() is None
++    completion.record_receiving_evidence(evidence(identity))
++    sending._native_next_check_at = 0.0
++    # A run without a progress tracker still closes the explicit effects.
++    monkeypatch.setattr(gc, "set_progress_tracker", None)
++    assert sending.step() == DistributionState.IDLE
++    assert sending.step() == DistributionState.IDLE
++    assert piece.native_delivery_id is not None
++    assert gc.run_recorder.ordinary == []
++    assert len(gc.run_recorder.native) == 1
++    assert gc.set_progress_tracker is None
++    assert len(gc.smart_bins_native_adapter.calls) == 1
++    assert shared.get_distribution_ready()
++    assert events.qsize() == 2  # one truthful pending event, one completion
++    for effect in completion.EFFECTS:
++        assert completion.effect_phase("m", identity.reservation_id, piece.uuid,
++                                       piece.native_delivery_id, effect) == "SUCCEEDED"
+diff --git a/software/sorter/backend/utils/event.py b/software/sorter/backend/utils/event.py
+index e80e7bc25bde756a3bc500ed26d781f15a7cf46f..054df4b2c03331c4b253305989c5be3fa0a8cd40 100644
+--- a/software/sorter/backend/utils/event.py
++++ b/software/sorter/backend/utils/event.py
+@@ -66,6 +66,9 @@ def knownObjectToEvent(obj: KnownObject) -> KnownObjectEvent:
+             too_big_for_layer=obj.too_big_for_layer,
+             intended_layer_index=obj.intended_layer_index,
+             destination_bin=obj.destination_bin,
++            native_machine_id=obj.native_machine_id,
++            native_reservation_id=obj.native_reservation_id,
++            native_delivery_id=obj.native_delivery_id,
+             tracked_global_id=obj.tracked_global_id,
+             classification_channel_zone_state=obj.classification_channel_zone_state,
+             classification_channel_zone_center_deg=obj.classification_channel_zone_center_deg,
