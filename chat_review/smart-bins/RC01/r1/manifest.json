@@ -1,0 +1,54 @@
+{
+  "package": "RC01/r1",
+  "source_tree": "c8c43b0261c1d581575fcd65785140b416dc6d44",
+  "rc_commit": "8ecf05c44877ddb9a45145b8dee511d6da5f1f43",
+  "parent_commit": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+  "remote_branch": "smart-bins-v030-rc1",
+  "source_changed": false,
+  "deployment_performed": false,
+  "physical_qualification_performed": false,
+  "provenance": {
+    "accepted_review_commit": "a55656331a11ef7104ecc99e1ec9ad402452e0bd",
+    "pristine_tree": "21e805b60da575ff7468fcc3570a517d80f01cd0",
+    "reconstructed_trees": [
+      "ab7e7461a69efc1db74faac2c8e8f3318ca10341",
+      "df609a4d5c953f253737a927432ab3598647765e",
+      "b4cf20bd92855e2ccdb22748fcf952f19b169738",
+      "f388c5b91945e01a141100039f41f55d728a7331",
+      "c8c43b0261c1d581575fcd65785140b416dc6d44"
+    ],
+    "reconstruction_exact": true,
+    "working_files_compared": 1606,
+    "working_byte_mismatches": 0,
+    "pristine_to_rc_changed_files": 66,
+    "all_changed_paths_under": "software/sorter/backend/",
+    "review_artifacts_in_implementation_delta": false,
+    "local_or_private_paths_in_implementation_delta": false,
+    "github_remote_ref_verified": true,
+    "github_remote_commit_tree_parent_verified": true,
+    "remote_comparison_one_commit": true
+  },
+  "preservation": {
+    "integration_branch": "smart-bins-v030-integration",
+    "integration_head": "8951f914eb34778139b0df42f59f3957abbc2f8a",
+    "integration_real_index_empty": true,
+    "integration_working_tree_exact_source": true,
+    "old_candidate_branch": "sorting-flow-candidate",
+    "old_candidate_head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "old_candidate_real_index_empty": true,
+    "old_candidate_read_only": true,
+    "old_candidate_tracked_paths": 844,
+    "old_candidate_untracked_paths": 25,
+    "old_candidate_digest_status": "UNRESOLVED PRESERVATION METADATA",
+    "old_candidate_rb03_rb04_digest_sha256": "d4ae072299bc0590115451435325d135ae22dc0b375d459b14827c45733af03e",
+    "old_candidate_rb05_digest_sha256": "623b773072f5d76e81018229bedbb4759332d37c86c0e3230e3ab3d0016c79c1"
+  },
+  "gates": {
+    "source": "ACCEPTED / IMMUTABLY MATERIALIZED",
+    "ordinary_v030_physical_qualification": "NOT YET RUN",
+    "smart_bin_physical_receiving_evidence": "NOT QUALIFIED",
+    "smart_bin_continuous_production": "BLOCKED",
+    "P2C6B": "BLOCKED"
+  },
+  "no_live_sorter_hardware_firmware_machine_toml_schema_or_provider_action": true
+}
