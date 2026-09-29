@@ -1,0 +1,278 @@
+{
+  "package": "P2C6P-C01",
+  "revision": "r1",
+  "implementation_commit_created": false,
+  "candidate": {
+    "branch": "sorting-flow-candidate",
+    "head": "c4e298ebd1a153001355df3d3b0c41cc5446ac8f",
+    "index_empty": true
+  },
+  "accepted_baseline": {
+    "package_commit": "2952a9ac4d52ec9b5f0becd580c97f9512ce3853",
+    "package": "chat_review/smart-bins/P2C6A/r1",
+    "result_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22",
+    "verified_accepted_paths": 38
+  },
+  "analysis_package": {
+    "commit": "bc15b9a8007173b8ec49cccada7c992a85637def",
+    "package": "chat_review/smart-bins/P2C6P-A/r1"
+  },
+  "golden": {
+    "repository": "https://github.com/basicallysource/sorter-v2",
+    "commit": "2c8269843c16282659c9edbfbf03e7c7042a15ce",
+    "upstream_fixes": [
+      "c95543a470a0f3678f95705743aa771f8e326301",
+      "7ce8c1d3d25ca89ecceba3a4e23d8b918c189326"
+    ],
+    "excluded_hunk": "Positioning persistence; reserved for C08"
+  },
+  "predecessor_chain": [
+    {
+      "commit": "ea86ac3d8be4a942730ffe1f44c61c0bcf3b9ff2",
+      "package": "chat_review/smart-bins/P1/r2",
+      "patch": "P1.patch",
+      "patch_sha256": "7e6353a207dd25d3ab35db4e574da847c8d5124bd0d37b9076d3b8b4e58ddd48",
+      "result_tree": "24f74a41bf8186a69562ad48b22cc244c3c8a5c7"
+    },
+    {
+      "commit": "dd2eb3edfa7f2b0f8b07d256b7daaed674ef6dfe",
+      "package": "chat_review/smart-bins/P2A1/r2",
+      "patch": "P2A1.patch",
+      "patch_sha256": "c5fa8560d32b35ddcff00c667d9155ef863c64dac83d932f5e630859fde544cf",
+      "result_tree": "0038a45ec140ae34ae05feda254480bd01ec1d45"
+    },
+    {
+      "commit": "8f65dd419ca753d6ac780e296a1b7ce065887e0b",
+      "package": "chat_review/smart-bins/P2A2/r3",
+      "patch": "P2A2.patch",
+      "patch_sha256": "66c10674daf771cd6150cb00875f0adbc8528d03bd9e06e651e3bb906d437ca9",
+      "result_tree": "7fa3029dc598c1178d3bc7f1a9688c264b4d7899"
+    },
+    {
+      "commit": "098c53151d702c6e3e2ae32935865e929bcace57",
+      "package": "chat_review/smart-bins/P2B/r2",
+      "patch": "P2B.patch",
+      "patch_sha256": "bb52252e81fc121cd791c62178107caee12ed2d4c30eecaebad77b49e7dd618d",
+      "result_tree": "33f4b7e6b15709fda640a660ef65475c661a96fe"
+    },
+    {
+      "commit": "ea92beb833f15f500a9b3bcb7cb8343ee8aeb555",
+      "package": "chat_review/smart-bins/P2C1/r2",
+      "patch": "P2C1.patch",
+      "patch_sha256": "5a05f90c31d6b90a1d477fd373de506aee56ed5755d4d0e94f020731cc283773",
+      "result_tree": "43640dfac3e75774be73785084fc6debdedd4bb9"
+    },
+    {
+      "commit": "bc206ae58d4b24e014547568ddb299a8c4faef69",
+      "package": "chat_review/smart-bins/P2C2/r2",
+      "patch": "P2C2.patch",
+      "patch_sha256": "a70b1a768e3dd72efc414f4cdbff249d61cb9e069c83029056cf7460bcc6a4a8",
+      "result_tree": "884171860aa224fc123a3783c3c7363fad70013d"
+    },
+    {
+      "commit": "dc5104db0b300ef91179d296bf78fb14a6b1ebc9",
+      "package": "chat_review/smart-bins/P2C3/r3",
+      "patch": "P2C3.patch",
+      "patch_sha256": "78f8a5fb42bcaa905ade1bd2807ad248c5cb07fee87d2fcddc6571d713420d39",
+      "result_tree": "14c8a136f98136e55f2b982b386ce452e24a1252"
+    },
+    {
+      "commit": "4af9cefe9a249a334a43ad16f9ba54d43708f2a1",
+      "package": "chat_review/smart-bins/P2C4/r3",
+      "patch": "P2C4.patch",
+      "patch_sha256": "e047a4ca5a27772479f1a651305bca412cc5563ce933ddf5e699f6e673cabc5f",
+      "result_tree": "940d7ed1538dcb1f045e22154da9b851c6df1187"
+    },
+    {
+      "commit": "63c2ca9842e0f3ad461d558ce20513b131504044",
+      "package": "chat_review/smart-bins/P2C5A/r1",
+      "patch": "P2C5A.patch",
+      "patch_sha256": "f50ed2a8b35c970c619a2d83625c7bfb6307c477fbc5094e086fd2788a349b68",
+      "result_tree": "06db1f4e13695b4b45a5fbb295584e82b3f2f2d3"
+    },
+    {
+      "commit": "a798d9c7a9225f69aabf77fed599515d6edea791",
+      "package": "chat_review/smart-bins/P2C5B/r2",
+      "patch": "P2C5B.patch",
+      "patch_sha256": "4a972e256cb60ac352be30a308bcbc941389b53f0a0c60ae7805c9f2393e3dac",
+      "result_tree": "9d8f68b33790d98c7f34584ade99be7b5a164b9a"
+    },
+    {
+      "commit": "2952a9ac4d52ec9b5f0becd580c97f9512ce3853",
+      "package": "chat_review/smart-bins/P2C6A/r1",
+      "patch": "P2C6A.patch",
+      "patch_sha256": "c083fa3ed2134a1710b9deac924c2a780750e678af90384794034c5b6d808659",
+      "result_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22"
+    }
+  ],
+  "patches": {
+    "P2C6P-C01.patch": {
+      "base_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22",
+      "result_tree": "b604851c01253880d331525884d0dc280a478485",
+      "sha256": "ec31d6a2301fee052aa0a398249c733526810ddc35c70d4b4cc120e15c9f1582",
+      "paths": [
+        "software/sorter/backend/channel_crop_store.py",
+        "software/sorter/backend/piece_image_store.py",
+        "software/sorter/backend/tests/test_retention_sweep_locking.py"
+      ],
+      "isolated_reconstruction_verified": true
+    }
+  },
+  "source_files": {
+    "software/sorter/backend/channel_crop_store.py": {
+      "before_sha256": "64ff8000a81b09ad1b9f56b8e096fe101ce618c10377cfa66961acc807838208",
+      "after_sha256": "176818c1267d4a8532764a43c544589d0a6215db84e467893c43d8af1ab63640",
+      "after_blob": "7719c766a12e4ee2f5b870c6a08e389ddd7c0bbf",
+      "before_blob": "1e9fffad1daa4aae1b2adc48c3bc00974c46f429",
+      "canonical_after_sha256": "176818c1267d4a8532764a43c544589d0a6215db84e467893c43d8af1ab63640",
+      "canonical_before_sha256": "64ff8000a81b09ad1b9f56b8e096fe101ce618c10377cfa66961acc807838208"
+    },
+    "software/sorter/backend/piece_image_store.py": {
+      "before_sha256": "3b703f7d34b7016193a25da43609eebe352a27491614d8426fb01739cdafcccd",
+      "after_sha256": "32928492f1b93f627e9d93067f60d73aca1ff1352768ddff49c6b44645aa60cc",
+      "after_blob": "6fe2ebe09a8669c63dd7ab968d684483d74f11f3",
+      "before_blob": "6f3db7607071b97e1a976192beda381f11d344fd",
+      "canonical_after_sha256": "32928492f1b93f627e9d93067f60d73aca1ff1352768ddff49c6b44645aa60cc",
+      "canonical_before_sha256": "3b703f7d34b7016193a25da43609eebe352a27491614d8426fb01739cdafcccd"
+    },
+    "software/sorter/backend/tests/test_retention_sweep_locking.py": {
+      "before_sha256": null,
+      "after_sha256": "9e33a743039c3df323d786ed7383a73d23d3c799c94f16f5b8263d0d2eefeaaa",
+      "after_blob": "ef2f9557b3ee78da8e70b8483e433c925c10d997",
+      "before_blob": null,
+      "canonical_after_sha256": "9e33a743039c3df323d786ed7383a73d23d3c799c94f16f5b8263d0d2eefeaaa",
+      "canonical_before_sha256": null
+    }
+  },
+  "validation": {
+    "python": "3.12.12",
+    "uv": "0.10.7",
+    "ruff": "0.15.21",
+    "frozen": true,
+    "offline": true,
+    "pre_fix": {
+      "failed": 5,
+      "deselected": 18,
+      "expected_failure": true,
+      "source_tree": "8b4d95a94d25d5c6931b57e210bf3e87de8b7e22",
+      "lock_probes": {
+        "channel_crops": [
+          true,
+          false
+        ],
+        "piece_images": [
+          true,
+          false
+        ],
+        "piece_link_images": [
+          true,
+          false
+        ]
+      },
+      "directory_listings_per_two_victims": 2,
+      "link_cap_failures": [
+        "main empty",
+        "main at cap"
+      ]
+    },
+    "focused": {
+      "passed": 23,
+      "failed": 0
+    },
+    "affected": {
+      "passed": 30,
+      "failed": 0
+    },
+    "ruff_result": "All checks passed",
+    "independent_review": {
+      "result": "approved",
+      "actionable_findings": 0,
+      "tests_rerun": false,
+      "scope": "Exact bounded source diff, tests, reproduction and final logs"
+    },
+    "whole_suite_run": false,
+    "nonretention_AST_unchanged": true,
+    "isolation": "Environment set before imports; disposable databases/media; timeout=0 second-connection probes; audit hook blocks network/subprocess and database access outside the temporary root"
+  },
+  "preservation": {
+    "original_inventory_count": 868,
+    "unrelated_byte_identical": 866,
+    "new_paths": [
+      "software/sorter/backend/tests/test_retention_sweep_locking.py"
+    ],
+    "changed_existing_paths": [
+      "software/sorter/backend/channel_crop_store.py",
+      "software/sorter/backend/piece_image_store.py"
+    ],
+    "protected_inventory_digest_sha256": "2a644c9c6aeb01305f099b59957425f628389d754429494f48db3cfe87ef1b44",
+    "implementation_index_sha256": "f9b14e028a87a6722fb563af357225d867cb8b5cf701d77603f113e9d94dc7d6",
+    "final_status_sha256": "9556ec5e12f895a761d21c7a9d07c4e7543c170863695f7e9a8373f686594e1b",
+    "head_branch_index_unchanged": true,
+    "unrelated_status_unchanged": true,
+    "accepted_smart_bin_paths_unchanged": 38,
+    "blocked_old_indexes": "not accessed",
+    "operational_databases": "not accessed or hashed"
+  },
+  "commands_used": [
+    "uv run --frozen python --version",
+    "uv run --frozen python -m pytest tests/test_retention_sweep_locking.py -q -p no:cacheprovider --basetemp <temporary-root>/pytest -s -k \"writer_lock or link_cap\"",
+    "uv run --frozen python -m pytest tests/test_retention_sweep_locking.py -q -p no:cacheprovider --basetemp <temporary-root>/pytest",
+    "uv run --frozen python -m pytest tests/test_retention_sweep_locking.py tests/test_piece_image_store.py -q -p no:cacheprovider --basetemp <temporary-root>/pytest",
+    "ruff check channel_crop_store.py piece_image_store.py tests/test_retention_sweep_locking.py",
+    "ruff --version",
+    "git --no-optional-locks rev-parse HEAD",
+    "git --no-optional-locks branch --show-current",
+    "git --no-optional-locks diff --cached --name-only",
+    "git --no-optional-locks status --porcelain=v1 -z",
+    "git --no-optional-locks ls-files -z --cached --others --exclude-standard",
+    "git show bc15b9a8007173b8ec49cccada7c992a85637def:chat_review/smart-bins/P2C6P-A/r1/comparison.json",
+    "git hash-object --path=<accepted-or-C01-path> --stdin",
+    "git show -s --format=\"%H %s\" c95543a470a0f3678f95705743aa771f8e326301 7ce8c1d3d25ca89ecceba3a4e23d8b918c189326",
+    "git archive 8b4d95a94d25d5c6931b57e210bf3e87de8b7e22 software/sorter/backend",
+    "git show 2c8269843c16282659c9edbfbf03e7c7042a15ce:<each-retention-path>",
+    "git read-tree 8b4d95a94d25d5c6931b57e210bf3e87de8b7e22",
+    "git hash-object -w --stdin",
+    "git update-index --add --cacheinfo 100644 <C01-blob> <each-allowlisted-path>",
+    "git write-tree",
+    "git diff --binary --full-index --no-ext-diff <accepted-tree> <result-tree> -- <three-allowlisted-paths>",
+    "git apply --cached --check -",
+    "git apply --cached -",
+    "git diff --check <accepted-tree> <result-tree>",
+    "git -C <publisher> add -- chat_review/smart-bins/P2C6P-C01/r1/REVIEW.md chat_review/smart-bins/P2C6P-C01/r1/P2C6P-C01.patch chat_review/smart-bins/P2C6P-C01/r1/manifest.json",
+    "git -C <publisher> diff --cached --name-only",
+    "git -C <publisher> diff --cached --check (12 patch context-marker warnings; source diff separately clean)",
+    "git -C <publisher> diff --cached --check -- chat_review/smart-bins/P2C6P-C01/r1/REVIEW.md chat_review/smart-bins/P2C6P-C01/r1/manifest.json",
+    "git -C <publisher> diff --cached --stat",
+    "git -C <publisher> commit -m \"Converge media retention outside SQLite writer transactions\"",
+    "git -C <publisher> push origin HEAD:chat-review",
+    "gh api repos/abrianbaker80/sorter-v2/git/ref/heads/chat-review",
+    "gh api repos/abrianbaker80/sorter-v2/commits/<published-SHA>",
+    "gh api repos/abrianbaker80/sorter-v2/contents/chat_review/smart-bins/P2C6P-C01/r1/<each-package-file>?ref=<published-SHA>"
+  ],
+  "qualification": {
+    "level": "source-level retention convergence only",
+    "P2C6B": "BLOCKED",
+    "physical_performance_test": false,
+    "deployment": false,
+    "services": false,
+    "hardware": false,
+    "provider_calls": false,
+    "Harvest_runtime_integration": false,
+    "protected_reference": "User-reported roughly 7-9 PPM; SorterOS v0.2.9; firmware v0.8.1 / 8d560d26; distribution-v1-2; unchanged live tuning"
+  },
+  "publication": {
+    "branch": "chat-review",
+    "expected_parent": "bc15b9a8007173b8ec49cccada7c992a85637def",
+    "allowlist": [
+      "chat_review/smart-bins/P2C6P-C01/r1/REVIEW.md",
+      "chat_review/smart-bins/P2C6P-C01/r1/P2C6P-C01.patch",
+      "chat_review/smart-bins/P2C6P-C01/r1/manifest.json"
+    ],
+    "normal_fast_forward_only": true,
+    "readback": "Remote ref, parent/path list and all three file bytes verified before final response; separate private receipt"
+  },
+  "packaged_file_sha256": {
+    "REVIEW.md": "579bf0fa76aafcd06a8091bf36030e5bbfa09e0fbf2b3a57218fbbbc88e95a75",
+    "P2C6P-C01.patch": "ec31d6a2301fee052aa0a398249c733526810ddc35c70d4b4cc120e15c9f1582"
+  }
+}
