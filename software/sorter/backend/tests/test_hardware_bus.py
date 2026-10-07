@@ -14,6 +14,8 @@ class _Serial:
         self.read_calls = 0
         self.reset_calls = 0
         self.writes: list[bytes] = []
+        self.timeout = 0.1
+        self.waited_gaps = 0
 
     def reset_input_buffer(self) -> None:
         self.reset_calls += 1
@@ -22,12 +24,23 @@ class _Serial:
         self.writes.append(payload)
         return len(payload)
 
-    def read_until(self, expected: bytes, size: int) -> bytes:
-        assert expected == b"\x00"
+    @property
+    def in_waiting(self) -> int:
+        return len(self.reads[0]) if self.reads else 0
+
+    def read(self, size: int = 1) -> bytes:
         self.read_calls += 1
+        if self.reads and not self.reads[0]:
+            # A scripted empty transfer is an arrival gap. read(1) waits for
+            # the next transfer within timeout; if still empty, it times out.
+            self.reads.pop(0)
+            self.waited_gaps += 1
         if not self.reads:
             return b""
-        return self.reads.pop(0)[:size]
+        chunk = self.reads.pop(0)
+        if len(chunk) > size:
+            self.reads.insert(0, chunk[size:])
+        return chunk[:size]
 
 
 def _bus(serial_port: _Serial) -> MCUBus:
@@ -65,6 +78,7 @@ def test_send_command_allows_empty_gap_after_partial_response() -> None:
 
     assert result.payload == b"\x00\x00\x00\x00"
     assert serial_port.read_calls == 3
+    assert serial_port.waited_gaps == 1
     assert len(serial_port.writes) == 1
 
 
@@ -74,7 +88,8 @@ def test_send_command_rejects_a_frame_that_never_terminates() -> None:
     with pytest.raises(MCUBusError, match="missing terminator"):
         _bus(serial_port).send_command(0, 0x14, 3, b"", retries=0)
 
-    assert serial_port.read_calls == 4
+    # First empty read is a serial timeout, so the new contract ends collection.
+    assert serial_port.read_calls == 2
     assert len(serial_port.writes) == 1
 
 
@@ -137,7 +152,7 @@ def test_timeout_keeps_waiting_call_from_consuming_delayed_other_motor_reply():
     entered, release, second_started = Event(), Event(), Event()
 
     class DelayedSerial(_Serial):
-        def read_until(self, expected, size):
+        def read(self, size=1):
             entered.set()
             assert release.wait(2)
             return b""  # First status times out; its reply can arrive later.

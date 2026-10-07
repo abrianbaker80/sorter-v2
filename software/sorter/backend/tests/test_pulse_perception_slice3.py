@@ -430,6 +430,68 @@ def test_physical_handoff_uncertain_departure_discard_binds_same_episode(monkeyp
     assert not h.irl.c_channel_3_rotor_stepper.moves
 
 
+@pytest.mark.parametrize("identity", ["radial_jump", "duplicate_id", "missing_id"])
+def test_physical_handoff_unsupported_identity_expires_to_reject(monkeypatch, identity):
+    h, handoff, evidence, clock, finishes = recovery_handoff(
+        monkeypatch, arrived=False, retained=True
+    )
+    ep = handoff._episode
+    original = ep.episode_id, ep.boundary_index, ep.pocket_id
+    if identity == "radial_jump":
+        evidence.override = [PieceObservation(0, 0, 2, (600, 496, 608, 504), 42)]
+    elif identity == "duplicate_id":
+        evidence.override = [evidence.piece(0, 42), evidence.piece(40, 42)]
+    else:
+        evidence.leader_id = None
+    ep.recovery_started_mono, ep.recovery_deadline_mono = 103.0, 115.0
+    ep.state = "recovering"
+    clock[0] = h.flow._last_perception_tick = 115.3
+    handoff.tick(clock[0])
+    assert finishes == [(115.3, False)]
+    assert ep.recovery_decision["final_outcome"] == "unverified_discard_bound"
+    assert ep.forced_reject_reason
+    assert (ep.episode_id, ep.boundary_index, ep.pocket_id) == original
+    assert h.shared.c3_transfer_episode is ep
+    assert not h.irl.c_channel_3_rotor_stepper.moves
+    assert not h.deliveries
+
+
+def test_physical_handoff_blocked_supported_original_keeps_intervention(monkeypatch):
+    h, handoff, evidence, clock, finishes = recovery_handoff(
+        monkeypatch, arrived=False, retained=True
+    )
+    ep = handoff._episode
+    evidence.trailing_gap = 0.0
+    ep.recovery_started_mono, ep.recovery_deadline_mono = 103.0, 115.0
+    ep.state = "recovering"
+    clock[0] = h.flow._last_perception_tick = 115.3
+    with pytest.raises(RuntimeError, match="follower blocks"):
+        handoff.tick(clock[0])
+    assert ep.state == "unresolved" and not ep.forced_reject_reason
+    assert finishes == [] and h.shared.c3_transfer_episode is ep
+    assert not h.irl.c_channel_3_rotor_stepper.moves
+
+
+def test_physical_handoff_unsupported_identity_cannot_discard_owned_motion(monkeypatch):
+    h, handoff, evidence, clock, finishes = recovery_handoff(
+        monkeypatch, arrived=False, retained=True
+    )
+    ep = handoff._episode
+    evidence.override = [PieceObservation(0, 0, 2, (600, 496, 608, 504), 42)]
+    ep.recovery_started_mono, ep.recovery_deadline_mono = 103.0, 115.0
+    ep.state = "recovering"
+    motor = h.irl.c_channel_3_rotor_stepper
+    motor.target, motor.stopped = 200, False
+    h.flow._move_targets["c3"] = motor.target
+    h.shared.c3_motion_pending = True
+    clock[0] = h.flow._last_perception_tick = 115.3
+    with pytest.raises(RuntimeError, match="C3 motor has not completed"):
+        handoff.tick(clock[0])
+    assert ep.state == "unresolved" and finishes == []
+    assert h.shared.c3_motion_pending and h.flow._move_targets["c3"] == 200
+    assert not motor.moves
+
+
 def recovery_action_fixture(monkeypatch):
     h, handoff, _evidence, clock, _finishes = recovery_handoff(
         monkeypatch, arrived=False, retained=True

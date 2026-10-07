@@ -2747,6 +2747,7 @@ class HarvestProjectStore:
         color_id: str,
         quantity: int = 1,
         mode: str = "simulation",
+        integration_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if mode != "simulation":
             raise HarvestProjectError(
@@ -2755,15 +2756,29 @@ class HarvestProjectStore:
             )
         piece_key = _identifier(piece_id, "piece_id")
         requested_quantity = _positive_int(quantity, "quantity")
+        if integration_request is not None:
+            integration_request = json.loads(_canonical_json(integration_request))
         with _STORE_LOCK, self._connection() as conn:
+            if integration_request is not None:
+                conn.execute("PRAGMA synchronous=FULL")
             conn.execute("BEGIN IMMEDIATE")
             row = self._project_row(conn, project_id)
+            if integration_request is not None:
+                from harvest_integration_storage import check_request
+                replay = check_request(conn, integration_request, kind="ALLOCATE", project_id=project_id,
+                    activation_id=None, arguments=dict(method="propose_allocation", piece_id=piece_id,
+                    part_id=part_id, color_id=color_id, quantity=quantity, mode=mode))
+                if replay:
+                    conn.commit()
+                    return json.loads(replay["acknowledgement_json"])
             self._ensure_not_active(row)
             existing = conn.execute(
                 "SELECT * FROM harvest_allocations WHERE project_id = ? AND piece_id = ?",
                 (project_id, piece_key),
             ).fetchone()
             if existing is not None:
+                if integration_request is not None:
+                    raise HarvestProjectError("INTEGRATION_UNTAGGED_ALLOCATION", "An earlier allocation has no matching request receipt.")
                 conn.commit()
                 return self._allocation_dict(existing)
             draft = project_harvest.load_bsx_draft(self.root, row["draft_id"])
@@ -2835,6 +2850,9 @@ class HarvestProjectStore:
                     "mode": mode,
                 },
             )
+            if integration_request is not None:
+                from harvest_integration_storage import save_request
+                save_request(conn, integration_request, allocation_id, created_at)
             conn.commit()
             stored = conn.execute(
                 "SELECT * FROM harvest_allocations WHERE allocation_id = ?",
@@ -2852,12 +2870,27 @@ class HarvestProjectStore:
         item_candidates: list[dict[str, Any]] | None = None,
         color_candidates: list[dict[str, Any]] | None = None,
         classification_attempts: list[dict[str, Any]] | None = None,
+        integration_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically reserve the next bag quota for one physical piece."""
 
         piece_key = _identifier(piece_id, "piece_id")
+        if integration_request is not None:
+            integration_request = json.loads(_canonical_json(integration_request))
         with _STORE_LOCK, self._connection() as conn:
+            if integration_request is not None:
+                conn.execute("PRAGMA synchronous=FULL")
             conn.execute("BEGIN IMMEDIATE")
+            if integration_request is not None:
+                from harvest_integration_storage import check_request
+                replay = check_request(conn, integration_request, kind="ALLOCATE",
+                    project_id=integration_request["project_id"], activation_id=integration_request["activation_id"],
+                    arguments=dict(method="propose_live_allocation", piece_id=piece_id, part_id=part_id,
+                    color_id=color_id, item_candidates=item_candidates, color_candidates=color_candidates,
+                    classification_attempts=classification_attempts))
+                if replay:
+                    conn.commit()
+                    return json.loads(replay["acknowledgement_json"])
             runtime_row = conn.execute(
                 "SELECT * FROM harvest_runtime_state WHERE singleton_id = 1"
             ).fetchone()
@@ -2868,6 +2901,10 @@ class HarvestProjectStore:
             project_id = str(runtime_row["project_id"])
             activation = _decode_json(runtime_row["activation_json"], {})
             runtime_mode = str(activation.get("runtime_mode") or "live")
+            if integration_request is not None and (
+                project_id != integration_request["project_id"]
+                or activation.get("activation_id") != integration_request["activation_id"]):
+                raise HarvestProjectError("INTEGRATION_IDENTITY_MISMATCH", "Active Harvest identity changed.")
             row = self._project_row(conn, project_id)
             if row["state"] != "active" or activation.get("status") != "active":
                 raise HarvestProjectError(
@@ -2882,6 +2919,8 @@ class HarvestProjectStore:
                 item["group_id"]: item for item in activation.get("assignments", [])
             }
             if existing is not None:
+                if integration_request is not None:
+                    raise HarvestProjectError("INTEGRATION_UNTAGGED_ALLOCATION", "An earlier allocation has no matching request receipt.")
                 destination = assignments.get(str(existing["group_id"]))
                 if destination is None:
                     raise HarvestProjectError(
@@ -3219,6 +3258,9 @@ class HarvestProjectStore:
                 },
                 actor="sorter",
             )
+            if integration_request is not None:
+                from harvest_integration_storage import save_request
+                save_request(conn, integration_request, allocation_id, created_at)
             conn.commit()
             stored = conn.execute(
                 "SELECT * FROM harvest_allocations WHERE allocation_id = ?",
@@ -3254,7 +3296,8 @@ class HarvestProjectStore:
         }
 
     def confirm_allocation(
-        self, project_id: str, allocation_id: str, *, evidence: dict[str, Any]
+        self, project_id: str, allocation_id: str, *, evidence: dict[str, Any],
+        expected_piece_id: str | None = None, expected_activation_id: str | None = None,
     ) -> dict[str, Any]:
         if not _ALLOCATION_ID_RE.fullmatch(allocation_id):
             raise HarvestProjectError("INVALID_ALLOCATION_ID", "Invalid allocation id.")
@@ -3274,11 +3317,35 @@ class HarvestProjectStore:
                 raise HarvestProjectError(
                     "ALLOCATION_NOT_FOUND", "Allocation not found."
                 )
+            exact_identity = expected_piece_id is not None or expected_activation_id is not None
+            if exact_identity and (
+                not all(isinstance(value, str) and value.strip()
+                        for value in (expected_piece_id, expected_activation_id))
+                or row["piece_id"] != expected_piece_id
+                or row["runtime_id"] != expected_activation_id
+                or evidence.get("piece_id") != expected_piece_id
+                or evidence.get("activation_id") != expected_activation_id
+            ):
+                raise HarvestProjectError(
+                    "HARVEST_CONFIRMATION_IDENTITY_MISMATCH",
+                    "Confirmation identity differs from the original piece and activation.",
+                )
             if row["status"] == "undone":
                 raise HarvestProjectError(
                     "ALLOCATION_UNDONE", "An undone allocation cannot be confirmed."
                 )
             if row["status"] == "confirmed":
+                if exact_identity:
+                    retained_evidence = _decode_json(row["evidence_json"], {})
+                    if (not isinstance(retained_evidence, dict)
+                        or retained_evidence.get("physical_drop_confirmed") is not True
+                        or evidence.get("physical_drop_confirmed") is not True
+                        or any(retained_evidence.get(key) != evidence.get(key)
+                               for key in ("piece_id", "activation_id", "destination_bin"))):
+                        raise HarvestProjectError(
+                            "PHYSICAL_EVIDENCE_REQUIRED",
+                            "The retained Harvest confirmation differs from this drop's evidence.",
+                        )
                 conn.commit()
                 return self._allocation_dict(row)
             bottom_reject = False
@@ -3653,31 +3720,64 @@ class HarvestProjectStore:
             conn.commit()
         return self.get_project(project_id)
 
-    def retire_c4_planned_allocations(self, *, piece_ids=None, reason="complete C4 reject recovery"):
+    def retire_c4_planned_allocations(
+        self, *, piece_ids=None, reason="complete C4 reject recovery",
+        project_id=None, allocation_id=None, activation_id=None,
+    ):
         """Retire only unconfirmed allocations from the active machine runtime.
 
         No quantities/deliveries are credited. Confirmed history and other
         runtimes are untouched. Used by C4 discard and completed unknown drain.
+        The optional exact scope retires an original post-discharge obligation,
+        including a stale activation, without touching the current runtime.
         """
+        exact_scope = any(value is not None for value in (project_id, allocation_id, activation_id))
+        if exact_scope:
+            if (not all(isinstance(value, str) and value.strip()
+                        for value in (project_id, allocation_id, activation_id))
+                or piece_ids is None):
+                raise HarvestProjectError(
+                    "HARVEST_RETIREMENT_IDENTITY_REQUIRED",
+                    "Exact retirement requires the original project, allocation, activation and piece.",
+                )
+            selected = set(piece_ids)
+            if len(selected) != 1 or not all(isinstance(value, str) and value.strip() for value in selected):
+                raise HarvestProjectError(
+                    "HARVEST_RETIREMENT_IDENTITY_REQUIRED", "Exact retirement requires one original piece.",
+                )
         with _STORE_LOCK, self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            runtime = conn.execute("SELECT * FROM harvest_runtime_state WHERE singleton_id = 1").fetchone()
-            if runtime is None:
-                return 0
-            activation = _decode_json(runtime["activation_json"], {})
-            rows = conn.execute(
-                "SELECT allocation_id, piece_id FROM harvest_allocations "
-                "WHERE project_id = ? AND runtime_id = ? AND status = 'planned' "
-                "AND mode IN ('live', 'acceptance')",
-                (runtime["project_id"], activation.get("activation_id"))).fetchall()
-            selected = None if piece_ids is None else set(piece_ids)
+            if exact_scope:
+                rows = conn.execute(
+                    "SELECT allocation_id, piece_id FROM harvest_allocations "
+                    "WHERE project_id = ? AND allocation_id = ? AND runtime_id = ? "
+                    "AND piece_id = ? AND status = 'planned' AND mode IN ('live', 'acceptance')",
+                    (project_id, allocation_id, activation_id, next(iter(selected))),
+                ).fetchall()
+                event_project_id = project_id
+            else:
+                runtime = conn.execute("SELECT * FROM harvest_runtime_state WHERE singleton_id = 1").fetchone()
+                if runtime is None:
+                    return 0
+                activation = _decode_json(runtime["activation_json"], {})
+                rows = conn.execute(
+                    "SELECT allocation_id, piece_id FROM harvest_allocations "
+                    "WHERE project_id = ? AND runtime_id = ? AND status = 'planned' "
+                    "AND mode IN ('live', 'acceptance')",
+                    (runtime["project_id"], activation.get("activation_id"))).fetchall()
+                selected = None if piece_ids is None else set(piece_ids)
+                event_project_id = runtime["project_id"]
             count = 0
             for row in rows:
                 if selected is not None and row["piece_id"] not in selected:
                     continue
+                from harvest_integration_storage import is_integrated
+                if is_integrated(conn, row["allocation_id"]):
+                    # Only the inactive exact cancellation API may release tagged quota.
+                    continue
                 conn.execute("UPDATE harvest_allocations SET status = 'undone', undone_at = ? WHERE allocation_id = ? AND status = 'planned'",
                              (_now(), row["allocation_id"]))
-                self._append_event(conn, runtime["project_id"], "c4_unconfirmed_allocation_retired",
+                self._append_event(conn, event_project_id, "c4_unconfirmed_allocation_retired",
                     {"allocation_id": row["allocation_id"], "piece_id": row["piece_id"], "reason": reason})
                 count += 1
             conn.commit()
@@ -3705,6 +3805,9 @@ class HarvestProjectStore:
                     "ALLOCATION_NOT_FOUND", "Allocation not found."
                 )
             activation: dict[str, Any] | None = None
+            from harvest_integration_storage import is_integrated
+            if is_integrated(conn, allocation_id):
+                raise HarvestProjectError("INTEGRATION_RECONCILIATION_REQUIRED", "Integrated allocations cannot use legacy undo.")
             if row["status"] != "undone" and row["mode"] == "acceptance":
                 runtime_row = conn.execute(
                     "SELECT * FROM harvest_runtime_state WHERE singleton_id = 1 AND project_id = ?",
@@ -4915,6 +5018,85 @@ class HarvestProjectStore:
         with self._connection() as conn:
             row = self._project_row(conn, project_id)
             return self._assemble(conn, row, include_events=include_events)
+
+    def initialize_integration_schema(self) -> int:
+        """Explicit, inactive extension. Never called by startup or __init__."""
+        from harvest_integration_storage import DDL, SCHEMA_VERSION, check_schema
+        with _STORE_LOCK, self._connection() as conn:
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'harvest_integration_%'").fetchone():
+                check_schema(conn)
+            else:
+                for ddl in DDL:
+                    conn.execute(ddl)
+                conn.execute("INSERT INTO harvest_integration_versions VALUES(1,?)", (SCHEMA_VERSION,))
+            conn.commit()
+        return SCHEMA_VERSION
+
+    def lookup_integration_allocation(self, project_id: str, *, piece_id: str) -> dict[str, Any]:
+        """Exact read-only snapshot, including receipts; absence is not a dispatch fence.
+
+        No project assembly, bounded recent list, mutation, local DB or provider.
+        Caller must invoke outside every local-state SQLite transaction.
+        """
+        with self._connection() as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            project = self._project_row(conn, project_id)
+            row = conn.execute("SELECT * FROM harvest_allocations WHERE project_id=? AND piece_id=?",
+                               (project_id, _identifier(piece_id, "piece_id"))).fetchone()
+            receipts = []
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='harvest_integration_versions'").fetchone():
+                from harvest_integration_storage import check_schema
+                check_schema(conn)
+                if row:
+                    receipts = [dict(r) for r in conn.execute(
+                        "SELECT * FROM harvest_integration_requests WHERE allocation_id=? ORDER BY operation_id",
+                        (row["allocation_id"],))]
+            result = dict(project_id=project_id, piece_id=piece_id, project_revision=project["revision"],
+                          allocation=self._allocation_dict(row) if row else None, receipts=receipts)
+            conn.rollback()
+            return result
+
+    def cancel_integration_allocation(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Inactive exact planned-only cancellation; never blanket retirement/undo.
+
+        The local caller must first durably cancel an undispatched reservation.
+        This store can validate its own receipt and status, not physical custody.
+        """
+        from harvest_integration_storage import check_request, save_request
+        request = json.loads(_canonical_json(request))
+        with _STORE_LOCK, self._connection() as conn:
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("BEGIN IMMEDIATE")
+            replay = check_request(conn, request, kind="CANCEL", project_id=request["project_id"],
+                activation_id=request["activation_id"], arguments=dict(method="cancel_integration_allocation", piece_id=request["piece_uuid"]))
+            allocation_id = request["allocation_id"]
+            row = conn.execute("SELECT * FROM harvest_allocations WHERE project_id=? AND piece_id=? AND allocation_id=?",
+                (request["project_id"], request["piece_uuid"], allocation_id)).fetchone()
+            if row is None or row["runtime_id"] != request["activation_id"]:
+                raise HarvestProjectError("INTEGRATION_IDENTITY_MISMATCH", "Allocation identity differs.")
+            if replay:
+                conn.commit()
+                return json.loads(replay["acknowledgement_json"])
+            parent = conn.execute("SELECT * FROM harvest_integration_requests WHERE operation_id=? AND allocation_id=?",
+                                  (request["parent_operation_id"], allocation_id)).fetchone()
+            original = json.loads(parent["request_json"]) if parent else {}
+            if (original.get("operation_kind") != "ALLOCATE"
+                    or any(original.get(k) != request[k] for k in (
+                        "machine_id", "reservation_id", "piece_uuid", "project_id", "activation_id"))):
+                raise HarvestProjectError("INTEGRATION_IDENTITY_MISMATCH", "Original allocation request is missing or different.")
+            if row["status"] != "planned":
+                raise HarvestProjectError("INTEGRATION_UNSAFE_CANCEL", "Only this exact planned allocation can be cancelled.")
+            conn.execute("UPDATE harvest_allocations SET status='undone',undone_at=? WHERE allocation_id=?",
+                         (_now(), allocation_id))
+            self._append_event(conn, request["project_id"], "integration_allocation_cancelled",
+                               {"allocation_id": allocation_id, "operation_id": request["operation_id"]})
+            save_request(conn, request, allocation_id, _now())
+            conn.commit()
+            return self._allocation_dict(conn.execute("SELECT * FROM harvest_allocations WHERE allocation_id=?",
+                                                     (allocation_id,)).fetchone())
 
     def acceptance_allocations(
         self, project_id: str, *, acceptance_run_id: str | None = None

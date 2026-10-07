@@ -9,6 +9,10 @@ import time
 # reject pocket, not a confirmed physical arrival.
 UNVERIFIED_C4_HANDOFF = "c3_handoff_unverified"
 
+# The physical C4 exit completed, but Harvest could not credit its destination.
+# This terminal abort retains the selected route without claiming delivery.
+HARVEST_CONFIRMATION_UNCREDITED = "harvest_confirmation_uncredited"
+
 
 class PieceStage(str, Enum):
     created = "created"
@@ -116,6 +120,11 @@ class KnownObject:
     c4_pocket_id: int | None = None
     c4_generation: int | None = None
     c4_marker_exit_boundary: int | None = None
+    # Only an injected guarded C4 handoff supplies this reservation identity.
+    # The delivery ID is set after the ledger and history transaction commits.
+    native_machine_id: str | None = None
+    native_reservation_id: str | None = None
+    native_delivery_id: str | None = None
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)

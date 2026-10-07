@@ -557,6 +557,7 @@ def test_controller_retained_original_and_pause_keep_reservation_until_marker_ve
             "predicates": {**boundary["predicates"], "motor_c3_resolved": True},
             "material": [{"id": 42}],
             "followers": [],
+            "same_piece_retained": True,
         }
     )
     c.shared.request_c3_recovery = observe
@@ -582,6 +583,48 @@ def test_controller_retained_original_and_pause_keep_reservation_until_marker_ve
             break
     assert c.runtime._verify is None and c.runtime.handoff is binding
     assert not binding.journey.closed and not b.rig.commands
+
+
+def test_controller_unsupported_identity_rejects_and_reopens_admission(monkeypatch):
+    from server import shared_state
+
+    b, c, records, _ = controller_bench(monkeypatch)
+    binding = reserve_controller(c, b, records)
+    original = binding.key, binding.episode.episode_id
+    c.shared.request_c3_recovery = lambda ep, boundary: {
+        "predicates": {
+            **boundary["predicates"],
+            **dict.fromkeys(("active_episode", "c3_enabled", "motors_unsuppressed",
+                            "c3_owner_consistent", "motor_c2_resolved",
+                            "motor_c3_resolved", "feeder_tick_fresh", "c3_frame_fresh"), True),
+            "spatial_association": False,
+            "c3_supported_region": False,
+        },
+        "material": [],
+        "followers": [{"id": 42}],
+        "same_piece_retained": False,
+        "retained_plan": None,
+    }
+    for _ in range(17):
+        b.rig.clock.advance(1)
+        c.step()
+        if binding.admitted:
+            break
+    assert binding.admitted and binding.episode.state == "discard_bound"
+    assert (binding.key, binding.episode.episode_id) == original
+    assert c.runtime.fifo.pockets[binding.pocket_id].state is PocketState.DISCARD
+    assert binding.piece.part_id is None and binding.piece.destination_bin is None
+    assert binding.piece.forced_reject_reason and c.handoff is None
+    for _ in range(160):
+        b.rig.clock.advance()
+        c.step()
+        if c.shared.classification_ready:
+            break
+    assert c.runtime.fifo.boundary == 1 and c.runtime.can_admit
+    assert c.shared.classification_ready and c.fault is None
+    assert c.gc.runtime_stats.activeIncident() is None
+    assert shared_state.command_queue.empty()
+    shared_state.setHardwareStatus.assert_not_called()
 
 
 def test_delayed_c3_frame_finishes_historical_landing_after_index_requested(
@@ -1070,6 +1113,79 @@ def test_controller_fault_preserves_owner_and_backend_lifecycle(monkeypatch):
     shared_state.setHardwareStatus.assert_called_with(
         state="error", error="marker disconnected"
     )
+
+
+def _harvest_terminal_distribution():
+    from defs.known_object import HARVEST_CONFIRMATION_UNCREDITED, PieceStage
+    from piece_transport import ClassificationChannelTransport
+    from subsystems.classification_channel.physical_distribution import PhysicalDistribution
+
+    transport = ClassificationChannelTransport()
+    piece = KnownObject(
+        stage=PieceStage.distributing, aborted=True,
+        transport_failure_reason=HARVEST_CONFIRMATION_UNCREDITED,
+        c4_marker_exit_boundary=10,
+    )
+    transport._exit_piece = piece
+    shared = NS(
+        transport=transport, distribution_ready=False,
+        chute_move_in_progress=False, native_completion_guard=None,
+    )
+    return PhysicalDistribution(shared, queue.Queue()), piece
+
+
+def test_harvest_terminal_failure_clear_waits_for_distribution_ownership():
+    from defs.known_object import PieceStage
+
+    distribution, piece = _harvest_terminal_distribution()
+    assert not distribution.clear()
+    distribution.shared.distribution_ready = True
+    assert distribution.clear()
+    assert piece.stage is PieceStage.distributing
+    assert piece.distributed_at is None and piece.aborted
+
+
+@pytest.mark.parametrize("unresolved", [
+    "not_aborted", "other_failure", "no_exit", "nonterminal_stage",
+    "credited", "positioning_owned", "chute_motion", "native_owned", "native_guard",
+])
+def test_harvest_terminal_clear_does_not_generalize_to_unresolved_states(unresolved):
+    from defs.known_object import PieceStage
+
+    distribution, piece = _harvest_terminal_distribution()
+    distribution.shared.distribution_ready = True
+    if unresolved == "not_aborted":
+        piece.aborted = False
+    elif unresolved == "other_failure":
+        piece.transport_failure_reason = "unconfirmed distribution"
+    elif unresolved == "no_exit":
+        piece.c4_marker_exit_boundary = None
+    elif unresolved == "nonterminal_stage":
+        piece.stage = PieceStage.created
+    elif unresolved == "credited":
+        piece.distributed_at = 1.0
+    elif unresolved == "positioning_owned":
+        distribution.transport.placePieceForDistribution(piece)
+    elif unresolved == "chute_motion":
+        distribution.shared.chute_move_in_progress = True
+    elif unresolved == "native_owned":
+        piece.native_reservation_id = "retained-reservation"
+    else:
+        distribution.shared.native_completion_guard = NS(blocks_admission=lambda: True)
+    assert not distribution.clear()
+
+
+def test_clear_preserves_ordinary_success_and_native_ownership_guard():
+    from defs.known_object import PieceStage
+
+    distribution, piece = _harvest_terminal_distribution()
+    distribution.shared.distribution_ready = True
+    piece.stage = PieceStage.distributed
+    piece.aborted = False
+    piece.transport_failure_reason = None
+    assert distribution.clear()
+    distribution.native_completion = NS(blocks_admission=lambda: True)
+    assert not distribution.clear()
 
 
 def test_complete_recovery_reestablishes_mismatched_boundary_without_erasing_generations(

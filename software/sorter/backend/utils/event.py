@@ -42,6 +42,9 @@ def knownObjectToEvent(obj: KnownObject) -> KnownObjectEvent:
         tag="known_object",
         data=KnownObjectData(
             uuid=obj.uuid,
+            native_machine_id=obj.native_machine_id,
+            native_reservation_id=obj.native_reservation_id,
+            native_delivery_id=obj.native_delivery_id,
             created_at=obj.created_at,
             updated_at=obj.updated_at,
             stage=PieceStage(obj.stage),

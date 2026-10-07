@@ -1,8 +1,10 @@
 # Usage-Efficient Autonomous Development Mode
 
-**Maximize correctness per unit of model usage.** Spend effort on uncertainty,
-interfaces and consequential failures; never trade away tests, security, review
-or hardware safeguards to reduce usage.
+Follow [Brian's authoritative project boundaries](../AGENTS.md). This is his
+private, single-user LEGO hobby sorter. Preserve ordinary mechanical protections
+and perform only absolutely necessary, change-scoped validation. ChatGPT provides
+prompt generation and output oversight; Codex implements only the authorized
+scope. This workflow does not authorize runtime or core-sorting changes.
 
 ## 1. Repository as memory
 
@@ -17,6 +19,8 @@ scope and authorization, including corrections to earlier project procedures.
 When documentation and exact artifacts disagree, record the discrepancy
 and reconcile it without fabricating a state or silently discarding work.
 An old approval or historical paused snapshot is not current operator readiness.
+Dated state entries, reports and archived procedures remain historical evidence,
+not current recovery policy or additional testing gates. Preserve them unchanged.
 
 This candidate has no existing architecture document, ExecPlan convention,
 testing manual or CI acceptance definition. Do not invent one retrospectively.
@@ -44,7 +48,10 @@ state at accepted boundaries with evidence pointers, not a debugging diary.
 After approval, implement through routine defects without requesting permission
 for every correction. This includes argument/signature, timestamp/unit, type/lint,
 fixture/mock, race/ordering, event/accounting and narrow integration errors;
-documentation corrections and small necessary refactoring are also routine.
+documentation corrections and small necessary refactoring are also routine
+within the authorized scope. Existing core sorting functions are an exception:
+identify any necessary core change and obtain Brian's explicit approval before
+implementing it, even when it appears to be a routine fix or refactoring.
 An invalid test assumption may be corrected with evidence, not merely because
 the implementation fails it. Never weaken assertions or suppress failures.
 
@@ -64,6 +71,13 @@ persisted production migration, privacy/security, substantial dependencies,
 provider/account/credentials/billing, or a new paid service. Hive changes are
 outside this project's authority; do not turn a local fix into a Hive dependency.
 
+Existing core sorting functions always require Brian's explicit approval for
+the necessary change. The reject-and-continue policy is a project requirement,
+not blanket implementation authority. Preserve the normal **Upgrade** button
+path and ensure all local add-ons continue functioning as originally intended
+after upgrades. Upgrade compatibility is part of the authorized change's design;
+these instructions do not authorize an upgrade, deployment or machine operation.
+
 Inspect closely related same-scope issues before presenting a blocker so the
 user receives one concrete checkpoint. Prepare all authorized local work first.
 State the precise gate and its source; reuse approval already given for that
@@ -72,9 +86,13 @@ approval gates. Safe pause/resume of long operations can be a real checkpoint.
 
 ## 4. Testing efficiency without lowering quality
 
-Develop: implement → focused affected tests → fix same-scope failures → focused
-integration verification → continue. Once stable: applicable acceptance →
-independent review → bounded corrections → affected verification → final status.
+Before work, specify the minimum absolutely necessary validation, applicable
+accepted evidence to reuse, and a concrete stop condition. Implement only the
+authorized change and run only checks needed to resolve its affected behavior or
+findings. Integration, acceptance and independent review are scope-dependent,
+not an automatic sequence of gates. Stop validation once the declared checks pass
+and relevant findings are resolved; report remaining limits without expanding
+qualification or creating unnecessary test infrastructure.
 
 Reuse passing evidence only while its code, interfaces, environment and
 assumptions remain valid. Record what ran anew versus what was reused. Rerun for
@@ -98,8 +116,9 @@ selected fixture contracts first; collection is not a passing test run. Results
 from another Python version are supplementary, not the supported runtime's
 acceptance evidence. Do not silently upgrade dependencies to get tests running.
 
-These are existing test targets, not new umbrella suites. Select only those
-affected by the slice; tier denotes scope/cost, not a measured duration promise.
+These are existing test targets, not new umbrella suites. Select only absolutely
+necessary targets affected by the slice; tier denotes scope/cost, not a required
+sequence or a measured duration promise. Reuse applicable accepted evidence.
 
 | Tier | Existing command targets / purpose |
 | --- | --- |
@@ -108,14 +127,15 @@ affected by the slice; tier denotes scope/cost, not a measured duration promise.
 | MEDIUM / integration | `uv run --frozen python -m pytest tests/test_bounded_transfer.py tests/test_indexed_pocket_pipeline.py tests/test_indexed_pause_lifecycle.py -q` — paired perception, feeder owner, real ledger, reject and pause boundaries |
 | MEDIUM / integration | `uv run --frozen python -m pytest tests/test_distribution_sending.py tests/test_distribution_rehome.py -q` — distribution completion and recovery |
 | MEDIUM / integration | `uv run --frozen python -m pytest tests/test_project_harvest_project_routes.py tests/test_project_harvest_distribution_runtime.py -q` — API/store/routing boundaries using isolated fixtures |
-| EXPENSIVE / acceptance | `uv run --frozen python -m pytest tests -q` — full backend, only when the scope or unresolved risk warrants it |
+| EXPENSIVE / acceptance | `uv run --frozen python -m pytest tests -q` — full backend, only when absolutely necessary for a specific unresolved change-scoped concern; record why narrower checks or accepted evidence cannot resolve it |
 | EXPENSIVE / frontend | From `software/sorter/frontend`: `npm.cmd run check`, `npm.cmd run lint`, `npm.cmd run build` — actual [package scripts](../software/sorter/frontend/package.json); use `npm` off Windows. Do not rebuild an unchanged frontend. |
 | EXPENSIVE / physical | Bounded approved hardware/browser qualification from the active plan; no generic live-test command or authorization is implied. |
 
 There is no repository-wide acceptance command in this checkout. Browser and
 large-data/persistence checks must use the applicable slice's real fixtures and
 instructions. Do not invent a test script or a benchmark to fill a tier.
-Documentation-only work needs path/link, diff and scope checks, not broad tests.
+For documentation-only work, inspect the documentation diff and run
+`git diff --check`, then stop. Do not run application tests or qualification.
 
 ## 6. Hardware-control workflow
 
@@ -167,10 +187,15 @@ unreadiness after the grace period establish failure. Never roll back on one fai
 probe or a generic exception. Do not repeat a start/stop command with an uncertain
 response; reconcile its receipt and current process first.
 
-Continue through recoverable/benign conditions within the authorized scope. Stop for
-unexpected motion, unresolved command/physical ownership, meaningful source/data
-corruption, destructive changes, inability to recover, or repeated crashes. Loss of
-observation calls for bounded read retries and diagnosis, not assumed candidate failure.
+Continue through recoverable/benign conditions within the authorized scope. Stop
+agent deployment/operation work for unexpected motion, unresolved actuator-command
+ownership, a genuine mechanical fault, meaningful source/data corruption, unapproved
+destructive changes, inability to recover, or repeated crashes. Those agent work
+boundaries do not impose human acknowledgment for ordinary uncertain pieces:
+identification/tracking ambiguity or missing receiving evidence alone follows the
+default reject-and-automatically-continue policy. Loss of observation calls for
+bounded read retries and diagnosis, not assumed candidate failure or authority to
+implement a core change.
 Code rollback requires an established installation/startup failure and resolved stop
 ownership; preserve current configuration and operational history. Hive is external
 and read-only: model selection is not permission to administer or modify Hive.
@@ -190,12 +215,14 @@ until the entire allowlist verifies. Keep durable original bytes plus recorded a
 for newly introduced files; only the authorized software-fault rollback can restore
 code. Database/configuration restoration is not implied by code rollback.
 
-Do not repeatedly ask for routine chute/bin landings when standing instructions
-permit assuming them normal absent contrary evidence. That assumption is not a
-physical observation and cannot override observed danger or ownership ambiguity.
-Distinguish recoverable LEGO handling under the approved behavior from genuine
-machine-threatening failure or unresolved physical ownership. Do not deliberately
-jam the machine or silently tune thresholds, timing, motion or routing.
+The default recovery policy is to reject uncertain pieces and automatically
+continue. Identification/tracking ambiguity, uncertain per-piece custody or
+missing receiving evidence alone must not require human acknowledgment. Human
+intervention is for genuine mechanical faults. Preserve ordinary mechanical
+protections and honest records; do not fabricate receiving evidence or deliberately
+jam the machine. Do not silently tune thresholds, timing, motion or routing, or
+implement this policy in existing core sorting functions without Brian's explicit
+approval for the necessary change.
 
 ## 7. External providers
 
@@ -209,11 +236,12 @@ administer Hive or require a Hive-owner change.
 
 ## 8. Independent review and Git boundaries
 
-Meaningful code receives one independent review near a commit/release boundary
-after stable applicable acceptance. Review the bounded diff, evidence and risks;
-fix findings autonomously within scope and rerun affected checks. Additional
-review is justified by unusually large/high-risk changes, not every tiny edit.
-Self-review is not independent review; if unavailable, report it as pending.
+Use independent review when necessary for the authorized change near a
+commit/release boundary. Review the bounded diff, applicable evidence and risks;
+fix findings within scope and the core-sorting approval boundary, and rerun only
+necessary affected checks. Do not require broad acceptance or repeated review by
+default. Self-review is not independent review; report any required review that
+remains pending.
 
 Inspect index and worktree before edits. Preserve unrelated dirty/untracked work;
 do not reset/stash/clean or broadly stage. Compare candidates to exact deployed
@@ -240,9 +268,11 @@ debugging transcript to start work. Do not create a new conversation automatical
 
 > Implement the approved slice from [PLAN]. Follow all applicable AGENTS.md
 > instructions, docs/CODEX_WORKFLOW.md, and docs/ai/CURRENT_STATE.md. Work
-> autonomously through same-scope defects. Use focused affected tests while
-> developing and run complete applicable acceptance checks once stable. Stop
-> only for a true approval gate. Do not deploy or operate production unless this
+> autonomously through same-scope defects within Brian's explicit core-sorting
+> approval boundary. State minimal validation and a stop condition; reuse accepted
+> evidence and run only absolutely necessary change-scoped checks. Stop when those
+> checks pass and findings are resolved, or at a true approval gate. Do not deploy
+> or operate production unless this
 > prompt explicitly authorizes it. Leave work uncommitted unless instructed otherwise.
 
 Replace `[PLAN]` with the existing approved task/plan path. Use checkpoints for

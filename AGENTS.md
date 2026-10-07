@@ -1,23 +1,50 @@
 # AGENTS.md
 
-**This file is committed to the public repo.** Anything here must be generally
-useful documentation for any agent or contributor working in this repository:
-how things build, where things live, what the conventions are. Nothing
-specific to one person's machines, accounts, or setup goes in this file; that
-belongs in the gitignored `AGENTS.local.md`.
+This file records Brian's authoritative project boundaries and contributor
+instructions for this checkout. Private machine, account, credential and access
+details belong in the gitignored `AGENTS.local.md`, never in committed files.
+
+## Brian's authoritative project boundaries
+
+1. This is Brian's private, single-user LEGO hobby sorter, not a safety-critical
+   or perfect per-piece-accountability system. The default recovery policy is to
+   reject uncertain pieces and automatically continue. Identification/tracking
+   ambiguity or missing receiving evidence alone must not require human
+   acknowledgment. Human intervention is for genuine mechanical faults.
+   Preserve ordinary mechanical protections.
+2. Do not change existing core sorting functions without Brian's explicit
+   approval. These boundaries are not blanket authorization for runtime changes.
+   Identify any necessary core change and obtain approval before implementing it.
+3. Preserve upgrades through the normal **Upgrade** button. All local add-ons
+   must continue functioning as originally intended after upgrades.
+4. Perform only absolutely necessary, change-scoped testing. Reuse accepted
+   evidence while it remains applicable, specify minimal validation and a stop
+   condition, and avoid unnecessary test infrastructure or repeated broad
+   qualification.
+5. ChatGPT provides prompt generation and output oversight. Codex implements
+   only the authorized scope.
+
+These boundaries supersede contradictory active instructions and older project
+assumptions. Dated state snapshots, reports and archived procedures remain
+historical evidence; do not rewrite them or treat their old gates as current
+policy. Recording these boundaries does not implement the recovery policy or
+authorize application, configuration, schema, firmware, deployment or machine
+changes. Existing core behavior remains unchanged until explicitly approved.
 
 ## Start here
 
-- Read [current development state](docs/ai/CURRENT_STATE.md) before development
-  and follow [the development workflow](docs/CODEX_WORKFLOW.md).
+- Read [current development state](docs/ai/CURRENT_STATE.md) for recorded evidence
+  before development and follow [the development workflow](docs/CODEX_WORKFLOW.md)
+  within Brian's authoritative boundaries above.
 - Use repository code, tests, approved plans and evidence as durable memory;
   inspect them before asking the user to repeat history. Follow applicable
   scoped instructions and preserve the existing subsystem architecture.
-- Complete approved same-scope work autonomously, including routine defects.
-  Fix root causes; do not hide failures or substitute an unapproved workaround.
-- Develop with focused affected tests; run applicable acceptance once stable
-  and obtain independent review near meaningful commit/release boundaries.
-  Reverify affected behavior after corrections, not every unrelated suite.
+- Complete approved same-scope work autonomously, including routine defects,
+  within the explicit core-sorting approval boundary. Fix root causes; do not
+  hide failures or substitute an unapproved workaround.
+- Select the minimum necessary validation and its stop condition before work.
+  Reuse applicable accepted evidence; rerun only checks affected by changes or
+  unresolved findings. Acceptance and review must be proportionate to the scope.
 - Preserve dirty/untracked work. Use explicit path allowlists; do not reset,
   clean, stash or broadly stage. Leave work uncommitted unless instructed.
 

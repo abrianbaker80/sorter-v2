@@ -55,6 +55,7 @@ class RunRecorder:
         self.sorting_profile_path = gc.sorting_profile_path
         self.started_at = time.time()
         self.pieces: list[KnownObject] = []
+        self._native_recorded_pieces: set[str] = set()
         self.active_periods: list[dict[str, float]] = []
         self._current_active_start: Optional[float] = None
 
@@ -84,6 +85,20 @@ class RunRecorder:
             )
         except Exception as e:
             self.gc.logger.warning(f"RunRecorder: failed to persist piece {piece.uuid}: {e}")
+
+    def recordCommittedNativePiece(
+        self, piece: KnownObject, reservation_id: str, delivery_id: str,
+    ) -> None:
+        """Adopt verified native history in memory without a second DB upsert."""
+        from smart_bins_native_completion import verify_native_identity
+
+        row = verify_native_identity(
+            self.machine_id, reservation_id, piece.uuid, delivery_id)
+        if row["runtime_run_id"] != self.run_id:
+            raise ValueError("native history belongs to another runtime run")
+        if piece.uuid not in self._native_recorded_pieces:
+            self.pieces.append(piece)
+            self._native_recorded_pieces.add(piece.uuid)
 
     def save(self) -> None:
         self.markPaused()

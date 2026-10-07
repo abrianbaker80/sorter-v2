@@ -24,6 +24,7 @@ class DistributionStateMachine(BaseSubsystem):
         *,
         vision=None,
         post_distribute_cooldown_s: float = 0.0,
+        native_completion=None,
     ):
         super().__init__()
         self.irl = irl
@@ -49,6 +50,7 @@ class DistributionStateMachine(BaseSubsystem):
                 event_queue,
                 vision=vision,
                 post_distribute_cooldown_s=post_distribute_cooldown_s,
+                native_completion=native_completion,
             ),
         }
         self.gc.profiler.enterState("distribution", self.current_state.value)

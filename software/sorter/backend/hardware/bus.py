@@ -44,7 +44,7 @@ from threading import Lock
 
 # Set SORTER_PROFILE_BUS=1 to log how long each bus round-trip blocks the
 # caller. Every send_command takes the bus lock, writes, then blocks on
-# read_until waiting for the MCU reply — there is no queue or worker thread, so
+# response acquisition waiting for the MCU reply — there is no queue or worker thread, so
 # the time spent here is time the calling thread (e.g. the coordinator loop) is
 # stalled. SORTER_PROFILE_BUS_MIN_MS suppresses noise from fast commands.
 _PROFILE_BUS = os.environ.get("SORTER_PROFILE_BUS") == "1"
@@ -54,6 +54,11 @@ _PROFILE_BUS_MIN_MS = float(os.environ.get("SORTER_PROFILE_BUS_MIN_MS", "20"))
 MAX_PAYLOAD_SIZE = (
     254 - 8
 )  # Max total message size is 254, header is 4 bytes, CRC is 4 bytes
+
+MAX_FRAME_SIZE = 254
+# Bound collection across transfers; the configured serial timeout still bounds
+# each individual wait, including a read begun just before the frame deadline.
+MAX_FRAME_READ_S = 1.0
 
 
 @dataclass
@@ -121,24 +126,26 @@ class MCUBus:
             except Exception:
                 pass
 
-    def _read_response_frame(self, max_size: int = 254) -> bytearray:
-        """Read one COBS frame without discarding a split USB response.
+    def _read_response_frame(self, max_size: int = MAX_FRAME_SIZE) -> bytearray:
+        """Collect through the first terminator, consuming arrived bytes in chunks.
 
-        ``pyserial.read_until`` applies the port timeout to the whole call. On a
-        busy host, a CDC response can therefore arrive in two scheduler-sized
-        chunks and the first call returns valid partial bytes just before the
-        terminator arrives. Give an already-started frame three additional read
-        windows; an entirely silent device still times out after the first one.
+        When the input buffer is empty, a one-byte read waits for the next USB
+        transfer under the configured serial timeout. An empty return ends
+        collection, preserving partial bytes for the caller's failure handling.
+        Bytes following the terminator are not retained for another transaction.
         """
         response = bytearray()
-        for _ in range(4):
-            chunk = self._serial.read_until(b"\x00", max_size - len(response))
-            if chunk:
-                response.extend(chunk)
-                if response[-1] == 0 or len(response) >= max_size:
-                    break
-            elif not response:
+        max_size = min(max_size, MAX_FRAME_SIZE)
+        deadline = time.monotonic() + MAX_FRAME_READ_S
+        while len(response) < max_size and time.monotonic() < deadline:
+            wanted = min(max(self._serial.in_waiting, 1), max_size - len(response))
+            chunk = self._serial.read(wanted)
+            if not chunk:
                 break
+            response.extend(chunk)
+            end = response.find(b"\x00")
+            if end >= 0:
+                return response[:end + 1]
         return response
 
     def send_command_no_response(
@@ -231,7 +238,7 @@ class MCUBus:
                 if not resp_buf:
                     raise MCUBusError("Timeout waiting for response terminator (0x00)")
                 if resp_buf[-1] != 0:
-                    if len(resp_buf) >= 254:
+                    if len(resp_buf) >= MAX_FRAME_SIZE:
                         raise MCUBusError("Response exceeded max frame size before terminator")
                     raise MCUBusError(
                         f"Partial response (missing terminator), got {len(resp_buf)} bytes"

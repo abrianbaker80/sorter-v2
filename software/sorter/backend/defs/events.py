@@ -114,6 +114,9 @@ class ClassificationAttempt(BaseModel):
 
 class KnownObjectData(BaseModel):
     uuid: str
+    native_machine_id: Optional[str] = None
+    native_reservation_id: Optional[str] = None
+    native_delivery_id: Optional[str] = None
     created_at: float
     updated_at: float
     stage: PieceStage

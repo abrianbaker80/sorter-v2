@@ -410,7 +410,12 @@ class MarkerPositioner:
         self.boundary: int | None = None
         self.pending: int | None = None
         self.fault: str | None = None
+        self.fault_exception: Exception | None = None
+        self.fault_bookkeeping_errors: list[Exception] = []
         self._receipt = None
+        self._dispatch_guard = None
+        self._first_dispatch_attempted = False
+        self._motor_start_failure: Exception | None = None
         self._token = None
         self._window = None
         self._binding = False
@@ -549,27 +554,60 @@ class MarkerPositioner:
 
     def _fail(self, exc: Exception):
         self.fault = str(exc)
+        self.fault_exception = exc
+        guard = self._dispatch_guard if self._first_dispatch_attempted else None
         try:
-            self._record("failure", reason=self.fault,
-                          first_post_fence_frame=self._first_post_fence_frame,
-                          history=self._history_evidence(),
-                          **self._history_metrics(),
-                          last_observation_state=self._last_observation_state,
-                          last_usable_observation_state=self._last_usable_observation_state,
-                          last_usable_post_motion_observation_state=(
-                              self._last_usable_post_motion_observation_state
-                          ))
-        except Exception:
-            pass
-        self._diagnostic_active = False
-        try:
-            self.on_fault(self.fault)
+            # These hooks only fence memory and freeze evidence. Even a broken
+            # hook must leave the original hardware fault/stop callback reachable.
+            if guard is not None:
+                try:
+                    if self._motor_start_failure is not None:
+                        guard.motor_start_failed(self._motor_start_failure)
+                    else:
+                        guard.motion_failed(exc)
+                except Exception as bookkeeping_exc:
+                    self.fault_bookkeeping_errors.append(bookkeeping_exc)
         finally:
-            raise PositionError(self.fault) from exc
+            try:
+                self.on_fault(self.fault)
+            finally:
+                # SQLite may block or fail. The existing stop owner has already
+                # been called, and this positioner is latched against dispatch.
+                if guard is not None:
+                    try:
+                        guard.persist_uncertainty()
+                    except Exception as bookkeeping_exc:
+                        self.fault_bookkeeping_errors.append(bookkeeping_exc)
+                try:
+                    self._record("failure", reason=self.fault,
+                                  first_post_fence_frame=self._first_post_fence_frame,
+                                  history=self._history_evidence(),
+                                  **self._history_metrics(),
+                                  last_observation_state=self._last_observation_state,
+                                  last_usable_observation_state=self._last_usable_observation_state,
+                                  last_usable_post_motion_observation_state=(
+                                      self._last_usable_post_motion_observation_state
+                                  ))
+                except Exception:
+                    pass
+                self._diagnostic_active = False
+                raise PositionError(self.fault) from exc
 
     def _available(self):
         if self.fault is not None or self.pending is not None:
             raise PositionError("positioner faulted or already has an owned request")
+
+    def install_dispatch_guard(self, guard) -> None:
+        """Install the explicit physical-owner fence only while bound and idle."""
+        if (self._dispatch_guard is not None or self.boundary is None
+            or self.pending is not None or self.fault is not None or self._receipt is not None):
+            raise PositionError("dispatch guard requires one idle bound owner")
+        for name in ("before_request", "before_first_dispatch", "before_trim",
+                     "after_motor_start", "motor_start_failed", "motion_failed",
+                     "persist_uncertainty"):
+            if not callable(getattr(guard, name, None)):
+                raise PositionError(f"dispatch guard lacks {name}")
+        self._dispatch_guard = guard
 
     def _observe_stopped(self):
         self._token = self.motor.stationary_token()
@@ -620,7 +658,11 @@ class MarkerPositioner:
             raise PositionError("normal index must be exactly the next bound boundary")
         if type(speed) is not int or speed < 16:
             raise ValueError("speed must be a positive configured motor speed")
+        if self._dispatch_guard is not None:
+            self._dispatch_guard.before_request(boundary, self)
         self.pending, self._speed = boundary, speed
+        self._first_dispatch_attempted = False
+        self._motor_start_failure = None
         self._binding, self._preparing = False, True
         self._corrections, self._total_correction = 0, 0.0
         self._last_error = None
@@ -652,6 +694,8 @@ class MarkerPositioner:
         target. Never sends an index-sized move or rebases a bound instance.
         The same correction envelope, deadline and confirmation rules apply.
         """
+        if self._dispatch_guard is not None:
+            raise PositionError("guarded maintenance trim needs a separate durable permit")
         self._available()
         self.mapping.phase(boundary)
         if self.boundary is not None:
@@ -676,9 +720,26 @@ class MarkerPositioner:
         stage_started = self.clock()
         if stage_started > self._started + self.limits.timeout_s:
             raise PositionError("marker index deadline exceeded during observation")
-        receipt = self.motor.start(
-            requested_degrees, self._speed, self._token
-        )
+        first = not self._first_dispatch_attempted
+        if self._dispatch_guard is not None:
+            if first:
+                self._dispatch_guard.before_first_dispatch(self)
+            else:
+                self._dispatch_guard.before_trim(self)
+        self._first_dispatch_attempted = True
+        try:
+            receipt = self.motor.start(
+                requested_degrees, self._speed, self._token
+            )
+            if receipt is None:
+                raise PositionError("tracked motor returned no receipt")
+            if self._dispatch_guard is not None:
+                self._dispatch_guard.after_motor_start(self, receipt, first=first)
+        except Exception as exc:
+            # Preserve the original failure for _fail; no persistence may run
+            # here before poll invokes the existing fault/stop callback.
+            self._motor_start_failure = exc
+            raise
         # Only an accepted owned move begins another bounded positioning stage.
         # Use dispatch time, not receipt-processing time, for its full budget.
         self._receipt = receipt

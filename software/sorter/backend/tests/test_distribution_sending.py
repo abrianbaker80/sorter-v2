@@ -18,12 +18,17 @@ The patched Sending state now holds the gate closed until EITHER:
 from __future__ import annotations
 
 import queue
+import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from defs.known_object import KnownObject
+from defs.known_object import HARVEST_CONFIRMATION_UNCREDITED, KnownObject, PieceStage
+from project_harvest_projects import HarvestProjectError
 from piece_transport import ClassificationChannelTransport
 from runtime_stats import RuntimeStatsCollector
 from subsystems.bus import TickBus
@@ -312,6 +317,7 @@ class SendingChuteReopenGateTests(unittest.TestCase):
         piece.harvest_activation_id = "activation-project"
         piece.harvest_allocation_id = "allocation-project"
         piece.destination_bin = (0, 0, 1)
+        piece.c4_marker_exit_boundary = 21
         shared = self._mkSharedWithTransport(transport)
         gc = _GlobalConfig()
         event_queue: queue.Queue = queue.Queue()
@@ -339,6 +345,239 @@ class SendingChuteReopenGateTests(unittest.TestCase):
         self.assertFalse(shared.get_distribution_ready())
         self.assertEqual([], gc.run_recorder.pieces)
         self.assertEqual("pause", control_queue.get_nowait().tag)
+
+    def _markerHarvestSending(self):
+        transport = self._mkTransportWithDrop(tracked_global_id=46)
+        piece = transport._exit_piece
+        piece.stage = PieceStage.distributing
+        piece.harvest_project_id = "harvest-project"
+        piece.harvest_activation_id = "activation-project"
+        piece.harvest_allocation_id = "allocation-project"
+        piece.destination_bin = (0, 0, 1)
+        piece.c4_marker_exit_boundary = 21
+        shared = self._mkSharedWithTransport(transport)
+        gc = _GlobalConfig()
+        gc.set_progress_tracker = Mock()
+        gc.runtime_stats.setLifecycleState("running")
+        gc.runtime_stats.observeHarvestReservation({
+            "mode": "live", "runtime_id": piece.harvest_activation_id,
+            "allocation_id": piece.harvest_allocation_id, "status": "planned",
+        }, now_wall=time.time() - 60)
+        events = queue.Queue()
+        sending = _mkSending(
+            vision=_FakeVision(live_ids_by_role={"carousel": {46}}), cooldown_s=0,
+            shared=shared, event_queue=events, gc=gc,
+        )
+        return sending, piece, shared, gc, events
+
+    def test_marker_harvest_evidence_failures_continue_without_credit(self) -> None:
+        for code in (
+            "HARVEST_DESTINATION_MISSING", "ALLOCATION_NOT_FOUND", "ALLOCATION_UNDONE",
+            "PROJECT_NOT_FOUND", "PROJECT_NOT_ACTIVE", "RUNTIME_STATE_MISMATCH",
+            "PHYSICAL_EVIDENCE_REQUIRED",
+            "HARVEST_CONFIRMATION_IDENTITY_MISMATCH",
+        ):
+            with self.subTest(code=code):
+                sending, piece, shared, gc, events = self._markerHarvestSending()
+                commands = queue.Queue()
+                with (
+                    patch("server.shared_state.command_queue", commands),
+                    patch("server.shared_state.setHardwareStatus") as hardware_status,
+                    patch("project_harvest_runtime.confirm_piece_drop",
+                          side_effect=HarvestProjectError(code, "evidence unavailable")) as confirm,
+                    patch("project_harvest_runtime.retire_unconfirmed_piece_drop", return_value=1) as retire,
+                    patch("local_state.record_piece_distribution") as bin_credit,
+                ):
+                    self.assertIsNone(sending.step())
+                    confirm.assert_not_called()
+                    sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+                    self.assertEqual(DistributionState.IDLE, sending.step())
+                    confirm.assert_called_once_with(gc, piece)
+                    retire.assert_called_once()
+                    event = events.get_nowait()
+                    gc.runtime_stats.observeKnownObject(event.data.model_dump(mode="json"))
+                    bin_credit.assert_not_called()
+                    hardware_status.assert_not_called()
+                self.assertTrue(shared.get_distribution_ready())
+                self.assertTrue(piece.aborted)
+                self.assertEqual(HARVEST_CONFIRMATION_UNCREDITED, piece.transport_failure_reason)
+                self.assertEqual(PieceStage.distributing, piece.stage)
+                self.assertIsNone(piece.distributed_at)
+                self.assertEqual((0, 0, 1), piece.destination_bin)
+                self.assertEqual("allocation-project", piece.harvest_allocation_id)
+                self.assertEqual([], gc.run_recorder.pieces)
+                gc.set_progress_tracker.record.assert_not_called()
+                self.assertTrue(commands.empty())
+                snapshot = gc.runtime_stats.snapshot()
+                self.assertEqual(0, snapshot["counts"]["stage_distributed"])
+                self.assertEqual(0, snapshot["counts"]["distributed"])
+                counts = snapshot["harvest_throughput"]
+                self.assertEqual(0, counts["bag_count"])
+                self.assertEqual(0, counts["distributed_count"])
+                self.assertTrue(events.empty())
+
+    def test_marker_harvest_malformed_ids_continue_without_credit(self) -> None:
+        from test_project_harvest_projects import _store_with_retirement_allocations
+
+        for field in ("harvest_allocation_id", "harvest_project_id"):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                store, project_id, _original, allocation = _store_with_retirement_allocations(Path(directory))
+                sending, piece, shared, gc, events = self._markerHarvestSending()
+                piece.uuid = allocation["piece_id"]
+                piece.harvest_project_id = project_id
+                piece.harvest_allocation_id = allocation["allocation_id"]
+                piece.harvest_activation_id = "current-activation"
+                setattr(piece, field, "malformed-id")
+                with closing(sqlite3.connect(store.db_path)) as conn:
+                    allocations_before = list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id"))
+                    audit_before = list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence"))
+                commands = queue.Queue()
+                with (
+                    patch("server.shared_state.command_queue", commands),
+                    patch("server.shared_state.setHardwareStatus") as hardware_status,
+                    patch("project_harvest_runtime._store", return_value=store),
+                    patch.object(store, "confirm_allocation", wraps=store.confirm_allocation) as confirm,
+                    patch("local_state.record_piece_distribution") as bin_credit,
+                ):
+                    self.assertIsNone(sending.step())
+                    confirm.assert_not_called()
+                    sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+                    self.assertEqual(DistributionState.IDLE, sending.step())
+                    confirm.assert_called_once()
+                    self.assertEqual((piece.harvest_project_id, piece.harvest_allocation_id), confirm.call_args.args)
+                    failure = events.get_nowait().data
+                    self.assertTrue(failure.aborted)
+                    self.assertEqual(PieceStage.distributing, failure.stage)
+                    self.assertIsNone(failure.distributed_at)
+                    gc.runtime_stats.observeKnownObject(failure.model_dump(mode="json"))
+                    bin_credit.assert_not_called()
+                    hardware_status.assert_not_called()
+                self.assertTrue(shared.get_distribution_ready())
+                self.assertTrue(piece.aborted)
+                self.assertEqual(HARVEST_CONFIRMATION_UNCREDITED, piece.transport_failure_reason)
+                self.assertEqual(PieceStage.distributing, piece.stage)
+                self.assertIsNone(piece.distributed_at)
+                self.assertIsNone(piece.native_delivery_id)
+                self.assertEqual([], gc.run_recorder.pieces)
+                gc.set_progress_tracker.record.assert_not_called()
+                self.assertTrue(commands.empty())
+                self.assertTrue(events.empty())
+                snapshot = gc.runtime_stats.snapshot()
+                self.assertEqual(0, snapshot["counts"]["stage_distributed"])
+                self.assertEqual(0, snapshot["counts"]["distributed"])
+                self.assertEqual(0, snapshot["harvest_throughput"]["bag_count"])
+                self.assertEqual(0, snapshot["harvest_throughput"]["distributed_count"])
+                with closing(sqlite3.connect(store.db_path)) as conn:
+                    self.assertEqual(allocations_before, list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id")))
+                    self.assertEqual(audit_before, list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence")))
+
+    def test_marker_harvest_terminal_replay_does_not_reconfirm_or_credit(self) -> None:
+        sending, piece, shared, gc, events = self._markerHarvestSending()
+        commands = queue.Queue()
+        with (
+            patch("server.shared_state.command_queue", commands),
+            patch("project_harvest_runtime.confirm_piece_drop",
+                  side_effect=HarvestProjectError("ALLOCATION_UNDONE", "already retired")) as confirm,
+            patch("project_harvest_runtime.retire_unconfirmed_piece_drop", return_value=0) as retire,
+        ):
+            self.assertIsNone(sending.step())
+            sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+            self.assertEqual(DistributionState.IDLE, sending.step())
+            self.assertEqual(DistributionState.IDLE, sending.step())
+            sending.cleanup()
+            shared.set_distribution_gate(False, reason="replay")
+            self.assertIsNone(sending.step())
+            sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+            self.assertEqual(DistributionState.IDLE, sending.step())
+            confirm.assert_called_once()
+            retire.assert_called_once()
+        self.assertTrue(shared.get_distribution_ready())
+        self.assertEqual(1, events.qsize())
+        self.assertIsNone(piece.distributed_at)
+        self.assertEqual([], gc.run_recorder.pieces)
+        gc.set_progress_tracker.record.assert_not_called()
+        self.assertTrue(commands.empty())
+
+    def test_marker_harvest_retirement_storage_failure_retains_pause(self) -> None:
+        sending, piece, shared, gc, events = self._markerHarvestSending()
+        self.assertIsNone(sending.step())
+        sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+        commands = queue.Queue()
+        with (
+            patch("server.shared_state.command_queue", commands),
+            patch("project_harvest_runtime.confirm_piece_drop",
+                  side_effect=HarvestProjectError("PHYSICAL_EVIDENCE_REQUIRED", "unconfirmed")),
+            patch("project_harvest_runtime.retire_unconfirmed_piece_drop",
+                  side_effect=RuntimeError("retirement storage unavailable")),
+        ):
+            self.assertIsNone(sending.step())
+        self.assertFalse(shared.get_distribution_ready())
+        self.assertFalse(piece.aborted)
+        self.assertIsNone(piece.transport_failure_reason)
+        self.assertIsNone(piece.distributed_at)
+        self.assertEqual([], gc.run_recorder.pieces)
+        self.assertTrue(events.empty())
+        self.assertEqual("pause", commands.get_nowait().tag)
+
+    def test_harvest_evidence_recovery_excludes_non_marker_and_dynamic_modes(self) -> None:
+        for mode in ("non_marker", "dynamic"):
+            with self.subTest(mode=mode):
+                sending, piece, shared, gc, events = self._markerHarvestSending()
+                if mode == "non_marker":
+                    piece.c4_marker_exit_boundary = None
+                else:
+                    shared.transport._dynamic_mode = True
+                # Retain the selected drop so this test isolates the recovery gate.
+                sending.piece = piece
+                sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+                commands = queue.Queue()
+                with (
+                    patch("server.shared_state.command_queue", commands),
+                    patch("project_harvest_runtime.confirm_piece_drop",
+                          side_effect=HarvestProjectError("PHYSICAL_EVIDENCE_REQUIRED", "unconfirmed")),
+                    patch("project_harvest_runtime.retire_unconfirmed_piece_drop") as retire,
+                ):
+                    self.assertIsNone(sending.step())
+                    retire.assert_not_called()
+                self.assertFalse(piece.aborted)
+                self.assertFalse(shared.get_distribution_ready())
+                self.assertEqual("pause", commands.get_nowait().tag)
+                self.assertTrue(events.empty())
+
+    def test_uncredited_harvest_drop_waits_for_existing_chute_motion(self) -> None:
+        sending, piece, shared, _gc, events = self._markerHarvestSending()
+        self.assertIsNone(sending.step())
+        sending.start_time = time.time() - CHUTE_SETTLE_MS / 1000 - 1
+        shared.set_chute_motion(True, target_bin=None)
+        commands = queue.Queue()
+        with (
+            patch("server.shared_state.command_queue", commands),
+            patch("project_harvest_runtime.confirm_piece_drop",
+                  side_effect=HarvestProjectError("PHYSICAL_EVIDENCE_REQUIRED", "unconfirmed")) as confirm,
+            patch("project_harvest_runtime.retire_unconfirmed_piece_drop", return_value=1),
+        ):
+            self.assertIsNone(sending.step())
+            self.assertFalse(shared.get_distribution_ready())
+            self.assertTrue(piece.aborted)
+            shared.set_chute_motion(False, target_bin=None)
+            self.assertEqual(DistributionState.IDLE, sending.step())
+            confirm.assert_called_once()
+        self.assertTrue(shared.get_distribution_ready())
+        self.assertTrue(commands.empty())
+        self.assertEqual(1, events.qsize())
+
+    def test_sending_does_not_confirm_a_still_routable_positioning_piece(self) -> None:
+        sending, piece, shared, _gc, _events = self._markerHarvestSending()
+        shared.transport._exit_piece = None
+        piece.c4_marker_exit_boundary = None
+        shared.transport.placePieceForDistribution(piece)
+        with patch("project_harvest_runtime.confirm_piece_drop") as confirm:
+            self.assertIsNone(sending.step())
+            sending.start_time = time.time() - MISSING_DROP_PIECE_GRACE_MS / 1000 - 1
+            self.assertEqual(DistributionState.IDLE, sending.step())
+            confirm.assert_not_called()
+        self.assertIs(piece, shared.transport.getPieceForDistributionPositioning())
+        self.assertFalse(piece.aborted)
 
     def test_holds_gate_while_tracker_still_sees_piece(self) -> None:
         transport = self._mkTransportWithDrop(tracked_global_id=17)

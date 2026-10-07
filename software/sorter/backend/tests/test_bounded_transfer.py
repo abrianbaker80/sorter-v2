@@ -664,7 +664,10 @@ def test_radially_unrelated_material_cannot_replace_active_load(monkeypatch):
     assert p._episode.state=='recovering' and not f.irl.c_channel_3_rotor_stepper.moves
     assert not p._episode.recovery_decision['predicates']['spatial_association']
     t(115.2)
-    assert p._episode.state=='unresolved' and not f.irl.c_channel_3_rotor_stepper.moves
+    assert p._episode.state=='discard_bound' and not f.irl.c_channel_3_rotor_stepper.moves
+    assert p._tail.route == PocketRoute.REJECT
+    assert p._tail.pocket_id == p._episode.pocket_id
+    assert p.gc.runtime_stats.activeIncident() is None
 
 
 def test_motion_must_fit_remaining_active_budget(monkeypatch):

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -621,3 +623,236 @@ def test_missing_parts_csv_contains_group_quotas(tmp_path: Path) -> None:
     assert "project_id,set_number,group_id" in payload
     assert "bag:1" in payload
     assert "bag:2" in payload
+
+
+def _store_with_retirement_allocations(tmp_path: Path):
+    store, draft = _store_with_draft(tmp_path, repeated_part=True)
+    project = store.create_project(draft_id=draft["draft_id"])
+    project = store.save_bom(
+        project["project_id"],
+        content=_bom({"part_id": "3001", "color_id": "2", "quantity": 3}),
+        filename="bom.json", provider="private_moc",
+    )
+    original = store.propose_allocation(
+        project["project_id"], piece_id="original-piece", part_id="3001", color_id="2",
+    )
+    current = store.propose_allocation(
+        project["project_id"], piece_id="current-piece", part_id="3001", color_id="2",
+    )
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE harvest_allocations SET mode='live',runtime_id='original-activation' WHERE allocation_id=?",
+            (original["allocation_id"],),
+        )
+        conn.execute(
+            "UPDATE harvest_allocations SET mode='live',runtime_id='current-activation' WHERE allocation_id=?",
+            (current["allocation_id"],),
+        )
+        conn.execute(
+            "INSERT INTO harvest_runtime_state VALUES(1,?,?,?,?)",
+            (project["project_id"], "current-activation",
+             json.dumps({"activation_id": "current-activation", "status": "active", "runtime_mode": "live",
+                         "assignments": [{"group_id": current["group_id"], "layer_index": 0,
+                                          "section_index": 0, "bin_index": 1}]}),
+             projects._now()),
+        )
+    return store, project["project_id"], original, current
+
+
+def test_exact_confirmation_retirement_is_idempotent_and_preserves_current_runtime(tmp_path: Path) -> None:
+    store, project_id, original, current = _store_with_retirement_allocations(tmp_path)
+    arguments = dict(
+        piece_ids=[original["piece_id"]], project_id=project_id,
+        allocation_id=original["allocation_id"], activation_id="original-activation",
+        reason="Harvest confirmation uncredited (PHYSICAL_EVIDENCE_REQUIRED)",
+    )
+    assert store.retire_c4_planned_allocations(**arguments) == 1
+    assert store.retire_c4_planned_allocations(**arguments) == 0
+    with sqlite3.connect(store.db_path) as conn:
+        rows = dict(conn.execute("SELECT allocation_id,status FROM harvest_allocations"))
+        assert rows == {original["allocation_id"]: "undone", current["allocation_id"]: "planned"}
+        assert conn.execute("SELECT COUNT(*) FROM harvest_allocations WHERE confirmed_at IS NOT NULL").fetchone()[0] == 0
+    project = store.get_project(project_id)
+    retirements = [event for event in project["events"] if event["kind"] == "c4_unconfirmed_allocation_retired"]
+    assert len(retirements) == 1
+    assert retirements[0]["payload"]["reason"] == arguments["reason"]
+    # The existing default API still retires only the currently active scope.
+    assert store.retire_c4_planned_allocations() == 1
+
+
+@pytest.mark.parametrize("case", [
+    "confirmed", "undone", "missing", "wrong_project", "wrong_allocation",
+    "wrong_piece", "wrong_activation", "integrated", "simulation",
+])
+def test_exact_confirmation_retirement_preserves_other_states(tmp_path: Path, case: str) -> None:
+    store, project_id, original, _current = _store_with_retirement_allocations(tmp_path)
+    arguments = dict(
+        piece_ids=[original["piece_id"]], project_id=project_id,
+        allocation_id=original["allocation_id"], activation_id="original-activation",
+        reason="Harvest confirmation uncredited",
+    )
+    with sqlite3.connect(store.db_path) as conn:
+        if case in {"confirmed", "undone"}:
+            conn.execute("UPDATE harvest_allocations SET status=? WHERE allocation_id=?",
+                         (case, original["allocation_id"]))
+        elif case == "missing":
+            conn.execute("DELETE FROM harvest_allocations WHERE allocation_id=?", (original["allocation_id"],))
+        elif case == "simulation":
+            conn.execute("UPDATE harvest_allocations SET mode='simulation' WHERE allocation_id=?",
+                         (original["allocation_id"],))
+        elif case == "integrated":
+            from harvest_integration_storage import DDL
+            for statement in DDL:
+                conn.execute(statement)
+            conn.execute("INSERT INTO harvest_integration_versions VALUES(1,1)")
+            conn.execute("INSERT INTO harvest_integration_requests VALUES(?,?,?,?,?,?,?,?,?)",
+                         ("operation", "request", "test", "{}", original["allocation_id"],
+                          "{}", None, "{}", projects._now()))
+        before = list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id"))
+        events_before = list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence"))
+    if case == "wrong_project":
+        arguments["project_id"] = "other-project"
+    elif case == "wrong_allocation":
+        arguments["allocation_id"] = "other-allocation"
+    elif case == "wrong_piece":
+        arguments["piece_ids"] = ["current-piece"]
+    elif case == "wrong_activation":
+        arguments["activation_id"] = "current-activation"
+    assert store.retire_c4_planned_allocations(**arguments) == 0
+    with sqlite3.connect(store.db_path) as conn:
+        assert list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id")) == before
+        assert list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence")) == events_before
+
+
+def test_confirmation_retirement_wrapper_uses_original_piece_identity() -> None:
+    from project_harvest_runtime import retire_unconfirmed_piece_drop
+
+    piece = SimpleNamespace(
+        uuid="original-piece", harvest_project_id="original-project",
+        harvest_allocation_id="original-allocation", harvest_activation_id="original-activation",
+    )
+    store = Mock()
+    store.retire_c4_planned_allocations.return_value = 1
+    with patch("project_harvest_runtime._store", return_value=store):
+        assert retire_unconfirmed_piece_drop(object(), piece, reason="unconfirmed") == 1
+    store.retire_c4_planned_allocations.assert_called_once_with(
+        piece_ids=["original-piece"], project_id="original-project",
+        allocation_id="original-allocation", activation_id="original-activation", reason="unconfirmed",
+    )
+    piece.harvest_activation_id = None
+    with patch("project_harvest_runtime._store") as lookup:
+        assert retire_unconfirmed_piece_drop(object(), piece, reason="unconfirmed") == 0
+        lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["missing_project", "missing_allocation", "missing_activation", "missing_ownership_ids", "invalid_destination"])
+def test_marker_confirmation_rejects_incomplete_identity_and_destination(case: str) -> None:
+    from project_harvest_runtime import confirm_piece_drop
+
+    piece = SimpleNamespace(
+        uuid="original-piece", harvest_project_id="original-project",
+        harvest_allocation_id="original-allocation", harvest_activation_id="original-activation",
+        c4_marker_exit_boundary=21, destination_bin=(0, 0, 1), harvest_exception=False,
+    )
+    if case == "invalid_destination":
+        piece.destination_bin = (0, None, 1)
+    elif case == "missing_ownership_ids":
+        piece.harvest_project_id = None
+        piece.harvest_allocation_id = None
+    else:
+        field = {"missing_project": "harvest_project_id", "missing_allocation": "harvest_allocation_id",
+                 "missing_activation": "harvest_activation_id"}[case]
+        setattr(piece, field, None)
+    with patch("project_harvest_runtime._store") as lookup:
+        with pytest.raises(projects.HarvestProjectError) as raised:
+            confirm_piece_drop(object(), piece)
+        expected = "HARVEST_DESTINATION_MISSING" if case == "invalid_destination" else "HARVEST_CONFIRMATION_IDENTITY_MISMATCH"
+        assert raised.value.code == expected
+        lookup.assert_not_called()
+
+
+def test_marker_confirmation_wrapper_preserves_ordinary_and_legacy_paths() -> None:
+    from project_harvest_runtime import confirm_piece_drop
+
+    piece = SimpleNamespace(
+        uuid="original-piece", harvest_project_id=None, harvest_allocation_id=None,
+        harvest_activation_id="retained-reject-activation", harvest_group_id="retained-group",
+        c4_marker_exit_boundary=21, c4_discard=True, destination_bin=None,
+    )
+    with patch("project_harvest_runtime._store") as lookup:
+        assert confirm_piece_drop(object(), piece) is None
+        lookup.assert_not_called()
+    piece.c4_discard = False
+    piece.harvest_activation_id = None
+    piece.harvest_group_id = None
+    with patch("project_harvest_runtime._store") as lookup:
+        assert confirm_piece_drop(object(), piece) is None
+        lookup.assert_not_called()
+    piece.harvest_project_id = "original-project"
+    piece.harvest_allocation_id = "original-allocation"
+    piece.harvest_activation_id = "original-activation"
+    piece.destination_bin = (0, 0, 1)
+    store = Mock()
+    store.confirm_allocation.return_value = {"status": "confirmed"}
+    with patch("project_harvest_runtime._store", return_value=store):
+        confirm_piece_drop(object(), piece)
+    assert store.confirm_allocation.call_args.kwargs["expected_piece_id"] == piece.uuid
+    assert store.confirm_allocation.call_args.kwargs["expected_activation_id"] == piece.harvest_activation_id
+    piece.c4_marker_exit_boundary = None
+    store.reset_mock()
+    with patch("project_harvest_runtime._store", return_value=store):
+        confirm_piece_drop(object(), piece)
+    assert set(store.confirm_allocation.call_args.kwargs) == {"evidence"}
+
+
+@pytest.mark.parametrize("case", ["wrong_piece", "wrong_activation", "confirmed_mismatched_evidence"])
+def test_exact_marker_confirmation_preserves_foreign_or_confirmed_allocation(tmp_path: Path, case: str) -> None:
+    store, project_id, _original, current = _store_with_retirement_allocations(tmp_path)
+    evidence = {"physical_drop_confirmed": True, "activation_id": "current-activation",
+                "piece_id": current["piece_id"], "destination_bin": [0, 0, 1]}
+    expected_piece_id = current["piece_id"]
+    expected_activation_id = "current-activation"
+    if case == "wrong_piece":
+        expected_piece_id = "foreign-piece"
+        evidence["piece_id"] = expected_piece_id
+    elif case == "wrong_activation":
+        expected_activation_id = "foreign-activation"
+        evidence["activation_id"] = expected_activation_id
+    with sqlite3.connect(store.db_path) as conn:
+        if case == "confirmed_mismatched_evidence":
+            conn.execute("UPDATE harvest_allocations SET status='confirmed',confirmed_at=?,evidence_json=? WHERE allocation_id=?",
+                         (projects._now(), json.dumps(evidence), current["allocation_id"]))
+            evidence["destination_bin"] = [0, 0, 2]
+        before = list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id"))
+        events_before = list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence"))
+    with pytest.raises(projects.HarvestProjectError) as raised:
+        store.confirm_allocation(
+            project_id, current["allocation_id"], evidence=evidence,
+            expected_piece_id=expected_piece_id, expected_activation_id=expected_activation_id,
+        )
+    expected_code = "PHYSICAL_EVIDENCE_REQUIRED" if case == "confirmed_mismatched_evidence" else "HARVEST_CONFIRMATION_IDENTITY_MISMATCH"
+    assert raised.value.code == expected_code
+    with sqlite3.connect(store.db_path) as conn:
+        assert list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id")) == before
+        assert list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence")) == events_before
+    if case == "confirmed_mismatched_evidence":
+        # Existing API callers retain their historical idempotent receipt behavior.
+        assert store.confirm_allocation(project_id, current["allocation_id"], evidence=evidence)["status"] == "confirmed"
+
+
+def test_exact_marker_confirmation_success_and_replay_do_not_duplicate_credit(tmp_path: Path) -> None:
+    store, project_id, _original, current = _store_with_retirement_allocations(tmp_path)
+    arguments = dict(
+        evidence={"physical_drop_confirmed": True, "activation_id": "current-activation",
+                  "piece_id": current["piece_id"], "destination_bin": [0, 0, 1]},
+        expected_piece_id=current["piece_id"], expected_activation_id="current-activation",
+    )
+    result = store.confirm_allocation(project_id, current["allocation_id"], **arguments)
+    assert result["status"] == "confirmed"
+    with sqlite3.connect(store.db_path) as conn:
+        before = list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id"))
+        events_before = list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence"))
+    assert store.confirm_allocation(project_id, current["allocation_id"], **arguments)["status"] == "confirmed"
+    with sqlite3.connect(store.db_path) as conn:
+        assert list(conn.execute("SELECT * FROM harvest_allocations ORDER BY allocation_id")) == before
+        assert list(conn.execute("SELECT * FROM harvest_events ORDER BY sequence")) == events_before

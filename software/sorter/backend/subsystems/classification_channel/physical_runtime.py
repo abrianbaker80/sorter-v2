@@ -28,6 +28,7 @@ class Binding:
     result_applied: bool = False
     capture_until: float = 0.0
     landing_scene: object = None
+    reservation_id: str | None = None
 
     @property
     def key(self):
@@ -44,6 +45,7 @@ class PhysicalC4Runtime:
         distribution,
         journeys=None,
         apply_result=None,
+        native_bridge=None,
     ):
         if positioner.boundary != fifo.boundary or positioner.pending is not None:
             raise PositionError("FIFO requires an established marker boundary")
@@ -62,6 +64,9 @@ class PhysicalC4Runtime:
         self._verify_token = None
         self._verify_started = None
         self._pending = None
+        self.native_bridge = native_bridge
+        if native_bridge is not None:
+            native_bridge.attach(self, positioner)
 
     @property
     def can_admit(self):
@@ -71,6 +76,7 @@ class PhysicalC4Runtime:
             and self._verify is None
             and self._pending is None
             and self.handoff is None
+            and (self.native_bridge is None or not self.native_bridge.blocks_admission)
             and self.fifo.pockets[self.fifo.intake_pocket_id].state is PocketState.EMPTY
         )
 
@@ -82,10 +88,16 @@ class PhysicalC4Runtime:
             or episode.pocket_id != self.fifo.intake_pocket_id
         ):
             raise RuntimeError("C3 reservation does not match confirmed intake")
+        reservation_id = None
+        if self.native_bridge is not None:
+            reservation_id = self.native_bridge.admission_reservation(
+                piece, episode, self.fifo.pockets[self.fifo.intake_pocket_id]
+            )
         pocket = self.fifo.deposit(
             {"journey_uuid": piece.uuid, "episode_id": episode.episode_id}
         )
         binding = Binding(pocket.pocket_id, pocket.generation, piece, episode)
+        binding.reservation_id = reservation_id
         episode.piece_uuid = piece.uuid
         piece.c4_pocket_id, piece.c4_generation = binding.key
         self.bindings[binding.key] = self.handoff = binding
@@ -145,7 +157,34 @@ class PhysicalC4Runtime:
 
     def tick(self, now: float, *, feed: bool = False, allow_motion: bool = True):
         # A pause can finish an already accepted finite move, never start another.
+        if self.native_bridge is not None:
+            guarded = self.native_bridge.index
+            if (self.native_bridge.recovery_blocker is not None
+                or self.native_bridge.refused_target is not None):
+                return
+            if guarded is not None and guarded.stage in ("confirmed", "exit_persisted"):
+                self.native_bridge.persist_exit()
+                self._complete_guarded_index(now)
+                return
+            if guarded is not None and guarded.stage not in ("prepared", "armed"):
+                return
+            if guarded is not None and self._pending is None:
+                if guarded.stage == "prepared":
+                    self.native_bridge.prepare_target(guarded.target)
+                if not self.paused and allow_motion:
+                    self._pending = guarded.target
+                    try:
+                        self.positioner.request_index(self._pending.boundary, self.speed)
+                    except Exception as exc:
+                        guarded.stage = "blocked"
+                        guarded.error = f"positioner request failed: {exc}"
+                        raise
+                return
         if self._pending is not None:
+            if (self.native_bridge is not None
+                and (self.paused or not allow_motion)
+                and not self.native_bridge.first_dispatch_consumed):
+                return
             confirmation = self.positioner.poll()
             if confirmation is not None:
                 if (
@@ -155,6 +194,11 @@ class PhysicalC4Runtime:
                     raise PositionError(
                         "marker confirmation does not match pending FIFO index"
                     )
+                if self.native_bridge is not None:
+                    self.native_bridge.capture_confirmation(confirmation)
+                    self.native_bridge.persist_exit()
+                    self._complete_guarded_index(now)
+                    return
                 # FIFO microsteps are a logical coordinate, not a motor receipt.
                 # Marker corrections must not rebase pocket IDs or generations.
                 events = self.planner.complete_index(
@@ -242,16 +286,52 @@ class PhysicalC4Runtime:
             ),
         )
         if decision.index is not None:
+            if self.native_bridge is not None:
+                try:
+                    self.native_bridge.prepare_target(decision.index)
+                except Exception:
+                    self.native_bridge.fence_refused_target(decision.index)
+                    raise
             self._pending = decision.index
         if self._pending is not None:
-            self.positioner.request_index(self._pending.boundary, self.speed)
+            try:
+                self.positioner.request_index(self._pending.boundary, self.speed)
+            except Exception as exc:
+                if self.native_bridge is not None and self.native_bridge.index is not None:
+                    self.native_bridge.index.stage = "blocked"
+                    self.native_bridge.index.error = f"positioner request failed: {exc}"
+                raise
+
+    def _complete_guarded_index(self, now: float) -> None:
+        bridge = self.native_bridge
+        target = self._pending
+        bridge.begin_completion(target)
+        # FIFO microsteps are logical coordinates, not a motor receipt.
+        events = self.planner.complete_index(
+            target, confirmed_microsteps=target.absolute_microsteps, now=now
+        )
+        bridge.begin_handoff(events)
+        try:
+            for event in events:
+                binding = self.bindings.get((event.pocket.pocket_id, event.pocket.generation))
+                self.distribution.discharge(event, binding)
+                if binding and binding.journey:
+                    self.journeys.close(binding.journey)
+                self.bindings.pop((event.pocket.pocket_id, event.pocket.generation), None)
+        except Exception as exc:
+            bridge.handoff_failed(exc)
+            raise
+        bridge.finish()
+        self._pending = None
 
     def pause(self):
+        if self.native_bridge is not None:
+            self.native_bridge.pause()
         self.paused = True
 
     def resume(self, now):
         if self._pending is not None:
-            raise PositionError("consume the accepted marker index before resuming")
+            raise PositionError("resolve the owned marker index before resuming")
         self._verify_token = self.positioner.motor.stationary_token()
         self._verify = StableMarkers(
             self.positioner.source.fence(),
@@ -262,6 +342,8 @@ class PhysicalC4Runtime:
         self.paused = False
 
     def reestablish_for_recovery(self, confirmation, positioner):
+        if self.native_bridge is not None:
+            raise PositionError("guarded recovery needs a separate durable permit")
         if (
             not isinstance(confirmation, ConfirmedIndex)
             or positioner.boundary != confirmation.boundary
@@ -277,6 +359,8 @@ class PhysicalC4Runtime:
         self.recover(unknown=False)
 
     def recover(self, *, unknown=True):
+        if self.native_bridge is not None:
+            raise PositionError("guarded recovery needs a separate durable permit")
         if self._pending is not None:
             raise PositionError("finish the owned index before recovery")
         self.fifo.discard_all(include_unknown=unknown)

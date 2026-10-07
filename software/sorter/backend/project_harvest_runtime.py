@@ -15,6 +15,25 @@ from project_harvest_projects import (
 )
 
 
+_CONFIRMATION_EVIDENCE_ERRORS = frozenset({
+    "HARVEST_DESTINATION_MISSING",
+    "ALLOCATION_NOT_FOUND",
+    "ALLOCATION_UNDONE",
+    "PROJECT_NOT_FOUND",
+    "PROJECT_NOT_ACTIVE",
+    "RUNTIME_STATE_MISMATCH",
+    "PHYSICAL_EVIDENCE_REQUIRED",
+    "HARVEST_CONFIRMATION_IDENTITY_MISMATCH",
+    "INVALID_ALLOCATION_ID",
+    "INVALID_PROJECT_ID",
+})
+
+
+def is_confirmation_evidence_failure(exc: Exception) -> bool:
+    """Only explicit identity/evidence refusals permit automatic recovery."""
+    return isinstance(exc, HarvestProjectError) and exc.code in _CONFIRMATION_EVIDENCE_ERRORS
+
+
 @lru_cache(maxsize=4)
 def _store_for_root(root: str) -> HarvestProjectStore:
     return HarvestProjectStore(root)
@@ -190,7 +209,28 @@ def confirm_piece_drop(gc: Any, piece: Any) -> dict[str, Any] | None:
     project_id = getattr(piece, "harvest_project_id", None)
     activation_id = getattr(piece, "harvest_activation_id", None)
     destination = getattr(piece, "destination_bin", None)
-    if not allocation_id or not project_id:
+    marker_owned = getattr(piece, "c4_marker_exit_boundary", None) is not None
+    if not allocation_id and not project_id:
+        if (marker_owned and not bool(getattr(piece, "c4_discard", False))
+            and any(getattr(piece, name, None) for name in (
+                "harvest_activation_id", "harvest_group_id", "harvest_group_label", "harvest_exception",
+            ))):
+            raise HarvestProjectError(
+                "HARVEST_CONFIRMATION_IDENTITY_MISMATCH",
+                "The discharged Harvest piece has lost its original allocation identity.",
+            )
+        return None
+    confirmation_scope = {}
+    if marker_owned:
+        if not all(isinstance(value, str) and value.strip() for value in (
+            allocation_id, project_id, activation_id, getattr(piece, "uuid", None),
+        )):
+            raise HarvestProjectError(
+                "HARVEST_CONFIRMATION_IDENTITY_MISMATCH",
+                "The discharged piece lacks its original Harvest confirmation identity.",
+            )
+        confirmation_scope = dict(expected_piece_id=piece.uuid, expected_activation_id=activation_id)
+    elif not allocation_id or not project_id:
         return None
     if not isinstance(destination, tuple) or len(destination) != 3:
         if bool(getattr(piece, "harvest_exception", False)) and bool(
@@ -210,6 +250,7 @@ def confirm_piece_drop(gc: Any, piece: Any) -> dict[str, Any] | None:
                     "piece_max_dimension_mm": getattr(piece, "max_dimension_mm", None),
                     "intended_layer_index": getattr(piece, "intended_layer_index", None),
                 },
+                **confirmation_scope,
             )
             piece.harvest_group_id = HARVEST_EXCEPTION_GROUP_ID
             piece.harvest_group_label = HARVEST_EXCEPTION_GROUP_LABEL
@@ -219,15 +260,25 @@ def confirm_piece_drop(gc: Any, piece: Any) -> dict[str, Any] | None:
             "HARVEST_DESTINATION_MISSING",
             "The physically dropped Harvest piece has no recorded destination.",
         )
+    if marker_owned:
+        try:
+            destination_values = [int(value) for value in destination]
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise HarvestProjectError(
+                "HARVEST_DESTINATION_MISSING", "The discharged piece has invalid destination evidence.",
+            ) from exc
+    else:
+        destination_values = [int(value) for value in destination]
     return _store(gc).confirm_allocation(
         str(project_id),
         str(allocation_id),
         evidence={
             "physical_drop_confirmed": True,
             "activation_id": str(activation_id),
-            "destination_bin": [int(value) for value in destination],
+            "destination_bin": destination_values,
             "piece_id": str(piece.uuid),
         },
+        **confirmation_scope,
     )
 
 
@@ -236,3 +287,24 @@ def retire_c4_planned_allocations(gc, *, piece_ids=None):
     if not isinstance(root, str) or not root.strip():
         return 0
     return _store(gc).retire_c4_planned_allocations(piece_ids=piece_ids)
+
+
+def retire_unconfirmed_piece_drop(gc: Any, piece: Any, *, reason: str) -> int:
+    """Retire only this piece's original, unconfirmed Harvest reservation.
+
+    Missing identity cannot authorize retiring another activation's allocation.
+    A zero result preserves absent, completed, or independently owned records.
+    """
+    identity = (
+        getattr(piece, "harvest_project_id", None),
+        getattr(piece, "harvest_allocation_id", None),
+        getattr(piece, "harvest_activation_id", None),
+        getattr(piece, "uuid", None),
+    )
+    if not all(isinstance(value, str) and value.strip() for value in identity):
+        return 0
+    project_id, allocation_id, activation_id, piece_id = identity
+    return _store(gc).retire_c4_planned_allocations(
+        piece_ids=[piece_id], project_id=project_id,
+        allocation_id=allocation_id, activation_id=activation_id, reason=reason,
+    )

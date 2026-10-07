@@ -120,6 +120,7 @@ class LocalStateMigrationTests(unittest.TestCase):
         os.environ["LOCAL_STATE_DB_PATH"] = str(self.local_state_db_path)
 
     def tearDown(self) -> None:
+        local_state.close_local_state_keeper()
         if self._old_machine_params is None:
             os.environ.pop("MACHINE_SPECIFIC_PARAMS_PATH", None)
         else:
@@ -159,8 +160,9 @@ class LocalStateMigrationTests(unittest.TestCase):
         initialize_local_state()
 
         import sqlite3
+        from contextlib import closing
 
-        with sqlite3.connect(self.local_state_db_path) as conn:
+        with closing(sqlite3.connect(self.local_state_db_path)) as conn, conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS runtime_perf_metric_snapshots ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, recorded_at REAL)"
@@ -175,7 +177,7 @@ class LocalStateMigrationTests(unittest.TestCase):
         self.assertEqual(7, deleted["runtime_perf_metric_snapshots"])
         self.assertEqual(0, deleted["profiler_metric_snapshots"])
 
-        with sqlite3.connect(self.local_state_db_path) as conn:
+        with closing(sqlite3.connect(self.local_state_db_path)) as conn:
             remaining = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
                 "AND name IN ('runtime_perf_metric_snapshots', 'profiler_metric_snapshots')"

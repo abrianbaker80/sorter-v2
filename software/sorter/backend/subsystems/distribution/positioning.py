@@ -13,6 +13,7 @@ from irl.bin_layout import DistributionLayout, Bin, extractCategories
 from irl.config import IRLInterface
 from global_config import GlobalConfig
 from sorting_profile import SortingProfile, MISC_CATEGORY
+from smart_bins_eligibility import classify_bin, fits_dimension
 from blob_manager import setBinCategories
 from defs.events import PauseCommandData, PauseCommandEvent
 from defs.known_object import PieceStage, UNVERIFIED_C4_HANDOFF
@@ -86,6 +87,8 @@ class Positioning(BaseState):
         self._harvest_pause_enqueued: bool = False
         self._chute_move_estimated_ms: int = 0
         self._restore_chute_target: bool = False
+        self._no_fit_layer_index: int | None = None
+        self._uncertain_destination_blocked: bool = False
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -212,7 +215,7 @@ class Positioning(BaseState):
                 )
             if not harvest_active:
                 address, _ = self._findOrAssignBinForCategory(
-                    category_id, not_in_inventory=route_not_in_inventory
+                    category_id, not_in_inventory=route_not_in_inventory, piece=piece
                 )
             if address is None and self._servo_bus_pause_enqueued:
                 # Fatal: the servo bus is offline, so every layer is
@@ -221,12 +224,21 @@ class Positioning(BaseState):
                 # through to the passthrough path, which would silently
                 # send this piece to the discard bucket.
                 return DistributionState.IDLE
-            if address is None:
+            no_fit_layer_index = self._no_fit_layer_index if not harvest_active else None
+            if address is None and no_fit_layer_index is None:
+                uncertain_destination = (
+                    not harvest_active
+                    and getattr(
+                        getattr(self.shared, "c4_runtime_owner", None), "physical_c4_authority", False
+                    ) is True
+                    and self._uncertain_destination_blocked
+                )
                 # MISC is the intentional reject/default category. It should
                 # pass through to the bottom tray without claiming a real bin
                 # and without raising the operator no-bin incident.
                 if (
                     category_id != MISC_CATEGORY
+                    and not uncertain_destination
                     and not bool(getattr(piece, "reject_on_routing_failure", False))
                     and not self._consumeNoBinPassthroughApproval(piece)
                     and self._raiseNoBinAvailableIncident(piece, category_id)
@@ -237,10 +249,16 @@ class Positioning(BaseState):
                 # every usable layer door so the piece falls straight
                 # through to the bottom tray. Finalize the piece record
                 # via SENDING so stats/events stay consistent.
-                self.logger.warning(
-                    f"Positioning: no bin for category {category_id} — passthrough to bottom"
-                )
-                self._raiseBinsFullAlert(category_id)
+                if uncertain_destination:
+                    self.logger.warning(
+                        f"Positioning: uncertain bin contents prevent routing category {category_id} — reject passthrough"
+                    )
+                    self._clearBinsFullAlertIfOwned()
+                else:
+                    self.logger.warning(
+                        f"Positioning: no bin for category {category_id} — passthrough to bottom"
+                    )
+                    self._raiseBinsFullAlert(category_id)
                 if not self._openAllDoorsForPassthrough():
                     return None
                 piece.stage = PieceStage.distributing
@@ -251,18 +269,22 @@ class Positioning(BaseState):
                 piece.updated_at = time.time()
                 self._piece = piece
                 self.event_queue.put(knownObjectToEvent(piece))
-                self._setOccupancyState("positioning.passthrough_no_bin")
+                self._setOccupancyState(
+                    "positioning.passthrough_uncertain_bins" if uncertain_destination
+                    else "positioning.passthrough_no_bin"
+                )
                 return self._finishPassthrough(now)
 
-            if self._exceedsLayerMaxDimension(piece, address.layer_index):
+            if no_fit_layer_index is not None or self._exceedsLayerMaxDimension(piece, address.layer_index):
                 # The piece fits a real bin by category, but is physically too
                 # large for that bin's layer. Reroute it to the misc bottom bin
                 # (center-of-chute passthrough) and mark why. A live Harvest
                 # allocation is confirmed as an exception after the drop.
-                layer_max = self._layerMaxDimensionMm(address.layer_index)
+                layer_index = no_fit_layer_index if no_fit_layer_index is not None else address.layer_index
+                layer_max = self._layerMaxDimensionMm(layer_index)
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) exceeds "
-                    f"layer {address.layer_index} limit ({layer_max}mm) — passthrough to misc bottom bin"
+                    f"layer {layer_index} limit ({layer_max}mm) — passthrough to misc bottom bin"
                 )
                 self._clearBinsFullAlertIfOwned()
                 self._clearChuteJamAlertIfOwned()
@@ -274,7 +296,7 @@ class Positioning(BaseState):
                 piece.category_id = MISC_CATEGORY
                 piece.destination_bin = None
                 piece.too_big_for_layer = True
-                piece.intended_layer_index = address.layer_index
+                piece.intended_layer_index = layer_index
                 if harvest_active:
                     piece.harvest_exception = True
                 piece.updated_at = time.time()
@@ -585,13 +607,7 @@ class Positioning(BaseState):
         return None
 
     def _exceedsLayerMaxDimension(self, piece, layer_index: int) -> bool:
-        layer_max = self._layerMaxDimensionMm(layer_index)
-        if layer_max is None:
-            return False
-        piece_max = piece.max_dimension_mm
-        if not isinstance(piece_max, (int, float)):
-            return False
-        return float(piece_max) > layer_max
+        return not fits_dimension(piece.max_dimension_mm, self._layerMaxDimensionMm(layer_index))
 
     def _isLayerUsable(self, layer_index: int) -> bool:
         """Check whether this layer is currently usable for a sort move.
@@ -1009,29 +1025,45 @@ class Positioning(BaseState):
         return True
 
     def _findOrAssignBinForCategory(
-        self, category_id: str, not_in_inventory: bool = False
+        self, category_id: str, *, piece, not_in_inventory: bool = False
     ) -> tuple[Optional[BinAddress], bool]:
         # ``not_in_inventory`` selects which bin pool to search. Pieces absent
         # from the active .bsx route only among bins flagged not-in-inventory;
         # everyone else routes only among the normal bins. The two pools never
         # mix. Within the not-in-inventory pool, overlap (multi-category) is
         # always allowed as the last resort ("if we run out, overlap them").
-        from local_state import get_current_bin_piece_counts
+        from local_state import get_current_bin_occupancy_evidence
 
-        piece_counts = get_current_bin_piece_counts()
+        self._no_fit_layer_index = None
+        self._uncertain_destination_blocked = False
+        # Read errors propagate. An unavailable ledger must never look like an
+        # empty set of bins and cause a new assignment.
+        occupancy = get_current_bin_occupancy_evidence()
         # A category may be assigned to more than one bin (the same category_id
         # appears in several bins' category_ids). When that happens we spread the
         # load by picking uniformly at random among every reachable, non-full bin
         # holding it — so N bins each take ~1/N of the pieces. Collected across
         # the whole scan; the pick happens after the loop.
         matching_candidates: list[BinAddress] = []
-        first_unassigned: Optional[tuple[BinAddress, "Bin"]] = None
-        # Least-loaded shared-bin candidate, used only when every bin is
-        # already assigned and multi-category bins are enabled: (num_categories,
-        # piece_count, address, bin). Picking the bin with the fewest categories
-        # (tie-break: fewest pieces) spreads new categories evenly.
-        best_combine: Optional[tuple[int, int, BinAddress, "Bin"]] = None
+        first_occupied_match: Optional[tuple[BinAddress, "Bin", list[str]]] = None
+        first_unassigned: Optional[tuple[BinAddress, "Bin", list[str]]] = None
+        # Occupied unlabeled bins join the shared fallback under the same
+        # policy as labeled bins; their recorded categories remain assigned.
+        # (num_categories, piece_count, address, bin, existing_categories)
+        best_combine: Optional[tuple[int, int, BinAddress, "Bin", list[str]]] = None
+        no_fit_matching: Optional[int] = None
+        no_fit_occupied_match: Optional[int] = None
+        no_fit_unassigned: Optional[int] = None
+        no_fit_combine: Optional[int] = None
         has_usable_layers = False
+        sharing_allowed: bool | None = None
+        uncertain_candidate = False
+
+        def can_share() -> bool:
+            nonlocal sharing_allowed
+            if sharing_allowed is None:
+                sharing_allowed = not_in_inventory or _allowMultiCategoryBins()
+            return sharing_allowed
 
         # Debug trace — categorizes every bin we looked at and why it was
         # skipped. Dumped below when the whole search comes back empty.
@@ -1064,30 +1096,64 @@ class Positioning(BaseState):
                     if not self.chute.isBinReachable(address):
                         unreachable_bins += 1
                         continue
-                    count = piece_counts.get((layer_idx, section_idx, bin_idx), 0)
+                    count, recorded = occupancy.get((layer_idx, section_idx, bin_idx), (0, {}))
                     is_full = max_per_bin is not None and count >= max_per_bin
-                    if (
-                        category_id != MISC_CATEGORY
-                        and category_id in b.category_ids
-                        and not is_full
-                    ):
-                        matching_candidates.append(address)
+                    if is_full:
+                        full_bins += 1
                         continue
                     if b.category_ids:
                         bins_with_cats += 1
-                    if is_full:
-                        full_bins += 1
-                    if not b.category_ids and first_unassigned is None:
-                        first_unassigned = (address, b)
-                    if (
-                        category_id != MISC_CATEGORY
-                        and b.category_ids
-                        and not is_full
-                        and MISC_CATEGORY not in b.category_ids
-                    ):
-                        candidate = (len(b.category_ids), count, address, b)
-                        if best_combine is None or candidate[:2] < best_combine[:2]:
+                    result = classify_bin(category_id, tuple(b.category_ids), count, recorded,
+                                          allow_sharing=False, misc=MISC_CATEGORY)
+                    if result.kind == "no_share" and can_share():
+                        result = classify_bin(category_id, tuple(b.category_ids), count, recorded,
+                                              allow_sharing=True, misc=MISC_CATEGORY)
+                    if result.kind in ("uncertain_contents", "recorded_misc", "incompatible_contents"):
+                        if result.kind == "uncertain_contents":
+                            known_categories = {
+                                category for category, qty in recorded.items()
+                                if isinstance(category, str) and category and type(qty) is int and qty > 0
+                            }
+                            labels = set(b.category_ids)
+                            known_compatible = (
+                                known_categories.issubset(labels) if labels else
+                                not known_categories or known_categories == {category_id} or can_share()
+                            )
+                            if (
+                                category_id != MISC_CATEGORY
+                                and MISC_CATEGORY not in labels | known_categories
+                                and known_compatible
+                                and (not labels or category_id in labels or can_share())
+                                and not self._exceedsLayerMaxDimension(piece, layer_idx)
+                            ):
+                                # Keep the bin excluded. Only uncertainty in an otherwise
+                                # possible destination can permit automatic reject.
+                                uncertain_candidate = True
+                        skipped.append(f"bin{layer_idx}:{section_idx}:{bin_idx}={result.kind}")
+                        continue
+                    fits = not self._exceedsLayerMaxDimension(piece, layer_idx)
+                    if result.kind == "assigned_match":
+                        if fits:
+                            matching_candidates.append(address)
+                        elif no_fit_matching is None:
+                            no_fit_matching = layer_idx
+                    elif result.kind == "recorded_match":
+                        if fits and first_occupied_match is None:
+                            first_occupied_match = (address, b, list(result.assignments))
+                        elif not fits and no_fit_occupied_match is None:
+                            no_fit_occupied_match = layer_idx
+                    elif result.kind == "empty":
+                        if fits and first_unassigned is None:
+                            first_unassigned = (address, b, list(result.assignments))
+                        elif not fits and no_fit_unassigned is None:
+                            no_fit_unassigned = layer_idx
+                    elif result.kind == "shared":
+                        categories = list(result.assignments[:-1])
+                        candidate = (len(categories), count, address, b, categories)
+                        if fits and (best_combine is None or candidate[:2] < best_combine[:2]):
                             best_combine = candidate
+                        elif not fits and no_fit_combine is None:
+                            no_fit_combine = layer_idx
 
         if not has_usable_layers:
             self.logger.warning(
@@ -1115,10 +1181,24 @@ class Positioning(BaseState):
         # the chute (rendered in the UI as the virtual Discard Bin) is what
         # catches misc passthrough; treating MISC as a physical bin category
         # silently swaps that behavior.
+        if first_occupied_match is not None and category_id != MISC_CATEGORY:
+            address, b, categories = first_occupied_match
+            new_assignments = extractCategories(self.layout)
+            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
+            setBinCategories(new_assignments)
+            b.category_ids = categories
+            self.logger.info(
+                f"Positioning: restored category {category_id} for occupied bin at "
+                f"layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
+            )
+            return address, True
+
         if first_unassigned is not None and category_id != MISC_CATEGORY:
-            address, b = first_unassigned
-            b.category_ids = [category_id]
-            setBinCategories(extractCategories(self.layout))
+            address, b, categories = first_unassigned
+            new_assignments = extractCategories(self.layout)
+            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
+            setBinCategories(new_assignments)
+            b.category_ids = categories
             self.logger.info(
                 f"Positioning: assigned category {category_id} to bin at layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
             )
@@ -1132,11 +1212,13 @@ class Positioning(BaseState):
         if (
             category_id != MISC_CATEGORY
             and best_combine is not None
-            and (not_in_inventory or _allowMultiCategoryBins())
         ):
-            _, _, address, b = best_combine
-            b.category_ids.append(category_id)
-            setBinCategories(extractCategories(self.layout))
+            _, _, address, b, existing_categories = best_combine
+            categories = [*existing_categories, category_id]
+            new_assignments = extractCategories(self.layout)
+            new_assignments[address.layer_index][address.section_index][address.bin_index] = categories
+            setBinCategories(new_assignments)
+            b.category_ids = categories
             self.logger.info(
                 f"Positioning: combined category {category_id} into shared bin at "
                 f"layer={address.layer_index}, section={address.section_index}, "
@@ -1144,13 +1226,12 @@ class Positioning(BaseState):
             )
             return address, True
 
-        if category_id != MISC_CATEGORY and not not_in_inventory:
-            # No bin slot available for this category; fall back to MISC,
-            # which will only succeed if the operator pre-assigned a bin
-            # to MISC. Otherwise it returns None and the piece passes
-            # through to the discard bucket. Not-in-inventory pieces never fall
-            # back to a normal MISC bin — they stay in their pool or pass through.
-            return self._findOrAssignBinForCategory(MISC_CATEGORY)
+        if category_id != MISC_CATEGORY:
+            self._no_fit_layer_index = next(
+                (layer for layer in (no_fit_matching, no_fit_occupied_match, no_fit_unassigned, no_fit_combine) if layer is not None),
+                None,
+            )
+            self._uncertain_destination_blocked = uncertain_candidate and self._no_fit_layer_index is None
 
         self.logger.info(
             f"Positioning: MISC has no assigned bin — passthrough to discard bucket "

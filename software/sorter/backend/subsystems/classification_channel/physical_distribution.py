@@ -2,7 +2,9 @@
 
 import time
 
-from defs.known_object import ClassificationStatus, PieceStage
+from defs.known_object import (
+    ClassificationStatus, HARVEST_CONFIRMATION_UNCREDITED, PieceStage,
+)
 from utils.event import knownObjectToEvent
 from .demand_planner import ChuteObservation
 from .physical_fifo import PocketState
@@ -18,10 +20,11 @@ def destination(piece):
 
 
 class PhysicalDistribution:
-    def __init__(self, shared, event_queue, gc=None):
+    def __init__(self, shared, event_queue, gc=None, *, native_completion=None):
         self.shared, self.events = shared, event_queue
         self.gc = gc
         self.transport = shared.transport
+        self.native_completion = native_completion
         self.recovering = False
 
     def reject(self, piece, reason):
@@ -44,8 +47,34 @@ class PhysicalDistribution:
 
     def clear(self):
         drop = self.transport.getPieceForDistributionDrop()
+        if self.native_completion is not None:
+            if self.native_completion.blocks_admission():
+                return False
+            return self.shared.distribution_ready and (
+                drop is None or self.native_completion.verified_piece(drop)
+            )
+        # This one uncredited abort is terminal after exit; other incomplete
+        # drops and retained motion/completion ownership still block admission.
+        terminal_harvest_failure = (
+            drop is not None
+            and drop.aborted
+            and drop.transport_failure_reason == HARVEST_CONFIRMATION_UNCREDITED
+            and drop.stage is PieceStage.distributing
+            and drop.distributed_at is None
+            and drop.c4_marker_exit_boundary is not None
+            and self.transport.getPieceForDistributionPositioning() is not drop
+            and not self.shared.chute_move_in_progress
+            and not any(
+                getattr(drop, name, None) is not None
+                for name in ("native_machine_id", "native_reservation_id", "native_delivery_id")
+            )
+        )
+        if terminal_harvest_failure:
+            guard = getattr(self.shared, "native_completion_guard", None)
+            terminal_harvest_failure = guard is None or not guard.blocks_admission()
         return self.shared.distribution_ready and (
             drop is None or drop.stage is PieceStage.distributed
+            or terminal_harvest_failure
         )
 
     def observe(self, runtime, now):
@@ -113,10 +142,33 @@ class PhysicalDistribution:
                 "confirmed C4 exit has inconsistent distribution ownership"
             )
         obj = binding.piece
+        native = self.native_completion
+        if native is None:
+            if (getattr(binding, "reservation_id", None) is not None
+                or getattr(obj, "native_reservation_id", None) is not None):
+                raise RuntimeError("guarded C4 exit has no completion adapter")
+        else:
+            if getattr(self.transport, "dynamic_mode", False):
+                raise RuntimeError("guarded C4 discharge requires staged transport")
+            prior_guard = getattr(self.shared, "native_completion_guard", None)
+            if (prior_guard is not None and prior_guard is not native
+                and prior_guard.blocks_admission()):
+                raise RuntimeError("previous guarded completion remains held")
+            handoff = native.capture_handoff(event, binding)
+            self.shared.native_completion_guard = native
+            # Fence the route before the transport slot changes. Any failure
+            # leaves the native identity retained for explicit reconciliation.
+            self.shared.set_distribution_gate(False, reason="guarded C4 handoff")
+            native.retain_handoff(handoff, transport=self.transport)
         obj.c4_marker_exit_boundary = event.boundary
         obj.c4_pocket_id, obj.c4_generation = binding.key
         obj.updated_at = time.time()
-        self.transport.advanceTransport()
+        advanced = self.transport.advanceTransport()
+        if native is not None and (
+            advanced.piece_for_distribution_drop is not obj
+            or self.transport.getPieceForDistributionDrop() is not obj
+        ):
+            raise RuntimeError("guarded transport did not retain the discharged piece")
         self.shared.set_distribution_gate(False, reason="marker-confirmed C4 discharge")
 
     def begin_recovery(self):

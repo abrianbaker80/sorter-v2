@@ -248,7 +248,29 @@ def _writeCrop(jpeg: bytes, meta: dict[str, Any]) -> None:
         conn.commit()
 
 
+def _unlinkEvictedFiles(rel_paths: list[str], base_dir: Path) -> None:
+    # Delete first, then try each non-root parent once. A nonempty parent
+    # makes rmdir fail without enumerating its contents.
+    parents: set[Path] = set()
+    for rel_path in rel_paths:
+        abs_path = base_dir / rel_path
+        try:
+            abs_path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        if abs_path.parent != base_dir:
+            parents.add(abs_path.parent)
+    for parent in parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
 def _retentionSweep() -> None:
+    # Select with a short read, close it before filesystem work, then commit
+    # tombstones in one batch. If that commit fails, the next sweep selects
+    # the still-active rows and tolerates files already removed.
     with _connection() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(bytes), 0) AS total FROM channel_crops WHERE deleted_at IS NULL"
@@ -263,34 +285,30 @@ def _retentionSweep() -> None:
             "SELECT id, file_path, bytes FROM channel_crops WHERE deleted_at IS NULL "
             "ORDER BY (synced_at IS NULL) ASC, created_at ASC LIMIT 1000"
         ).fetchall()
-        now = time.time()
-        freed = 0
-        evicted = 0
-        for r in rows:
-            if freed >= overage:
-                break
-            abs_path = channel_crops_dir() / str(r["file_path"])
-            try:
-                abs_path.unlink(missing_ok=True)
-                parent = abs_path.parent
-                if parent != channel_crops_dir() and not any(parent.iterdir()):
-                    parent.rmdir()
-            except OSError:
-                pass
-            conn.execute(
-                "UPDATE channel_crops SET deleted_at = ? WHERE id = ?",
-                (now, int(r["id"])),
-            )
-            freed += int(r["bytes"] or 0)
-            evicted += 1
-        conn.commit()
-    if evicted:
-        with _stats_lock:
-            _stats["evicted_files"] += evicted
-        _log(
-            "info",
-            f"channel_crop_store: retention evicted {evicted} files ({freed / 1024 / 1024:.1f} MB)",
+    victims: list[tuple[int, str]] = []
+    freed = 0
+    for r in rows:
+        if freed >= overage:
+            break
+        victims.append((int(r["id"]), str(r["file_path"])))
+        freed += int(r["bytes"] or 0)
+    if not victims:
+        return
+    _unlinkEvictedFiles([rel_path for _, rel_path in victims], channel_crops_dir())
+    now = time.time()
+    with _connection() as conn:
+        conn.executemany(
+            "UPDATE channel_crops SET deleted_at = ? WHERE id = ?",
+            [(now, crop_id) for crop_id, _ in victims],
         )
+        conn.commit()
+    evicted = len(victims)
+    with _stats_lock:
+        _stats["evicted_files"] += evicted
+    _log(
+        "info",
+        f"channel_crop_store: retention evicted {evicted} files ({freed / 1024 / 1024:.1f} MB)",
+    )
 
 
 def _rowToDict(r: sqlite3.Row) -> dict[str, Any]:

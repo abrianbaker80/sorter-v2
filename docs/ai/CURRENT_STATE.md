@@ -1,3 +1,13 @@
+# Project policy and historical state
+
+[Brian's authoritative project boundaries](../../AGENTS.md) and
+[the active workflow](../CODEX_WORKFLOW.md) govern current work. The dated entries
+below record historical implementation, deployment and validation snapshots;
+they are not live machine state, current authorization or additional recovery
+and qualification gates. Their contents and accepted evidence are preserved.
+The default reject-and-continue policy is documented only; this instruction
+update implements no runtime change and does not authorize one.
+
 ## Physical C4 runtime Slice 3 COMPLETE LOCALLY - 2026-09-23
 
 PhysicalC4Controller/PhysicalC4Runtime now compose the ten-pocket FIFO,

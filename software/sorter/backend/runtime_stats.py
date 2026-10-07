@@ -107,6 +107,9 @@ class RuntimeStatsCollector:
         self._running_total_s = 0.0
         self._running_started_at_monotonic: float | None = None
         self._piece_by_uuid: dict[str, dict[str, Any]] = {}
+        # Verified native provenance must survive lookup LRU eviction, including
+        # observations received while the runtime was paused. It carries no count.
+        self._native_provenance_by_uuid: dict[str, dict[str, str | None]] = {}
         # Bounded LRU of every KnownObject payload we've ever observed in this
         # process, keyed by uuid. Populated unconditionally (even when the
         # machine is not running) so the frontend can look up a piece by
@@ -456,13 +459,42 @@ class RuntimeStatsCollector:
         obj_uuid = obj.get("uuid")
         if not obj_uuid:
             return
+        # Native provenance is sticky across partial event updates. Its delivery
+        # identity is verified against the ledger before it can suppress the
+        # legacy bin writer; a pending native reservation never earns credit.
+        merged = dict(self._piece_by_uuid.get(obj_uuid, {}))
+        merged.update(self._known_object_lookup.get(obj_uuid, {}))
+        native_fields = ("native_machine_id", "native_reservation_id", "native_delivery_id")
+        merged.update(self._native_provenance_by_uuid.get(obj_uuid, {}))
+        for key, value in obj.items():
+            if key in native_fields and merged.get(key) is not None:
+                if value is None:
+                    continue
+                if value != merged[key]:
+                    raise ValueError("native completion provenance changed")
+            merged[key] = value
+        native = any(merged.get(key) is not None for key in native_fields)
+        if native:
+            from smart_bins_native_completion import verify_native_identity
+
+            verify_native_identity(
+                merged.get("native_machine_id"), merged.get("native_reservation_id"),
+                obj_uuid, merged.get("native_delivery_id"))
+            if merged.get("native_delivery_id") is None and (
+                merged.get("distributed_at") is not None
+                or getattr(merged.get("stage"), "value", merged.get("stage")) == "distributed"
+            ):
+                raise ValueError("native distributed observation lacks a delivery receipt")
+            self._native_provenance_by_uuid[obj_uuid] = {
+                key: merged.get(key) for key in native_fields
+            }
         # Keep the long-lived lookup fresh for every observation, even while
         # not running — so the detail page can hydrate a piece by uuid even
         # after lifecycle transitions. LRU-evicted once bounded.
         lookup_entry = self._known_object_lookup.pop(obj_uuid, None)
         if lookup_entry is None:
             lookup_entry = {}
-        lookup_entry.update(obj)
+        lookup_entry.update(merged)
         self._known_object_lookup[obj_uuid] = lookup_entry
         self._observeTransferCompletion(lookup_entry)
         while len(self._known_object_lookup) > MAX_KNOWN_OBJECT_LOOKUP_ENTRIES:
@@ -472,11 +504,12 @@ class RuntimeStatsCollector:
         if not self._is_running or lookup_entry.get("transport_failure_reason") == UNVERIFIED_C4_HANDOFF:
             return
         current = self._piece_by_uuid.get(obj_uuid, {})
-        current.update(obj)
+        current.update(merged)
         self._piece_by_uuid[obj_uuid] = current
         self._last_updated_at = time.time()
 
-        if current.get("distributed_at") is not None and current.get("destination_bin") is not None:
+        if (not native and current.get("distributed_at") is not None
+            and current.get("destination_bin") is not None):
             try:
                 from local_state import record_piece_distribution
 

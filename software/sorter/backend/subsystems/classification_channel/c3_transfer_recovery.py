@@ -266,15 +266,23 @@ class C3TransferRecovery:
                 f"followers={followers}: {plan['reason']}")
 
     def _retainedPieceVisible(self, observed: dict) -> bool:
-        """Only positive original identity proves C3 retention.
+        """Require supported, unique original identity to prove C3 retention.
 
-        A spatial envelope can follow a replacement track without registering
-        loss. Continuity alone is not proof that the original piece remains.
+        A raw matching ID can be duplicated or jump outside its trajectory.
+        The existing motor owner supplies validated continuity or a retained
+        path; a blocked retained path still proves material needs intervention.
         """
         leader = self._episode.leader_id
-        original = leader is not None and any(p.get('id') == leader for p in
-            (*observed.get('material', []), *observed.get('followers', [])))
-        return bool(original or observed.get('same_piece_retained'))
+        if leader is None:
+            return False
+        original = [p for p in (*observed.get('material', []),
+                                *observed.get('followers', []))
+                    if p.get('id') == leader]
+        if len(original) != 1:
+            return False
+        retained = observed.get('retained_plan')
+        return bool(observed.get('same_piece_retained') or
+                    retained and retained.get('piece', {}).get('id') == leader)
 
     def _discardUnverifiedHandoff(self, now: float, boundary: dict, observed: dict) -> bool:
         """Carry uncertainty in the original FIFO slot after bounded observation.
